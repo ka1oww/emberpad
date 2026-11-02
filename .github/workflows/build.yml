@@ -24,4 +24,4 @@ jobs:
           zsh -n resign/renew.zsh
           zsh -n resign/config.example.zsh
           plutil -lint resign/dev.emberpad.renew.plist Apps/EmberPad/Info.plist Apps/Companion/Info.plist
-          python3 -c 'import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ("resign/support.py", "tools/generate_project.py")]'
+          python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("resign/support.py").read_text())'

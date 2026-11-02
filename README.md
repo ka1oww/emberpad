@@ -12,7 +12,6 @@ Base code for a personal offline iPad teaching app. Visual design and the teache
 | `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser and tests |
 | `Config/Shared.xcconfig` | One placeholder `EMBERPAD_BUNDLE_ID`, used by both native platforms |
 | `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
-| `tools/generate_project.py` | Optional standard-library-only project generator; Xcode opens the checked-in project directly |
 
 No third-party app dependencies, extensions, entitlement files or capability-backed services. iPad deployment floor is 17.5, macOS floor is 14.0. The local build is Xcode 26.6 (17F113), iOS/macOS SDK 26.5. CI selects Xcode 26.6 on `macos-26`.
 
@@ -30,7 +29,7 @@ zsh -n resign/renew.zsh
 plutil -lint resign/dev.emberpad.renew.plist
 ```
 
-These commands do not install on a device, provision an App ID or need an Apple account. Never sign the placeholder ID. After adding/removing app source files, regenerate with `python3 tools/generate_project.py` and commit the project change.
+These commands do not install on a device, provision an App ID or need an Apple account. Never sign the placeholder ID. The checked-in `EmberPad.xcodeproj` and shared schemes are the source of truth; commit project changes with source changes.
 
 The GitHub workflow runs package tests, both unsigned builds, and syntax/plist checks. Ink feel, touch routing, Pencil double-tap, rendering at 1x/2x, capture traits, external-display behavior and signing cannot be established by those checks.
 
@@ -69,6 +68,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 
 - Final bundle ID, Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
+- **Must resolve before first classroom use:** until the captain decides how Teacher answer copies are identified, opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
 - Sharing/recording method and the external-display/capture tests. Private answer pairing and whether answers can be annotated.
 - Scroll versus page navigation, visual design and tool presentation.
 - Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, recording, scribble detection, backup/export, lasso/eraser extras, and any Ember publish hook.
