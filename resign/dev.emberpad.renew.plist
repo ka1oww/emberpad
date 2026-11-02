@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>Label</key><string>dev.emberpad.renew</string>
+    <key>ProgramArguments</key><array><string>/bin/zsh</string><string>__REPO_PATH__/resign/renew.zsh</string></array>
+    <key>EnvironmentVariables</key><dict>
+        <key>EMBERPAD_RESIGN_CONFIG</key><string>__CONFIG_PATH__</string>
+        <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>StartCalendarInterval</key><dict><key>Minute</key><integer>0</integer></dict>
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
+    <key>AssociatedBundleIdentifiers</key><array><string>__BUNDLE_ID__</string></array>
+    <key>ProcessType</key><string>Background</string>
+</dict></plist>

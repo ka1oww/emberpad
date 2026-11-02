@@ -10,6 +10,7 @@ public struct PreviousVersion: Codable, Equatable, Sendable {
 public actor LibraryStore {
     public nonisolated let root: URL
     private let files = FileManager.default
+    private var documentPins: [UUID: Int] = [:]
 
     public init(root: URL) throws {
         self.root = root
@@ -28,6 +29,12 @@ public actor LibraryStore {
 
     public func document(_ id: UUID) throws -> DocumentRecord { try read(id) }
 
+    public func pinDocument(_ id: UUID) throws { _ = try read(id); documentPins[id, default: 0] += 1 }
+    public func unpinDocument(_ id: UUID) {
+        let remaining = max(0, (documentPins[id] ?? 0) - 1)
+        documentPins[id] = remaining == 0 ? nil : remaining
+    }
+
     public func originalURL(documentID: UUID) throws -> URL {
         _ = try read(documentID)
         let url = folder(documentID).appendingPathComponent("original.pdf")
@@ -42,6 +49,7 @@ public actor LibraryStore {
         let entry = try ManifestEntry(source: source, sha256: .digest(data), size: Int64(data.count), modifiedAt: now)
         let existing = try documents().first { $0.status == .current && $0.source.source == source }
         if let existing, existing.source.sha256 == entry.sha256 { return existing }
+        if let existing, !existing.hasInk, documentPins[existing.id, default: 0] > 0 { throw LibraryError.documentInUse }
         var record = DocumentRecord(source: entry, pageCount: pageCount, importedAt: now)
         guard var existing else {
             try create(record, pdf: data)

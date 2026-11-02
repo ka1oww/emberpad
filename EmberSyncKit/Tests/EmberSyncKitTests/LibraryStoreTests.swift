@@ -3,6 +3,24 @@ import Testing
 @testable import EmberSyncKit
 
 struct LibraryStoreTests {
+    @Test func openWorksheetCannotBeReplacedUnderItsCanvas() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LibraryStore(root: root)
+        let source = try fixtureEntry().source
+        let doc = try await store.importPDF(data: Data("first".utf8), source: source, pageCount: 1)
+        try await store.pinDocument(doc.id)
+        try await store.pinDocument(doc.id)
+        await store.unpinDocument(doc.id)
+        await #expect(throws: LibraryError.documentInUse) {
+            try await store.importPDF(data: Data("second".utf8), source: source, pageCount: 1)
+        }
+        #expect(try Data(contentsOf: root.appendingPathComponent(doc.id.uuidString + "/original.pdf")) == Data("first".utf8))
+        await store.unpinDocument(doc.id)
+        let updated = try await store.importPDF(data: Data("second".utf8), source: source, pageCount: 1)
+        #expect(updated.source.sha256 == ContentHash.digest(Data("second".utf8)))
+    }
+
     @Test func importPersistsUntouchedOriginalAndPerPageDrawingAfterReopen() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -28,7 +46,10 @@ struct LibraryStoreTests {
         #expect(first.id == second.id)
         #expect(second.pageCount == 3)
         #expect(try await store.documents().count == 1)
-        #expect(try await store.previousVersions().count == 1)
+        let versions = try await store.previousVersions()
+        #expect(versions.count == 1)
+        let previous = try #require(versions.first)
+        #expect(try Data(contentsOf: root.appendingPathComponent(".Previous/" + previous.id.uuidString + "/original.pdf")) == Data("first".utf8))
         try await store.prunePreviousVersions(now: fixtureDate.addingTimeInterval(30 * 86_400 - 1))
         #expect(try await store.previousVersions().count == 1)
         try await store.prunePreviousVersions(now: fixtureDate.addingTimeInterval(30 * 86_400))
@@ -84,7 +105,7 @@ struct LibraryStoreTests {
         #expect(try await store.drawing(documentID: doc.id, page: 0) == Data([1, 2]))
     }
 
-    @Test func corruptMetadataAndSymlinkedFoldersFailWithoutOverwriting() async throws {
+    @Test func corruptMetadataFailsWithoutOverwriting() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try LibraryStore(root: root)
@@ -93,6 +114,51 @@ struct LibraryStoreTests {
         try Data("broken".utf8).write(to: metadata)
         await #expect(throws: (any Error).self) { try await store.documents() }
         #expect(try Data(contentsOf: metadata) == Data("broken".utf8))
+    }
+
+    @Test func symlinkedDocumentFolderCannotReadOrWriteOutsideLibrary() async throws {
+        let root = temporaryRoot()
+        let outside = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: outside) }
+        let store = try LibraryStore(root: root)
+        let doc = try await store.importPDF(data: Data("pdf".utf8), source: fixtureEntry().source, pageCount: 1)
+        let folder = root.appendingPathComponent(doc.id.uuidString)
+        try FileManager.default.moveItem(at: folder, to: outside)
+        try FileManager.default.createSymbolicLink(at: folder, withDestinationURL: outside)
+        await #expect(throws: (any Error).self) { try await store.documents() }
+        await #expect(throws: (any Error).self) { try await store.saveDrawing(Data([1]), documentID: doc.id, page: 0, hasInk: true) }
+        #expect(!FileManager.default.fileExists(atPath: outside.appendingPathComponent("page-0.drawing").path))
+    }
+
+    @Test func interruptedUninkedReplacementRecoversNewCopyAndRetainsOriginal() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LibraryStore(root: root)
+        let source = try fixtureEntry().source
+        let old = try await store.importPDF(data: Data("old".utf8), source: source, pageCount: 1, now: fixtureDate)
+        let previousID = UUID(), stageID = UUID()
+        let previous = root.appendingPathComponent(".Previous/" + previousID.uuidString)
+        let stage = root.appendingPathComponent(".staging-" + stageID.uuidString)
+        try FileManager.default.createDirectory(at: previous.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+        let newerEntry = try ManifestEntry(source: source, sha256: .digest(Data("new".utf8)), size: 3, modifiedAt: fixtureDate)
+        let newer = DocumentRecord(id: old.id, source: newerEntry, pageCount: 1, importedAt: fixtureDate)
+        try ManifestCodec.encoder().encode(newer).write(to: stage.appendingPathComponent("doc.json"))
+        try Data("new".utf8).write(to: stage.appendingPathComponent("original.pdf"))
+        let oldFolder = root.appendingPathComponent(old.id.uuidString)
+        try ManifestCodec.encoder().encode(PreviousVersion(id: previousID, documentID: old.id,
+                                                           expiresAt: fixtureDate.addingTimeInterval(30 * 86400)))
+            .write(to: oldFolder.appendingPathComponent("retention.json"))
+        let journal = ["documentID": old.id.uuidString, "previousID": previousID.uuidString, "stageID": stageID.uuidString]
+        try JSONEncoder().encode(journal).write(to: root.appendingPathComponent(".replacement.json"))
+        // A process interruption after moving the old version but before committing the staged one.
+        try FileManager.default.moveItem(at: oldFolder, to: previous)
+        let reopened = try LibraryStore(root: root)
+        #expect(try await reopened.documents().first?.source.sha256 == newerEntry.sha256)
+        #expect(try Data(contentsOf: oldFolder.appendingPathComponent("original.pdf")) == Data("new".utf8))
+        #expect(try Data(contentsOf: previous.appendingPathComponent("original.pdf")) == Data("old".utf8))
+        #expect(try await reopened.previousVersions().count == 1)
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(".replacement.json").path))
     }
 
     @Test func inboxKeepsNestedClassesSkipsNonPDFsAndSymlinks() throws {

@@ -1,0 +1,12 @@
+// Change only this setting after the teacher approves a final ID. Never sign the placeholder.
+EMBERPAD_BUNDLE_ID = dev.emberpad.placeholder
+PRODUCT_BUNDLE_IDENTIFIER = $(EMBERPAD_BUNDLE_ID)
+SWIFT_VERSION = 5.0
+CLANG_ENABLE_MODULES = YES
+CODE_SIGN_STYLE = Automatic
+// Personal Team selected only during the supervised one-time setup.
+DEVELOPMENT_TEAM =
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+ENABLE_USER_SCRIPT_SANDBOXING = YES
+GENERATE_INFOPLIST_FILE = NO

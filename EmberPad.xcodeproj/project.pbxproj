@@ -1,0 +1,466 @@
+// !$*UTF8*$!
+{
+	"archiveVersion" = "1";
+	"classes" = {
+	};
+	"objectVersion" = "56";
+	"objects" = {
+		"88CEAA489E5229503EE15E09" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "text.xcconfig";
+			"path" = "Config/Shared.xcconfig";
+			"sourceTree" = "<group>";
+		};
+		"582681C2EAE02B3F3D399C0C" = {
+			"isa" = "XCLocalSwiftPackageReference";
+			"relativePath" = "EmberSyncKit";
+		};
+		"A4E344B739AE9EA58AE3BBB9" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "AppDelegate.swift";
+			"sourceTree" = "<group>";
+		};
+		"2519156E8D7AFCF69119BFDC" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "A4E344B739AE9EA58AE3BBB9";
+		};
+		"10AD64BA1F7D673BA12B2D5E" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "DocumentSession.swift";
+			"sourceTree" = "<group>";
+		};
+		"1A9117EC6621407DBA07AFDB" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "10AD64BA1F7D673BA12B2D5E";
+		};
+		"24C17728397B9CB6024AC349" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "text.plist.xml";
+			"path" = "Info.plist";
+			"sourceTree" = "<group>";
+		};
+		"3C469E71A049F3F65DBA6CD7" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "LibraryController.swift";
+			"sourceTree" = "<group>";
+		};
+		"619232CD022DA2B673D0BCF6" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "3C469E71A049F3F65DBA6CD7";
+		};
+		"3744A11344341001EB5C64E8" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "LibraryView.swift";
+			"sourceTree" = "<group>";
+		};
+		"FF99392DEBB043C0229DE171" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "3744A11344341001EB5C64E8";
+		};
+		"C0D287985FC6CC222EF156D1" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "PDFOverlayPageController.swift";
+			"sourceTree" = "<group>";
+		};
+		"603C6AE954E194ABF080595D" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "C0D287985FC6CC222EF156D1";
+		};
+		"4B20731C8CA7D07682A9A9A2" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "PageRenderer.swift";
+			"sourceTree" = "<group>";
+		};
+		"30E4DB98598BFC451BB19A49" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "4B20731C8CA7D07682A9A9A2";
+		};
+		"319C52DAD2F545565DA216E4" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Presentation.swift";
+			"sourceTree" = "<group>";
+		};
+		"6F856983EADBEC49E7B37989" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "319C52DAD2F545565DA216E4";
+		};
+		"87F76E29CE94C57C83FE042E" = {
+			"isa" = "PBXGroup";
+			"children" = (
+				"A4E344B739AE9EA58AE3BBB9",
+				"10AD64BA1F7D673BA12B2D5E",
+				"24C17728397B9CB6024AC349",
+				"3C469E71A049F3F65DBA6CD7",
+				"3744A11344341001EB5C64E8",
+				"C0D287985FC6CC222EF156D1",
+				"4B20731C8CA7D07682A9A9A2",
+				"319C52DAD2F545565DA216E4",
+			);
+			"path" = "Apps/EmberPad";
+			"sourceTree" = "<group>";
+		};
+		"3F1296ACA933E1FB442C022A" = {
+			"isa" = "PBXFileReference";
+			"explicitFileType" = "wrapper.application";
+			"includeInIndex" = "0";
+			"path" = "EmberPad.app";
+			"sourceTree" = "BUILT_PRODUCTS_DIR";
+		};
+		"1BF4FA0CBB2027BDC4CB8052" = {
+			"isa" = "XCSwiftPackageProductDependency";
+			"package" = "582681C2EAE02B3F3D399C0C";
+			"productName" = "EmberSyncKit";
+		};
+		"0D258B9F4FA2280085B6C81F" = {
+			"isa" = "PBXBuildFile";
+			"productRef" = "1BF4FA0CBB2027BDC4CB8052";
+		};
+		"66B86976FBF5F75998A4F319" = {
+			"isa" = "PBXSourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+				"2519156E8D7AFCF69119BFDC",
+				"1A9117EC6621407DBA07AFDB",
+				"619232CD022DA2B673D0BCF6",
+				"FF99392DEBB043C0229DE171",
+				"603C6AE954E194ABF080595D",
+				"30E4DB98598BFC451BB19A49",
+				"6F856983EADBEC49E7B37989",
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"B7894FEFC203C0322E4E89D9" = {
+			"isa" = "PBXFrameworksBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+				"0D258B9F4FA2280085B6C81F",
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"EBFD60C8E324E132289E8989" = {
+			"isa" = "PBXResourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"0130B140B452F00A6A0F562C" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"PRODUCT_NAME" = "EmberPad";
+				"PRODUCT_MODULE_NAME" = "EmberPad";
+				"INFOPLIST_FILE" = "Apps/EmberPad/Info.plist";
+				"SDKROOT" = "iphoneos";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "17.5";
+				"TARGETED_DEVICE_FAMILY" = "2";
+				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
+				"SUPPORTS_MACCATALYST" = "NO";
+				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+			};
+			"name" = "Debug";
+			"baseConfigurationReference" = "88CEAA489E5229503EE15E09";
+		};
+		"19D4792C9F2790333A70D4F3" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"PRODUCT_NAME" = "EmberPad";
+				"PRODUCT_MODULE_NAME" = "EmberPad";
+				"INFOPLIST_FILE" = "Apps/EmberPad/Info.plist";
+				"SDKROOT" = "iphoneos";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "17.5";
+				"TARGETED_DEVICE_FAMILY" = "2";
+				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
+				"SUPPORTS_MACCATALYST" = "NO";
+				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+			};
+			"name" = "Release";
+			"baseConfigurationReference" = "88CEAA489E5229503EE15E09";
+		};
+		"B1A8DE8C5CF4E1240B66EF5F" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = (
+				"0130B140B452F00A6A0F562C",
+				"19D4792C9F2790333A70D4F3",
+			);
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"19EB4B09D78A003EF27A1A7A" = {
+			"isa" = "PBXNativeTarget";
+			"buildConfigurationList" = "B1A8DE8C5CF4E1240B66EF5F";
+			"buildPhases" = (
+				"66B86976FBF5F75998A4F319",
+				"B7894FEFC203C0322E4E89D9",
+				"EBFD60C8E324E132289E8989",
+			);
+			"buildRules" = (
+			);
+			"dependencies" = (
+			);
+			"name" = "EmberPad";
+			"packageProductDependencies" = (
+				"1BF4FA0CBB2027BDC4CB8052",
+			);
+			"productName" = "EmberPad";
+			"productReference" = "3F1296ACA933E1FB442C022A";
+			"productType" = "com.apple.product-type.application";
+		};
+		"5D809EDE60849713E57F62A4" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "EmberPadCompanion.swift";
+			"sourceTree" = "<group>";
+		};
+		"62FFB6AD2C3A122EA2E18F73" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "5D809EDE60849713E57F62A4";
+		};
+		"89934A2EDE0E28D93F251B84" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "text.plist.xml";
+			"path" = "Info.plist";
+			"sourceTree" = "<group>";
+		};
+		"82161665F9E7AED3A1601827" = {
+			"isa" = "PBXGroup";
+			"children" = (
+				"5D809EDE60849713E57F62A4",
+				"89934A2EDE0E28D93F251B84",
+			);
+			"path" = "Apps/Companion";
+			"sourceTree" = "<group>";
+		};
+		"044FE9AE9608555D7674E971" = {
+			"isa" = "PBXFileReference";
+			"explicitFileType" = "wrapper.application";
+			"includeInIndex" = "0";
+			"path" = "EmberPad Companion.app";
+			"sourceTree" = "BUILT_PRODUCTS_DIR";
+		};
+		"2BB849F50699AF6C557735C3" = {
+			"isa" = "XCSwiftPackageProductDependency";
+			"package" = "582681C2EAE02B3F3D399C0C";
+			"productName" = "EmberSyncKit";
+		};
+		"00758E2B3A2AA633A74057A9" = {
+			"isa" = "PBXBuildFile";
+			"productRef" = "2BB849F50699AF6C557735C3";
+		};
+		"5190867FB8D1E6FFE35BCABC" = {
+			"isa" = "PBXSourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+				"62FFB6AD2C3A122EA2E18F73",
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"9E03000969D7E6CF1005016F" = {
+			"isa" = "PBXFrameworksBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+				"00758E2B3A2AA633A74057A9",
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"BF4A8CF299B68EF53F3F7886" = {
+			"isa" = "PBXResourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"C5BB85979BEC08B7DDB7545F" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"PRODUCT_NAME" = "EmberPad Companion";
+				"PRODUCT_MODULE_NAME" = "EmberPadCompanion";
+				"INFOPLIST_FILE" = "Apps/Companion/Info.plist";
+				"SDKROOT" = "macosx";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"SUPPORTED_PLATFORMS" = "macosx";
+				"ENABLE_APP_SANDBOX" = "NO";
+				"ENABLE_HARDENED_RUNTIME" = "NO";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+			};
+			"name" = "Debug";
+			"baseConfigurationReference" = "88CEAA489E5229503EE15E09";
+		};
+		"C3DC2436292009F000012689" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"PRODUCT_NAME" = "EmberPad Companion";
+				"PRODUCT_MODULE_NAME" = "EmberPadCompanion";
+				"INFOPLIST_FILE" = "Apps/Companion/Info.plist";
+				"SDKROOT" = "macosx";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"SUPPORTED_PLATFORMS" = "macosx";
+				"ENABLE_APP_SANDBOX" = "NO";
+				"ENABLE_HARDENED_RUNTIME" = "NO";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+			};
+			"name" = "Release";
+			"baseConfigurationReference" = "88CEAA489E5229503EE15E09";
+		};
+		"3E788BB2FBA1F982CA90B3A6" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = (
+				"C5BB85979BEC08B7DDB7545F",
+				"C3DC2436292009F000012689",
+			);
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"5E40FA52A92C13B0AAF39BC2" = {
+			"isa" = "PBXNativeTarget";
+			"buildConfigurationList" = "3E788BB2FBA1F982CA90B3A6";
+			"buildPhases" = (
+				"5190867FB8D1E6FFE35BCABC",
+				"9E03000969D7E6CF1005016F",
+				"BF4A8CF299B68EF53F3F7886",
+			);
+			"buildRules" = (
+			);
+			"dependencies" = (
+			);
+			"name" = "EmberPad Companion";
+			"packageProductDependencies" = (
+				"2BB849F50699AF6C557735C3",
+			);
+			"productName" = "EmberPad Companion";
+			"productReference" = "044FE9AE9608555D7674E971";
+			"productType" = "com.apple.product-type.application";
+		};
+		"EEB8777364E42B79F23DAD92" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+			};
+			"name" = "Debug";
+		};
+		"63B321CA5712557E29F88130" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+			};
+			"name" = "Release";
+		};
+		"D6306274055244BA6CED2090" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = (
+				"EEB8777364E42B79F23DAD92",
+				"63B321CA5712557E29F88130",
+			);
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"8D4AE7A0EE7D311C9AB7EBD2" = {
+			"isa" = "PBXAggregateTarget";
+			"buildConfigurationList" = "D6306274055244BA6CED2090";
+			"buildPhases" = (
+			);
+			"dependencies" = (
+			);
+			"name" = "resign";
+			"productName" = "resign";
+		};
+		"FBDC4F23F93125BBEEAE800C" = {
+			"isa" = "PBXGroup";
+			"children" = (
+				"3F1296ACA933E1FB442C022A",
+				"044FE9AE9608555D7674E971",
+			);
+			"name" = "Products";
+			"sourceTree" = "<group>";
+		};
+		"89187C5E9203F8939CEE5A60" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "folder";
+			"path" = "resign";
+			"sourceTree" = "<group>";
+		};
+		"F36D5751F92843FF2FB05F05" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "folder";
+			"path" = "EmberSyncKit";
+			"sourceTree" = "<group>";
+		};
+		"B28B7AF69320201D1CF206EB" = {
+			"isa" = "PBXGroup";
+			"children" = (
+				"88CEAA489E5229503EE15E09",
+				"87F76E29CE94C57C83FE042E",
+				"82161665F9E7AED3A1601827",
+				"F36D5751F92843FF2FB05F05",
+				"89187C5E9203F8939CEE5A60",
+				"FBDC4F23F93125BBEEAE800C",
+			);
+			"sourceTree" = "<group>";
+		};
+		"89E1FD6268CC0F221A2BE178" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"CLANG_ENABLE_MODULES" = "YES";
+				"SWIFT_VERSION" = "5.0";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+			};
+			"name" = "Debug";
+		};
+		"E6DE6C99132752C914FEF632" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"CLANG_ENABLE_MODULES" = "YES";
+				"SWIFT_VERSION" = "5.0";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+			};
+			"name" = "Release";
+		};
+		"862894B703A6DEDF96A9DD6C" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = (
+				"89E1FD6268CC0F221A2BE178",
+				"E6DE6C99132752C914FEF632",
+			);
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"98F54143AB4E86B28C3AFEE0" = {
+			"isa" = "PBXProject";
+			"attributes" = {
+				"BuildIndependentTargetsInParallel" = "YES";
+				"LastUpgradeCheck" = "2660";
+			};
+			"buildConfigurationList" = "862894B703A6DEDF96A9DD6C";
+			"compatibilityVersion" = "Xcode 14.0";
+			"developmentRegion" = "en";
+			"hasScannedForEncodings" = "0";
+			"knownRegions" = (
+				"en",
+				"Base",
+			);
+			"mainGroup" = "B28B7AF69320201D1CF206EB";
+			"packageReferences" = (
+				"582681C2EAE02B3F3D399C0C",
+			);
+			"productRefGroup" = "FBDC4F23F93125BBEEAE800C";
+			"projectDirPath" = "";
+			"projectRoot" = "";
+			"targets" = (
+				"19EB4B09D78A003EF27A1A7A",
+				"5E40FA52A92C13B0AAF39BC2",
+				"8D4AE7A0EE7D311C9AB7EBD2",
+			);
+		};
+	};
+	"rootObject" = "98F54143AB4E86B28C3AFEE0";
+}

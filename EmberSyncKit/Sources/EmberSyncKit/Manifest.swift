@@ -1,8 +1,8 @@
 import Foundation
 import CryptoKit
 
-public enum LibraryError: Error, LocalizedError, Sendable {
-    case invalidPath, invalidHash, invalidManifest, invalidDocument, documentMissing, pageOutOfRange, hashMismatch
+public enum LibraryError: Error, LocalizedError, Sendable, Equatable {
+    case invalidPath, invalidHash, invalidManifest, invalidDocument, documentMissing, pageOutOfRange, hashMismatch, documentInUse
     public var errorDescription: String? {
         switch self {
         case .invalidPath: "The worksheet path is not a safe relative path."
@@ -12,6 +12,7 @@ public enum LibraryError: Error, LocalizedError, Sendable {
         case .documentMissing: "The document is missing from the local library."
         case .pageOutOfRange: "The drawing page is outside this document."
         case .hashMismatch: "The worksheet changed during import. Please try again."
+        case .documentInUse: "Close the open worksheet before filing its updated PDF. The delivered copy is kept for the next Inbox check."
         }
     }
 }
