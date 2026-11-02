@@ -259,6 +259,90 @@ struct LibraryStoreTests {
         #expect(try Data(contentsOf: inkedRoot.appendingPathComponent(inkedA.id.uuidString + "/original.pdf")) == dataA)
         #expect(try Data(contentsOf: inkedRoot.appendingPathComponent(inkedB.id.uuidString + "/original.pdf")) == dataB)
     }
+
+    @Test func inboxAndFilesKeepDistinctPersistentIdentitiesInEitherArrivalOrder() async throws {
+        for inboxFirst in [true, false] {
+            let root = temporaryRoot()
+            let inboxRoot = root.appendingPathComponent("Inbox", isDirectory: true)
+            let selectedRoot = root.appendingPathComponent("Selected", isDirectory: true)
+            let naturalRoot = root.appendingPathComponent("Natural", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try FileManager.default.createDirectory(at: inboxRoot.appendingPathComponent("Unfiled/Topic"), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: selectedRoot, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: naturalRoot, withIntermediateDirectories: true)
+            let inboxFile = inboxRoot.appendingPathComponent("Unfiled/worksheet.pdf")
+            let nestedInboxFile = inboxRoot.appendingPathComponent("Unfiled/Topic/worksheet.pdf")
+            let selectedFile = selectedRoot.appendingPathComponent("worksheet.pdf")
+            let naturalFile = naturalRoot.appendingPathComponent("worksheet (2).pdf")
+            let inboxBytes = Data("Inbox original".utf8)
+            let selectedBytes = Data("Files original".utf8)
+            let nestedBytes = Data("Nested Inbox".utf8)
+            try inboxBytes.write(to: inboxFile)
+            try nestedBytes.write(to: nestedInboxFile)
+            try selectedBytes.write(to: selectedFile)
+            try Data("Natural suffix".utf8).write(to: naturalFile)
+
+            let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
+            let naturalSource = try await store.sources(for: [naturalFile], classFolder: "Unfiled")[0]
+            _ = try await store.importPDF(data: Data("Natural suffix".utf8), source: naturalSource, pageCount: 1, now: fixtureDate)
+
+            let inboxItems = try InboxScanner.items(in: inboxRoot)
+            let looseInboxItem = try #require(inboxItems.first(where: { $0.source.relativePath == "worksheet.pdf" }))
+            let nestedInboxItem = try #require(inboxItems.first(where: { $0.source.relativePath == "Topic/worksheet.pdf" }))
+            let inboxSource: SourcePath
+            let selectedSource: SourcePath
+            if inboxFirst {
+                inboxSource = try await store.source(forInboxURL: looseInboxItem.url, proposed: looseInboxItem.source)
+                _ = try await store.importPDF(data: inboxBytes, source: inboxSource, pageCount: 1, now: fixtureDate)
+                selectedSource = try await store.sources(for: [selectedFile], classFolder: "Unfiled")[0]
+                _ = try await store.importPDF(data: selectedBytes, source: selectedSource, pageCount: 1, now: fixtureDate)
+            } else {
+                selectedSource = try await store.sources(for: [selectedFile], classFolder: "Unfiled")[0]
+                _ = try await store.importPDF(data: selectedBytes, source: selectedSource, pageCount: 1, now: fixtureDate)
+                inboxSource = try await store.source(forInboxURL: looseInboxItem.url, proposed: looseInboxItem.source)
+                _ = try await store.importPDF(data: inboxBytes, source: inboxSource, pageCount: 1, now: fixtureDate)
+            }
+            let nestedSource = try await store.source(forInboxURL: nestedInboxItem.url, proposed: nestedInboxItem.source)
+            let nestedRecord = try await store.importPDF(data: nestedBytes, source: nestedSource, pageCount: 1, now: fixtureDate)
+
+            #expect(inboxSource != selectedSource)
+            #expect(naturalSource.filename == "worksheet (2).pdf")
+            #expect(Set([inboxSource.filename, selectedSource.filename]) == ["worksheet.pdf", "worksheet (3).pdf"])
+            #expect(nestedSource.relativePath == "Topic/worksheet.pdf")
+
+            let initialRecords = try await store.documents()
+            let inboxRecord = try #require(initialRecords.first(where: { $0.source.source == inboxSource }))
+            let selectedRecord = try #require(initialRecords.first(where: { $0.source.source == selectedSource }))
+            try await store.saveDrawing(Data("Files ink".utf8), documentID: selectedRecord.id, page: 0, hasInk: true)
+            let reopened = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
+            let replannedInbox = try await reopened.source(forInboxURL: looseInboxItem.url, proposed: looseInboxItem.source)
+            let replannedNested = try await reopened.source(forInboxURL: nestedInboxItem.url, proposed: nestedInboxItem.source)
+            let replannedSelected = try await reopened.sources(for: [selectedFile], classFolder: "Unfiled")
+            #expect(replannedInbox == inboxSource)
+            #expect(replannedNested == nestedSource)
+            #expect(replannedSelected == [selectedSource])
+
+            let changedInbox = Data("Inbox changed".utf8)
+            let replacedInbox = try await reopened.importPDF(data: changedInbox, source: replannedInbox, pageCount: 1, now: fixtureDate)
+            #expect(replacedInbox.id == inboxRecord.id)
+            #expect(try Data(contentsOf: root.appendingPathComponent("Library/" + inboxRecord.id.uuidString + "/original.pdf")) == changedInbox)
+            #expect(try await reopened.document(selectedRecord.id).source.sha256 == ContentHash.digest(selectedBytes))
+            #expect(try await reopened.document(nestedRecord.id).source.sha256 == ContentHash.digest(nestedBytes))
+            #expect(try await reopened.previousVersions().count == 1)
+
+            let changedSelected = Data("Files changed".utf8)
+            let updatedSelected = try await reopened.importPDF(data: changedSelected, source: replannedSelected[0], pageCount: 1, now: fixtureDate)
+            #expect(updatedSelected.id != selectedRecord.id)
+            #expect(updatedSelected.isUpdated)
+            #expect(try await reopened.document(selectedRecord.id).status == .olderVersion)
+            #expect(try await reopened.drawing(documentID: selectedRecord.id, page: 0) == Data("Files ink".utf8))
+            #expect(try Data(contentsOf: root.appendingPathComponent("Library/" + selectedRecord.id.uuidString + "/original.pdf")) == selectedBytes)
+            #expect(try Data(contentsOf: root.appendingPathComponent("Library/" + nestedRecord.id.uuidString + "/original.pdf")) == nestedBytes)
+            let previousVersions = try await reopened.previousVersions()
+            let inboxPrevious = try #require(previousVersions.first(where: { $0.documentID == inboxRecord.id }))
+            #expect(try Data(contentsOf: root.appendingPathComponent("Library/.Previous/" + inboxPrevious.id.uuidString + "/original.pdf")) == inboxBytes)
+        }
+    }
 }
 
 func temporaryRoot() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("EmberPad-tests-" + UUID().uuidString) }

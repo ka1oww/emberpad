@@ -24,8 +24,9 @@ public actor LibraryStore {
         let assignments = Dictionary(uniqueKeysWithValues: identities
             .filter { $0.source.classFolder == classFolder }
             .map { ($0.url, $0.source) })
+        let occupiedPaths = Set(identities.map(\.source)).union(try Set(documents().map { $0.source.source }))
         let sources = try ImportSourcePlanner.sources(for: urls, classFolder: classFolder,
-                                                       existingAssignments: assignments, occupiedPaths: Set(identities.map(\.source)))
+                                                       existingAssignments: assignments, occupiedPaths: occupiedPaths)
         for (url, source) in zip(urls, sources) {
             let key = url.standardizedFileURL.absoluteString
             if let index = identities.firstIndex(where: { $0.url == key && $0.source.classFolder == classFolder }) {
@@ -34,10 +35,22 @@ public actor LibraryStore {
                 identities.append(SourceIdentity(url: key, source: source))
             }
         }
-        try ManifestCodec.encoder().encode(identities.sorted {
-            $0.source.key == $1.source.key ? $0.url < $1.url : $0.source.key < $1.source.key
-        }).write(to: identityURL, options: .atomic)
+        try saveSourceIdentities(identities, to: identityURL)
         return sources
+    }
+
+    public func source(forInboxURL url: URL, proposed source: SourcePath) throws -> SourcePath {
+        let identityURL = root.appendingPathComponent(".source-identities.json")
+        var identities = try sourceIdentities(at: identityURL)
+        let key = url.standardizedFileURL.absoluteString
+        if let existing = identities.first(where: { $0.url == key && $0.source.classFolder == source.classFolder }) {
+            return existing.source
+        }
+        let occupiedPaths = Set(identities.map(\.source)).union(try Set(documents().map { $0.source.source }))
+        let assigned = try ImportSourcePlanner.uniqueSource(for: source, occupiedPaths: occupiedPaths)
+        identities.append(SourceIdentity(url: key, source: assigned))
+        try saveSourceIdentities(identities, to: identityURL)
+        return assigned
     }
 
     public func documents() throws -> [DocumentRecord] {
@@ -184,6 +197,12 @@ public actor LibraryStore {
         guard Set(keys).count == keys.count,
               Set(identities.map { $0.source.key }).count == identities.count else { throw LibraryError.invalidDocument }
         return identities
+    }
+
+    private func saveSourceIdentities(_ identities: [SourceIdentity], to url: URL) throws {
+        try ManifestCodec.encoder().encode(identities.sorted {
+            $0.source.key == $1.source.key ? $0.url < $1.url : $0.source.key < $1.source.key
+        }).write(to: url, options: .atomic)
     }
 
     private func write(_ doc: DocumentRecord) throws {

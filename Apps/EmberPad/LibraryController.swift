@@ -93,7 +93,8 @@ final class LibraryController: ObservableObject {
             for item in items {
                 do {
                     let data = try await CoordinatedPDFReader.read(item.url)
-                    try await importData(data, source: item.source)
+                    let source = try await store.source(forInboxURL: item.url, proposed: item.source)
+                    try await importData(data, source: source)
                     // Keep Inbox deliveries as an idempotent receipt. A sender may still be writing;
                     // replaying on next foreground is safe, deleting here could erase newer bytes.
                     lastInboxImport = Date()

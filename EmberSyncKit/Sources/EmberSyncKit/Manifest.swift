@@ -77,6 +77,21 @@ public struct SourcePath: Hashable, Codable, Sendable {
 }
 
 enum ImportSourcePlanner {
+    static func uniqueSource(for source: SourcePath, occupiedPaths: Set<SourcePath>) throws -> SourcePath {
+        var candidate = source
+        let path = source.relativePath as NSString
+        let directory = path.deletingLastPathComponent
+        let filename = path.lastPathComponent
+        var number = 2
+        while occupiedPaths.contains(candidate) {
+            let disambiguatedFilename = disambiguated(filename, number: number)
+            candidate = try SourcePath(classFolder: source.classFolder,
+                                       relativePath: directory.isEmpty || directory == "." ? disambiguatedFilename : directory + "/" + disambiguatedFilename)
+            number += 1
+        }
+        return candidate
+    }
+
     static func sources(for urls: [URL], classFolder: String, existingAssignments: [String: SourcePath], occupiedPaths: Set<SourcePath>) throws -> [SourcePath] {
         let uniqueURLs = Dictionary(urls.map { ($0.standardizedFileURL.absoluteString, $0) }, uniquingKeysWith: { first, _ in first })
         var sourcesByURL: [String: SourcePath] = [:]
