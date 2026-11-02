@@ -37,6 +37,8 @@ The GitHub workflow runs package tests, both unsigned builds, and syntax/plist c
 
 Import PDFs with **Import from Files**, choosing an existing or new class name. Files open through security-scoped coordinated reads and are copied into the app. Encrypted/locked or unreadable PDFs are rejected. A Finder/Files delivery can also place PDFs at `Documents/Inbox/<Class>/<file>.pdf`; a loose Inbox PDF goes to `Unfiled`. Nested paths within a class are preserved as source identity. Inbox is checked on foreground and by **File Inbox**. Retained Inbox files are idempotent receipts, and are never deleted while a sender could be writing them. Symlink deliveries are skipped. No absent-file deletion is inferred from an incremental Inbox.
 
+If separate import locations would otherwise share a class/path, EmberPad gives the later assignment an available visible filename suffix, preserving any existing suffixes. It remembers each source's assignment, so re-imports keep their identity across picker batch order, Inbox/Files arrival order and app/store reopen. A changed file at that same source path follows the version rules below.
+
 Each document version has its own `Application Support/Library/<UUID>/` folder:
 
 ```text
