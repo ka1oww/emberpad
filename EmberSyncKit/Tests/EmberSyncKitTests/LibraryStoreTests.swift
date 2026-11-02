@@ -176,6 +176,36 @@ struct LibraryStoreTests {
         #expect(Set(items.map { $0.source.key }) == ["Synthetic Class/sub/a.PDF", "Unfiled/loose.pdf"])
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("loose.pdf").path))
     }
+
+    @Test func sameBasenameFilesImportedTogetherKeepDistinctDocuments() async throws {
+        let input = temporaryRoot()
+        let libraryRoot = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: input); try? FileManager.default.removeItem(at: libraryRoot) }
+        let folderA = input.appendingPathComponent("A", isDirectory: true)
+        let folderB = input.appendingPathComponent("B", isDirectory: true)
+        try FileManager.default.createDirectory(at: folderA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folderB, withIntermediateDirectories: true)
+        let fileA = folderA.appendingPathComponent("worksheet.pdf")
+        let fileB = folderB.appendingPathComponent("worksheet.pdf")
+        let dataA = Data("worksheet A".utf8)
+        let dataB = Data("worksheet B".utf8)
+        try dataA.write(to: fileA)
+        try dataB.write(to: fileB)
+
+        let sources = try ImportSourcePlanner.sources(for: [fileB, fileA], classFolder: "Synthetic Class")
+        #expect(sources.map(\.filename) == ["worksheet (2).pdf", "worksheet.pdf"])
+        let store = try LibraryStore(root: libraryRoot)
+        for (url, source) in zip([fileB, fileA], sources) {
+            _ = try await store.importPDF(data: Data(contentsOf: url), source: source, pageCount: 1, now: fixtureDate)
+        }
+
+        let records = try await store.documents()
+        #expect(records.count == 2)
+        #expect(Set(records.map { $0.source.source }) == Set(sources))
+        #expect(try Data(contentsOf: libraryRoot.appendingPathComponent(records.first { $0.source.source == sources[0] }!.id.uuidString + "/original.pdf")) == dataB)
+        #expect(try Data(contentsOf: libraryRoot.appendingPathComponent(records.first { $0.source.source == sources[1] }!.id.uuidString + "/original.pdf")) == dataA)
+        #expect(try ImportSourcePlanner.sources(for: [fileB, fileA], classFolder: "Synthetic Class") == sources)
+    }
 }
 
 func temporaryRoot() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("EmberPad-tests-" + UUID().uuidString) }

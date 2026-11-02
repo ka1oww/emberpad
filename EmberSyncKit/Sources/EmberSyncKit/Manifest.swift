@@ -76,6 +76,44 @@ public struct SourcePath: Hashable, Codable, Sendable {
     }
 }
 
+public enum ImportSourcePlanner {
+    public static func sources(for urls: [URL], classFolder: String) throws -> [SourcePath] {
+        let uniqueURLs = Dictionary(urls.map { ($0.standardizedFileURL.absoluteString, $0) }, uniquingKeysWith: { first, _ in first })
+        let grouped = Dictionary(grouping: uniqueURLs.values, by: \.lastPathComponent)
+        let reservedNames = Set(grouped.keys)
+        var sourcesByURL: [String: SourcePath] = [:]
+        var assignedNames = Set<String>()
+
+        for (filename, files) in grouped {
+            let orderedFiles = files.sorted { $0.standardizedFileURL.absoluteString < $1.standardizedFileURL.absoluteString }
+            for (index, url) in orderedFiles.enumerated() {
+                var relativePath = filename
+                if index > 0 {
+                    var number = 2
+                    repeat {
+                        relativePath = Self.disambiguated(filename, number: number)
+                        number += 1
+                    } while reservedNames.contains(relativePath) || assignedNames.contains(relativePath)
+                }
+                assignedNames.insert(relativePath)
+                sourcesByURL[url.standardizedFileURL.absoluteString] = try SourcePath(classFolder: classFolder, relativePath: relativePath)
+            }
+        }
+
+        return try urls.map { url in
+            guard let source = sourcesByURL[url.standardizedFileURL.absoluteString] else { throw LibraryError.invalidPath }
+            return source
+        }
+    }
+
+    private static func disambiguated(_ filename: String, number: Int) -> String {
+        let name = filename as NSString
+        let ext = name.pathExtension
+        let stem = name.deletingPathExtension
+        return ext.isEmpty ? "\(stem) (\(number))" : "\(stem) (\(number)).\(ext)"
+    }
+}
+
 public struct ManifestEntry: Equatable, Codable, Sendable {
     public let source: SourcePath
     public let sha256: ContentHash

@@ -72,10 +72,10 @@ final class LibraryController: ObservableObject {
         defer { isImporting = false }
         do {
             try await flush()
-            for url in urls {
+            let sources = try ImportSourcePlanner.sources(for: urls, classFolder: className.trimmingCharacters(in: .whitespacesAndNewlines))
+            for (url, source) in zip(urls, sources) {
                 let scope = url.startAccessingSecurityScopedResource()
                 defer { if scope { url.stopAccessingSecurityScopedResource() } }
-                let source = try SourcePath(classFolder: className.trimmingCharacters(in: .whitespacesAndNewlines), relativePath: url.lastPathComponent)
                 let data = try await CoordinatedPDFReader.read(url)
                 try await importData(data, source: source)
             }
