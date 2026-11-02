@@ -18,6 +18,28 @@ public actor LibraryStore {
         try Self.recoverReplacement(in: root)
     }
 
+    public func sources(for urls: [URL], classFolder: String) throws -> [SourcePath] {
+        let identityURL = root.appendingPathComponent(".source-identities.json")
+        var identities = try sourceIdentities(at: identityURL)
+        let assignments = Dictionary(uniqueKeysWithValues: identities
+            .filter { $0.source.classFolder == classFolder }
+            .map { ($0.url, $0.source) })
+        let sources = try ImportSourcePlanner.sources(for: urls, classFolder: classFolder,
+                                                       existingAssignments: assignments, occupiedPaths: Set(identities.map(\.source)))
+        for (url, source) in zip(urls, sources) {
+            let key = url.standardizedFileURL.absoluteString
+            if let index = identities.firstIndex(where: { $0.url == key && $0.source.classFolder == classFolder }) {
+                identities[index].source = source
+            } else {
+                identities.append(SourceIdentity(url: key, source: source))
+            }
+        }
+        try ManifestCodec.encoder().encode(identities.sorted {
+            $0.source.key == $1.source.key ? $0.url < $1.url : $0.source.key < $1.source.key
+        }).write(to: identityURL, options: .atomic)
+        return sources
+    }
+
     public func documents() throws -> [DocumentRecord] {
         try files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
             .compactMap { url -> DocumentRecord? in
@@ -147,6 +169,21 @@ public actor LibraryStore {
               doc.inkPages.allSatisfy({ (0..<doc.pageCount).contains($0) }),
               doc.inkPages.isEmpty || doc.hasInk else { throw LibraryError.invalidDocument }
         return doc
+    }
+
+    private struct SourceIdentity: Codable {
+        let url: String
+        var source: SourcePath
+    }
+
+    private func sourceIdentities(at url: URL) throws -> [SourceIdentity] {
+        guard files.fileExists(atPath: url.path) else { return [] }
+        try Self.requireRegularFile(url)
+        let identities = try ManifestCodec.decoder().decode([SourceIdentity].self, from: Data(contentsOf: url))
+        let keys = identities.map { $0.source.classFolder + "\u{0}" + $0.url }
+        guard Set(keys).count == keys.count,
+              Set(identities.map { $0.source.key }).count == identities.count else { throw LibraryError.invalidDocument }
+        return identities
     }
 
     private func write(_ doc: DocumentRecord) throws {

@@ -76,27 +76,35 @@ public struct SourcePath: Hashable, Codable, Sendable {
     }
 }
 
-public enum ImportSourcePlanner {
-    public static func sources(for urls: [URL], classFolder: String) throws -> [SourcePath] {
+enum ImportSourcePlanner {
+    static func sources(for urls: [URL], classFolder: String, existingAssignments: [String: SourcePath], occupiedPaths: Set<SourcePath>) throws -> [SourcePath] {
         let uniqueURLs = Dictionary(urls.map { ($0.standardizedFileURL.absoluteString, $0) }, uniquingKeysWith: { first, _ in first })
-        let grouped = Dictionary(grouping: uniqueURLs.values, by: \.lastPathComponent)
-        let reservedNames = Set(grouped.keys)
         var sourcesByURL: [String: SourcePath] = [:]
-        var assignedNames = Set<String>()
+        var occupiedNames = Set(occupiedPaths.filter { $0.classFolder == classFolder }.map(\.filename))
+        let unassigned = uniqueURLs.filter { key, _ in existingAssignments[key] == nil }
+        let naturalNames = Set(unassigned.values.map(\.lastPathComponent))
 
-        for (filename, files) in grouped {
-            let orderedFiles = files.sorted { $0.standardizedFileURL.absoluteString < $1.standardizedFileURL.absoluteString }
-            for (index, url) in orderedFiles.enumerated() {
+        for (key, source) in existingAssignments where source.classFolder == classFolder {
+            occupiedNames.insert(source.filename)
+            if uniqueURLs[key] != nil { sourcesByURL[key] = source }
+        }
+
+        let grouped = Dictionary(grouping: unassigned, by: { $0.value.lastPathComponent })
+        let orderedGroups = grouped.keys.sorted()
+        for filename in orderedGroups {
+            guard let files = grouped[filename] else { continue }
+            let orderedFiles = files.sorted { $0.key < $1.key }
+            for (index, item) in orderedFiles.enumerated() {
                 var relativePath = filename
-                if index > 0 {
+                if index > 0 || occupiedNames.contains(filename) {
                     var number = 2
                     repeat {
                         relativePath = Self.disambiguated(filename, number: number)
                         number += 1
-                    } while reservedNames.contains(relativePath) || assignedNames.contains(relativePath)
+                    } while naturalNames.contains(relativePath) || occupiedNames.contains(relativePath)
                 }
-                assignedNames.insert(relativePath)
-                sourcesByURL[url.standardizedFileURL.absoluteString] = try SourcePath(classFolder: classFolder, relativePath: relativePath)
+                occupiedNames.insert(relativePath)
+                sourcesByURL[item.key] = try SourcePath(classFolder: classFolder, relativePath: relativePath)
             }
         }
 

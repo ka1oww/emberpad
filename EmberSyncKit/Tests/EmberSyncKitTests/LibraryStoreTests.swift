@@ -177,34 +177,87 @@ struct LibraryStoreTests {
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("loose.pdf").path))
     }
 
-    @Test func sameBasenameFilesImportedTogetherKeepDistinctDocuments() async throws {
+    @Test func collidingSourceIdentitiesSurviveReimportAndNaturalSuffixes() async throws {
         let input = temporaryRoot()
         let libraryRoot = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: input); try? FileManager.default.removeItem(at: libraryRoot) }
         let folderA = input.appendingPathComponent("A", isDirectory: true)
         let folderB = input.appendingPathComponent("B", isDirectory: true)
+        let folderC = input.appendingPathComponent("C", isDirectory: true)
         try FileManager.default.createDirectory(at: folderA, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: folderB, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folderC, withIntermediateDirectories: true)
         let fileA = folderA.appendingPathComponent("worksheet.pdf")
         let fileB = folderB.appendingPathComponent("worksheet.pdf")
+        let naturalSuffix = folderC.appendingPathComponent("worksheet (2).pdf")
         let dataA = Data("worksheet A".utf8)
-        let dataB = Data("worksheet B".utf8)
+        let dataB = Data("worksheet B original".utf8)
+        let suffixData = Data("natural suffix".utf8)
         try dataA.write(to: fileA)
         try dataB.write(to: fileB)
+        try suffixData.write(to: naturalSuffix)
 
-        let sources = try ImportSourcePlanner.sources(for: [fileB, fileA], classFolder: "Synthetic Class")
-        #expect(sources.map(\.filename) == ["worksheet (2).pdf", "worksheet.pdf"])
         let store = try LibraryStore(root: libraryRoot)
-        for (url, source) in zip([fileB, fileA], sources) {
+        let urls = [fileB, naturalSuffix, fileA]
+        let sources = try await store.sources(for: urls, classFolder: "Synthetic Class")
+        let sourceByURL = Dictionary(uniqueKeysWithValues: zip(urls.map { $0.standardizedFileURL.absoluteString }, sources))
+        let sourceA = try #require(sourceByURL[fileA.standardizedFileURL.absoluteString])
+        let sourceB = try #require(sourceByURL[fileB.standardizedFileURL.absoluteString])
+        let suffixSource = try #require(sourceByURL[naturalSuffix.standardizedFileURL.absoluteString])
+        #expect(sourceA.filename == "worksheet.pdf")
+        #expect(sourceB.filename == "worksheet (3).pdf")
+        #expect(suffixSource.filename == "worksheet (2).pdf")
+        let reorderedSources = try await store.sources(for: urls.reversed(), classFolder: "Synthetic Class")
+        #expect(Dictionary(uniqueKeysWithValues: zip(urls.reversed().map { $0.standardizedFileURL.absoluteString }, reorderedSources)) == sourceByURL)
+
+        var recordsBySource: [SourcePath: DocumentRecord] = [:]
+        for (url, source) in zip(urls, sources) {
             _ = try await store.importPDF(data: Data(contentsOf: url), source: source, pageCount: 1, now: fixtureDate)
+            recordsBySource[source] = try await store.documents().first(where: { $0.source.source == source })
         }
 
-        let records = try await store.documents()
-        #expect(records.count == 2)
-        #expect(Set(records.map { $0.source.source }) == Set(sources))
-        #expect(try Data(contentsOf: libraryRoot.appendingPathComponent(records.first { $0.source.source == sources[0] }!.id.uuidString + "/original.pdf")) == dataB)
-        #expect(try Data(contentsOf: libraryRoot.appendingPathComponent(records.first { $0.source.source == sources[1] }!.id.uuidString + "/original.pdf")) == dataA)
-        #expect(try ImportSourcePlanner.sources(for: [fileB, fileA], classFolder: "Synthetic Class") == sources)
+        let firstA = try #require(recordsBySource[sourceA])
+        let firstB = try #require(recordsBySource[sourceB])
+        let firstSuffix = try #require(recordsBySource[suffixSource])
+        let reopened = try LibraryStore(root: libraryRoot)
+
+        let changedB = Data("worksheet B changed".utf8)
+        try changedB.write(to: fileB)
+        let plannedB = try await reopened.sources(for: [fileB], classFolder: "Synthetic Class")
+        #expect(plannedB == [sourceB])
+        let replacedB = try await reopened.importPDF(data: changedB, source: plannedB[0], pageCount: 1, now: fixtureDate)
+        #expect(replacedB.id == firstB.id)
+        #expect(try Data(contentsOf: libraryRoot.appendingPathComponent(firstB.id.uuidString + "/original.pdf")) == changedB)
+        #expect(try Data(contentsOf: libraryRoot.appendingPathComponent(firstA.id.uuidString + "/original.pdf")) == dataA)
+        #expect(try Data(contentsOf: libraryRoot.appendingPathComponent(firstSuffix.id.uuidString + "/original.pdf")) == suffixData)
+        #expect(try await reopened.previousVersions().count == 1)
+
+        let inkedRoot = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: inkedRoot) }
+        try dataB.write(to: fileB)
+        let inkedStore = try LibraryStore(root: inkedRoot)
+        let inkedSources = try await inkedStore.sources(for: urls, classFolder: "Synthetic Class")
+        var inkedRecords: [SourcePath: DocumentRecord] = [:]
+        for (url, source) in zip(urls, inkedSources) {
+            let data = try Data(contentsOf: url)
+            let record = try await inkedStore.importPDF(data: data, source: source, pageCount: 1, now: fixtureDate)
+            inkedRecords[source] = record
+        }
+        let inkedA = try #require(inkedRecords[sourceA])
+        let inkedB = try #require(inkedRecords[sourceB])
+        try await inkedStore.saveDrawing(Data("B ink".utf8), documentID: inkedB.id, page: 0, hasInk: true)
+        let reopenedInkedStore = try LibraryStore(root: inkedRoot)
+        let changedInkedB = Data("worksheet B changed with ink".utf8)
+        try changedInkedB.write(to: fileB)
+        let replannedB = try await reopenedInkedStore.sources(for: [fileB], classFolder: "Synthetic Class")
+        #expect(replannedB == [sourceB])
+        let newB = try await reopenedInkedStore.importPDF(data: Data(contentsOf: fileB), source: replannedB[0], pageCount: 1, now: fixtureDate)
+        #expect(newB.id != inkedB.id)
+        #expect(newB.isUpdated)
+        #expect(try await reopenedInkedStore.document(inkedB.id).status == .olderVersion)
+        #expect(try await reopenedInkedStore.drawing(documentID: inkedB.id, page: 0) == Data("B ink".utf8))
+        #expect(try Data(contentsOf: inkedRoot.appendingPathComponent(inkedA.id.uuidString + "/original.pdf")) == dataA)
+        #expect(try Data(contentsOf: inkedRoot.appendingPathComponent(inkedB.id.uuidString + "/original.pdf")) == dataB)
     }
 }
 

@@ -72,7 +72,7 @@ final class LibraryController: ObservableObject {
         defer { isImporting = false }
         do {
             try await flush()
-            let sources = try ImportSourcePlanner.sources(for: urls, classFolder: className.trimmingCharacters(in: .whitespacesAndNewlines))
+            let sources = try await store.sources(for: urls, classFolder: className.trimmingCharacters(in: .whitespacesAndNewlines))
             for (url, source) in zip(urls, sources) {
                 let scope = url.startAccessingSecurityScopedResource()
                 defer { if scope { url.stopAccessingSecurityScopedResource() } }
