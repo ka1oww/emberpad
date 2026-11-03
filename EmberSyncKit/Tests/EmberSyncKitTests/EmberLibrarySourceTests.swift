@@ -542,6 +542,17 @@ struct EmberLibrarySourceTests {
         #expect(snapshot.misses.map(\.project) == [linkedCopy])
     }
 
+    @Test func unreadableSubjectFolderFailsTheRead() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let subject = tree.root.appendingPathComponent("H2 Chemistry", isDirectory: true)
+        try FileManager.default.createDirectory(at: subject, withIntermediateDirectories: true)
+        let attributes = try FileManager.default.attributesOfItem(atPath: subject.path)
+        defer { try? FileManager.default.setAttributes(attributes, ofItemAtPath: subject.path) }
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: subject.path)
+
+        #expect(throws: (any Error).self) { try read(tree) }
+    }
+
     @Test func readingNeverWritesInsideTheRoot() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         let p = "A-Math/SEC 3 Synthetic Paper 1"
