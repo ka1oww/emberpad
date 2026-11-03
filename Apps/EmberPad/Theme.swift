@@ -5,7 +5,7 @@ import SwiftUI
 /// only the chrome tokens below change.
 ///
 /// Theme tokens resolve through `Assets.xcassets` (Any/Dark appearances per
-/// themed token). Use `Theme.*` / `Color.ember*` / `UIColor.ember*` for them.
+/// themed token). Use `Theme.*` / `UIColor.ember*` for them.
 enum ThemeToken: String, CaseIterable, Sendable {
     case canvas
     case bg
@@ -145,34 +145,6 @@ enum Theme {
     static func applyAppearance() {
         UIView.appearance().tintColor = ThemeToken.accent.uiColor
     }
-}
-
-extension Color {
-    static let emberCanvas = ThemeToken.canvas.color
-    static let emberBg = ThemeToken.bg.color
-    static let emberSurface = ThemeToken.surface.color
-    static let emberSurface2 = ThemeToken.surface2.color
-    static let emberLine = ThemeToken.line.color
-    static let emberText = ThemeToken.text.color
-    static let emberText2 = ThemeToken.text2.color
-    static let emberText3 = ThemeToken.text3.color
-    static let emberAccent = ThemeToken.accent.color
-    static let emberAccentSoft = ThemeToken.accentSoft.color
-    static let emberOnAccent = ThemeToken.onAccent.color
-    static let emberOk = ThemeToken.ok.color
-    static let emberOkSoft = ThemeToken.okSoft.color
-    static let emberWarn = ThemeToken.warn.color
-    static let emberWarnSoft = ThemeToken.warnSoft.color
-    static let emberDanger = ThemeToken.danger.color
-    static let emberDangerSoft = ThemeToken.dangerSoft.color
-    static let emberPrivate = ThemeToken.privateBrand.color
-    static let emberPrivateBg = ThemeToken.privateBg.color
-    static let emberPenBlack = ThemeToken.penBlack.color
-    static let emberPenBlue = ThemeToken.penBlue.color
-    static let emberPenRed = ThemeToken.penRed.color
-    static let emberHighlighterYellow = ThemeToken.highlighterYellow.color
-    static let emberHighlighterGreen = ThemeToken.highlighterGreen.color
-    static let emberHighlighterPink = ThemeToken.highlighterPink.color
 }
 
 extension UIColor {
