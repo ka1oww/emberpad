@@ -1,129 +1,132 @@
 import SwiftUI
 import XCTest
+import UIKit
+import EmberSyncKit
 @testable import EmberPad
-@testable import EmberSyncKit
 
-/// EP-10 visual evidence: renders the real `WorksheetCard` (badges, type,
-/// Theme tokens) with synthetic fixture records only — no real library,
-/// no student names — in light and dark, and writes the PNGs to the test
-/// host's tmp dir. After a local `xcodebuild test` run, pull them out of the
-/// booted simulator with e.g.
-/// `xcrun simctl get_app_container <udid> dev.emberpad.placeholder data`
-/// and copy `tmp/library-*.png` to `docs/screenshots/` for the EP-10 PR.
 @MainActor
 final class LibraryScreenshotTests: XCTestCase {
-    func testLibraryCardsRenderLightAndDark() throws {
-        let cards = try FixtureRecords.all
+    func testRealLibraryViewStatesRenderWithSyntheticDocuments() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
+        let libraryRoot = root.appendingPathComponent("Library", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try LibraryStore(root: libraryRoot)
+        let source = try SourcePath(classFolder: "Synthetic Class", relativePath: "worksheet.pdf")
+        _ = try await store.importPDF(data: DeviceChecksTestPDF.data(), source: source, pageCount: 2)
+        let library = LibraryController(store: store, inbox: inbox)
+        await library.refresh()
+        let thumbnails = ThumbnailCache(store: store)
+        for document in library.documents { await thumbnails.thumbnail(for: document) }
+
+        let archivedRoot = root.appendingPathComponent("ArchivedLibrary", isDirectory: true)
+        let archivedStore = try LibraryStore(root: archivedRoot)
+        let archivedSource = try SourcePath(classFolder: "Synthetic Class", relativePath: "archived-worksheet.pdf")
+        let archivedRecord = try await archivedStore.importPDF(data: DeviceChecksTestPDF.data(), source: archivedSource, pageCount: 2)
+        try await archivedStore.archive(documentID: archivedRecord.id)
+        let archivedLibrary = LibraryController(store: archivedStore, inbox: inbox)
+        await archivedLibrary.refresh()
+        archivedLibrary.showingArchived = true
+        let archivedThumbnails = ThumbnailCache(store: archivedStore)
+        for document in archivedLibrary.documents { await archivedThumbnails.thumbnail(for: document) }
+
+        let errorRoot = root.appendingPathComponent("ErrorLibrary", isDirectory: true)
+        let errorStore = try LibraryStore(root: errorRoot)
+        let invalidPDF = root.appendingPathComponent("synthetic-invalid.pdf")
+        try Data("synthetic invalid PDF".utf8).write(to: invalidPDF)
+        let errorLibrary = LibraryController(store: errorStore, inbox: inbox)
+        await errorLibrary.importFiles([invalidPDF], className: "Synthetic Class")
+        XCTAssertTrue(errorLibrary.canRetryError)
+
         for scheme: ColorScheme in [.light, .dark] {
-            let content = LibraryGridSnapshot(records: cards)
-                .frame(width: 900)
-                .environment(\.colorScheme, scheme)
-            var renderer = ImageRenderer(content: content)
-            renderer.scale = 2
-            guard let image = renderer.uiImage else {
-                XCTFail("Could not render the library grid snapshot (\(scheme == .light ? "light" : "dark"))")
-                continue
+            let validExpiry = Date().addingTimeInterval(30 * 86_400)
+            attach(try await render(library, scheme: scheme, expiry: validExpiry, thumbnails: thumbnails), named: "library-normal-\(scheme.label)")
+            attach(try await render(library, scheme: scheme, expiry: Date().addingTimeInterval(36 * 3_600), thumbnails: thumbnails),
+                   named: "library-signing-amber-\(scheme.label)")
+            attach(try await render(library, scheme: scheme, expiry: Date().addingTimeInterval(12 * 3_600), thumbnails: thumbnails),
+                   named: "library-signing-red-\(scheme.label)")
+            attach(try await render(library, scheme: scheme, expiry: nil, thumbnails: thumbnails), named: "library-signing-unknown-\(scheme.label)")
+
+            attach(try await render(errorLibrary, scheme: scheme, expiry: validExpiry), named: "library-error-\(scheme.label)")
+
+            let presentation = PresentationState()
+            presentation.externalSceneCount = 1
+            attach(try await render(library, scheme: scheme, expiry: validExpiry, presentation: presentation, thumbnails: thumbnails),
+                   named: "library-sharing-\(scheme.label)")
+
+            attach(try await render(archivedLibrary, scheme: scheme, expiry: validExpiry, thumbnails: archivedThumbnails),
+                   named: "library-archived-\(scheme.label)")
+
+            let emptyStore = try LibraryStore(root: root.appendingPathComponent("Empty-\(scheme.label)", isDirectory: true))
+            let emptyLibrary = LibraryController(store: emptyStore, inbox: inbox)
+            attach(try await render(emptyLibrary, scheme: scheme, expiry: validExpiry), named: "library-empty-\(scheme.label)")
+            attach(try await render(emptyLibrary, scheme: scheme, expiry: validExpiry, width: 390, height: 844),
+                   named: "library-portrait-collapse-\(scheme.label)")
+
+            let importingRoot = root.appendingPathComponent("Importing-\(scheme.label)", isDirectory: true)
+            let importingStore = try LibraryStore(root: importingRoot)
+            let importingLibrary = LibraryController(store: importingStore, inbox: inbox)
+            let fixtures = root.appendingPathComponent("Fixtures-\(scheme.label)", isDirectory: true)
+            try FileManager.default.createDirectory(at: fixtures, withIntermediateDirectories: true)
+            let pdf = DeviceChecksTestPDF.data()
+            let urls = try (0..<120).map { index -> URL in
+                let url = fixtures.appendingPathComponent("synthetic-\(index).pdf")
+                try pdf.write(to: url)
+                return url
             }
-            XCTAssertGreaterThan(image.size.width, 0)
-            XCTAssertGreaterThan(image.size.height, 0)
-            let name = scheme == .light ? "library-grid-light" : "library-grid-dark"
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).png")
-            try XCTUnwrap(image.pngData()).write(to: url, options: .atomic)
-        }
-    }
-}
-
-/// Test-only snapshot: the real sidebar rows, class chips, card grid and
-/// signing-banner treatments composed from synthetic fixtures.
-private struct LibraryGridSnapshot: View {
-    let records: [DocumentRecord]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("EmberPad")
-                .font(Theme.libraryLargeTitle)
-                .foregroundStyle(Theme.text)
-            Theme.sidebarSectionHeader("Subjects")
-            HStack(spacing: 8) {
-                SnapshotChip("All classes", selected: true)
-                SnapshotChip("MI PU3", selected: false)
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 22)], spacing: 26) {
-                ForEach(records, id: \.id) { record in
-                    WorksheetCard(record: record, thumbnail: nil)
-                }
-            }
-            SnapshotBanner(status: .warning)
-            SnapshotBanner(status: .urgent)
-        }
-        .padding(24)
-        .background(Theme.bg)
-    }
-}
-
-private struct SnapshotChip: View {
-    let title: String
-    let selected: Bool
-    init(_ title: String, selected: Bool) { self.title = title; self.selected = selected }
-    var body: some View {
-        Text(title)
-            .font(.system(size: 13, weight: .semibold))
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(selected ? Theme.accent : Theme.surface2, in: Capsule())
-            .foregroundStyle(selected ? Theme.onAccent : Theme.text2)
-    }
-}
-
-private struct SnapshotBanner: View {
-    let status: SigningStatus
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle")
-            VStack(alignment: .leading, spacing: 4) {
-                Text(status == .warning ? "EmberPad stops opening in 2 days." : "EmberPad stops opening tonight at 23:34.")
-                    .font(.system(.body, weight: .semibold))
-                Text("Keep the iPad on home Wi-Fi near the Mac tonight so it can renew. Your ink is safe either way.")
-                    .font(Theme.meta)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(status == .warning ? Theme.warnSoft : Theme.dangerSoft,
-                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .foregroundStyle(status == .warning ? Theme.warn : Theme.danger)
-    }
-}
-
-private enum FixtureRecords {
-    static var all: [DocumentRecord] {
-        get throws {
-            [
-                try student(title: "Acids Tutorial", subject: "H2 Chemistry", classTag: "MI PU3",
-                            status: .current, isUpdated: true, hasInk: true, paired: true),
-                try student(title: "Energetics Worksheet", subject: "H2 Chemistry", classTag: nil,
-                            status: .olderVersion, isUpdated: false, hasInk: true, paired: false),
-                try student(title: "Vectors Practice", subject: "H2 Math", classTag: "MI PU3",
-                            status: .current, isUpdated: false, hasInk: false, paired: true),
-                try student(title: "Functions Revision", subject: "H2 Math", classTag: "MI PU3",
-                            status: .current, isUpdated: false, hasInk: false, paired: false),
-            ]
+            let importTask = Task { await importingLibrary.importFiles(urls, className: "Synthetic Class") }
+            while !importingLibrary.isImporting { await Task.yield() }
+            attach(try await render(importingLibrary, scheme: scheme, expiry: validExpiry),
+                   named: "library-importing-\(scheme.label)")
+            await importTask.value
         }
     }
 
-    private static var counter = 0
+    private func render(_ library: LibraryController, scheme: ColorScheme, expiry: Date?,
+                        presentation: PresentationState? = nil,
+                        thumbnails: ThumbnailCache? = nil,
+                        width: CGFloat = 1024, height: CGFloat = 768) async throws -> UIImage {
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let hosting = UIHostingController(rootView: LibraryView(
+            library: library,
+            presentation: presentation ?? PresentationState(),
+            signingExpiryDate: expiry,
+            thumbnailCache: thumbnails
+        ).environment(\.colorScheme, scheme))
+        let window: UIWindow
+        if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
+            window = UIWindow(windowScene: scene)
+        } else {
+            window = UIWindow(frame: bounds)
+        }
+        window.frame = bounds
+        window.rootViewController = hosting
+        window.makeKeyAndVisible()
+        hosting.view.frame = bounds
+        hosting.view.setNeedsLayout()
+        hosting.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(80))
+        hosting.view.layoutIfNeeded()
 
-    private static func student(title: String, subject: String, classTag: String?,
-                                status: DocumentStatus, isUpdated: Bool,
-                                hasInk: Bool, paired: Bool) throws -> DocumentRecord {
-        counter += 1
-        let source = try SourcePath(classFolder: "MI PU3", relativePath: "fixture-\(counter).pdf")
-        let key = try PaperKey(rawValue: "fixture-paper-\(counter)")
-        let publication = try Publication(subject: subject, classTag: classTag, paperKey: key,
-                                          role: .student, title: title)
-        let entry = try ManifestEntry(source: source, sha256: ContentHash.digest(Data("fixture-\(counter)".utf8)),
-                                      size: 128, modifiedAt: Date(), publication: publication)
-        return DocumentRecord(source: entry, pageCount: 4, importedAt: Date(),
-                              hasInk: hasInk, status: status, title: title,
-                              isUpdated: isUpdated, pairedDocumentID: paired ? UUID() : nil)
+        var didDraw = false
+        let image = UIGraphicsImageRenderer(bounds: bounds).image { _ in
+            didDraw = hosting.view.drawHierarchy(in: bounds, afterScreenUpdates: true)
+        }
+        window.isHidden = true
+        window.rootViewController = nil
+        XCTAssertTrue(didDraw)
+        return image
     }
+
+    private func attach(_ image: UIImage, named name: String) {
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}
+
+private extension ColorScheme {
+    var label: String { self == .light ? "light" : "dark" }
 }

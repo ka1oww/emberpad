@@ -12,6 +12,31 @@ final class LibraryController: ObservableObject {
     @Published private(set) var isImporting = false
     @Published private(set) var lastInboxImport: Date?
     private var sessions: [UUID: DocumentSession] = [:]
+    private var failedOperation: FailedOperation?
+
+    private enum FailedOperation {
+        case inbox
+        case refresh
+        case importFiles([URL], String)
+        case archive(UUID)
+        case unarchive(UUID)
+        case move(UUID, String)
+        case flush
+
+        var kind: Kind {
+            switch self {
+            case .inbox: return .inbox
+            case .refresh: return .refresh
+            case .importFiles: return .importFiles
+            case .archive: return .archive
+            case .unarchive: return .unarchive
+            case .move: return .move
+            case .flush: return .flush
+            }
+        }
+
+        enum Kind: Equatable { case inbox, refresh, importFiles, archive, unarchive, move, flush }
+    }
 
     init(store: LibraryStore, inbox: URL) { self.store = store; self.inbox = inbox }
     var classes: [String] { Set(documents.filter { $0.status != .archived }.map { $0.source.source.classFolder }).sorted() }
@@ -26,9 +51,6 @@ final class LibraryController: ObservableObject {
     @Published var showingArchived = false
     /// Design 5.1 detail toolbar sort. Newest first by `importedAt`, then title.
     @Published var sortNewestFirst = true
-
-    /// Student copies only: a Teacher copy is never its own card. It opens from its Student worksheet.
-    var studentDocuments: [DocumentRecord] { Self.studentCards(in: documents) }
 
     /// Non-archived Student copies grouped for the SUBJECTS sidebar section, sorted by name.
     var subjectsWithCounts: [(name: String, count: Int)] { Self.subjectsWithCounts(in: documents) }
@@ -92,7 +114,10 @@ final class LibraryController: ObservableObject {
     /// Long-press Archive from the card context menu. Teacher copies never reach this path
     /// because they are never cards.
     func archiveDocument(_ id: UUID) async {
-        do { try await store.archive(documentID: id) } catch { errorMessage = error.localizedDescription }
+        do {
+            try await store.archive(documentID: id)
+            clearError(for: .archive(id))
+        } catch { setError(error.localizedDescription, for: .archive(id)) }
         await refresh()
     }
 
@@ -101,7 +126,8 @@ final class LibraryController: ObservableObject {
         do {
             let record = try await store.document(id)
             try await store.relink(documentID: id, entry: record.source)
-        } catch { errorMessage = error.localizedDescription }
+            clearError(for: .unarchive(id))
+        } catch { setError(error.localizedDescription, for: .unarchive(id)) }
         await refresh()
     }
 
@@ -117,19 +143,70 @@ final class LibraryController: ObservableObject {
                                           size: record.source.size, modifiedAt: record.source.modifiedAt,
                                           publication: record.source.publication)
             try await store.relink(documentID: id, entry: entry)
-        } catch { errorMessage = error.localizedDescription }
+            clearError(for: .move(id, classFolder))
+        } catch { setError(error.localizedDescription, for: .move(id, classFolder)) }
         await refresh()
     }
 
     func refresh() async {
-        do { documents = try await store.documents() }
-        catch { errorMessage = error.localizedDescription }
+        do {
+            documents = try await store.documents()
+            clearError(for: .refresh)
+        } catch {
+            setError(error.localizedDescription, for: .refresh)
+        }
+    }
+
+    func retryFailedOperation() async {
+        switch failedOperation {
+        case .inbox: await fileInbox()
+        case .refresh: await refresh()
+        case .importFiles(let urls, let className): await importFiles(urls, className: className)
+        case .archive(let id): await archiveDocument(id)
+        case .unarchive(let id): await unarchiveDocument(id)
+        case .move(let id, let className): await moveDocument(id, toClassFolder: className)
+        case .flush, .none: await retryFlush()
+        }
+    }
+
+    var canRetryError: Bool { failedOperation != nil }
+
+    func showError(_ message: String) {
+        errorMessage = message
+        failedOperation = nil
+    }
+
+    func dismissError() {
+        errorMessage = nil
+        failedOperation = nil
+    }
+
+    private func setError(_ message: String, for operation: FailedOperation) {
+        errorMessage = message
+        failedOperation = operation
+    }
+
+    private func clearError(for operation: FailedOperation) {
+        guard failedOperation?.kind == operation.kind else { return }
+        errorMessage = nil
+        failedOperation = nil
+    }
+
+    private func retryFlush() async {
+        do {
+            try await flush()
+            clearError(for: .flush)
+        } catch { setError(error.localizedDescription, for: .flush) }
     }
 
     func open(_ id: UUID) async throws -> DocumentSession {
         try await store.pinDocument(id)
         do { return try await loadSession(id) }
-        catch { await store.unpinDocument(id); throw error }
+        catch {
+            await store.unpinDocument(id)
+            showError(error.localizedDescription)
+            throw error
+        }
     }
 
     private func loadSession(_ id: UUID) async throws -> DocumentSession {
@@ -150,7 +227,13 @@ final class LibraryController: ObservableObject {
     }
 
     func close(_ id: UUID) async throws {
-        try await sessions[id]?.flush()
+        do {
+            try await sessions[id]?.flush()
+            clearError(for: .flush)
+        } catch {
+            setError(error.localizedDescription, for: .flush)
+            throw error
+        }
         await store.unpinDocument(id)
         await refresh()
     }
@@ -167,12 +250,13 @@ final class LibraryController: ObservableObject {
         Task {
             defer { if token != .invalid { UIApplication.shared.endBackgroundTask(token); token = .invalid } }
             do { try await flush() }
-            catch { errorMessage = "Ink could not be saved: " + error.localizedDescription }
+            catch { setError("Ink could not be saved: " + error.localizedDescription, for: .flush) }
         }
     }
 
     func importFiles(_ urls: [URL], className: String) async {
         guard !isImporting else { return }
+        let operation = FailedOperation.importFiles(urls, className)
         isImporting = true
         defer { isImporting = false }
         do {
@@ -184,7 +268,8 @@ final class LibraryController: ObservableObject {
                 let data = try await CoordinatedPDFReader.read(url)
                 try await importData(data, source: source)
             }
-        } catch { errorMessage = error.localizedDescription }
+            clearError(for: operation)
+        } catch { setError(error.localizedDescription, for: operation) }
         await refresh()
     }
 
@@ -192,6 +277,7 @@ final class LibraryController: ObservableObject {
         guard !isImporting else { return }
         isImporting = true
         defer { isImporting = false }
+        var inboxError: String?
         do {
             try await flush()
             let items = try InboxScanner.items(in: inbox)
@@ -204,10 +290,13 @@ final class LibraryController: ObservableObject {
                     // replaying on next foreground is safe, deleting here could erase newer bytes.
                     lastInboxImport = Date()
                 } catch {
-                    errorMessage = "Could not file \(item.source.filename). The Inbox copy is kept. \(error.localizedDescription)"
+                    inboxError = "Could not file \(item.source.filename). The Inbox copy is kept. \(error.localizedDescription)"
                 }
             }
-        } catch { errorMessage = error.localizedDescription }
+        } catch { inboxError = error.localizedDescription }
+        if let inboxError {
+            setError(inboxError, for: .inbox)
+        } else { clearError(for: .inbox) }
         await refresh()
     }
 

@@ -15,6 +15,7 @@ struct LibraryView: View {
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
     @StateObject private var thumbnails: ThumbnailCache
+    private let signingExpiryDate: Date?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var selection: LibrarySidebarSelection = .allSubjects
     @State private var showImport = false
@@ -22,9 +23,24 @@ struct LibraryView: View {
     @State private var moveClassName = ""
 
     init(library: LibraryController, presentation: PresentationState) {
+        self.init(library: library, presentation: presentation, signingExpiryDate: Self.embeddedSigningExpiryDate)
+    }
+
+    init(library: LibraryController, presentation: PresentationState, signingExpiryDate: Date?) {
+        self.init(library: library, presentation: presentation, signingExpiryDate: signingExpiryDate, thumbnailCache: nil)
+    }
+
+    init(library: LibraryController, presentation: PresentationState, signingExpiryDate: Date?,
+         thumbnailCache: ThumbnailCache?) {
         self.library = library
         self.presentation = presentation
-        _thumbnails = StateObject(wrappedValue: ThumbnailCache(store: library.store))
+        _thumbnails = StateObject(wrappedValue: thumbnailCache ?? ThumbnailCache(store: library.store))
+        self.signingExpiryDate = signingExpiryDate
+    }
+
+    private static var embeddedSigningExpiryDate: Date? {
+        Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
+            .flatMap { try? Data(contentsOf: $0) }.flatMap { ProvisioningProfile.expirationDate(in: $0) }
     }
 
     var body: some View {
@@ -98,8 +114,14 @@ struct LibraryView: View {
 #endif
         }
         .listStyle(.sidebar)
-        .navigationTitle("EmberPad")
+        .navigationSplitViewColumnWidth(min: 300, ideal: 300, max: 300)
+        .navigationTitle("")
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                Text("EmberPad")
+                    .font(.system(size: 28, design: .serif).weight(.semibold))
+                    .foregroundStyle(Theme.text)
+            }
             ToolbarItem(placement: .topBarLeading) {
                 Button("Sidebar", systemImage: "sidebar.left") { toggleSidebar() }
             }
@@ -131,7 +153,7 @@ struct LibraryView: View {
                 Button("Sync now") {}
                     .disabled(true)
             }
-            SigningFooterLine()
+            SigningFooterLine(expiry: signingExpiryDate)
         }
         .font(Theme.meta)
         .foregroundStyle(Theme.text2)
@@ -156,15 +178,41 @@ struct LibraryView: View {
                 .padding(.horizontal, 24)
                 .padding(.top, 8)
 
-                SigningDetailBanner()
+                if presentation.captureActive && presentation.externalSceneCount == 0 {
+                    HStack(spacing: 8) {
+                        Image(systemName: "rectangle.on.rectangle.slash")
+                        Text("Main screen capture detected. Private answers are hidden.")
+                        Spacer()
+                    }
+                    .font(Theme.meta)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(Theme.warnSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .foregroundStyle(Theme.warn)
+                    .padding(.horizontal, 24)
+                } else if presentation.externalSceneCount > 0 {
+                    HStack(spacing: 8) {
+                        Image(systemName: "display")
+                        Text("Student display connected. Stay in EmberPad while sharing.")
+                        Spacer()
+                    }
+                    .font(Theme.meta)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 24)
+                }
+
+                SigningDetailBanner(expiry: signingExpiryDate)
 
                 if let error = library.errorMessage {
                     HStack {
                         Image(systemName: "exclamationmark.triangle")
                         Text(error)
                         Spacer()
-                        Button("Retry") { Task { await library.refresh() } }
-                        Button("Dismiss") { library.errorMessage = nil }
+                        if library.canRetryError {
+                            Button("Retry") { Task { await library.retryFailedOperation() } }
+                        }
+                        Button("Dismiss") { library.dismissError() }
                     }
                     .font(Theme.meta)
                     .padding(.horizontal, 14).padding(.vertical, 10)
@@ -434,7 +482,7 @@ private struct ImportWorksheetView: View {
             .fileImporter(isPresented: $showPicker, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
                 switch result {
                 case .success(let urls): Task { await library.importFiles(urls, className: className); if library.errorMessage == nil { dismiss() } }
-                case .failure(let error): library.errorMessage = error.localizedDescription
+                case .failure(let error): library.showError(error.localizedDescription)
                 }
             }
         }
@@ -445,8 +493,7 @@ private struct ImportWorksheetView: View {
 // MARK: - Signing
 
 private struct SigningFooterLine: View {
-    private let expiry = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
-        .flatMap { try? Data(contentsOf: $0) }.flatMap { ProvisioningProfile.expirationDate(in: $0) }
+    let expiry: Date?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
@@ -472,8 +519,7 @@ private struct SigningFooterLine: View {
 }
 
 private struct SigningDetailBanner: View {
-    private let expiry = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
-        .flatMap { try? Data(contentsOf: $0) }.flatMap { ProvisioningProfile.expirationDate(in: $0) }
+    let expiry: Date?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
