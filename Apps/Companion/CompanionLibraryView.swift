@@ -89,6 +89,7 @@ struct CompanionLibraryContent: View {
             HStack {
                 Button("Choose master folder…", action: onChooseFolder)
                     .buttonStyle(.bordered)
+                    .disabled(isPreparing)
                 Button(isPreparing ? "Preparing…" : "Prepare iPad library", action: onPrepare)
                     .buttonStyle(.borderedProminent)
                     .tint(Self.emberRed)

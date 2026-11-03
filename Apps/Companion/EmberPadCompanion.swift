@@ -56,6 +56,7 @@ final class CompanionModel: ObservableObject {
     }
 
     func chooseFolder() {
+        guard !isPreparing else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -82,15 +83,21 @@ final class CompanionModel: ObservableObject {
         message = nil
         let root = folder
         Task {
-            let finishedAt = Date()
+            defer { self.isPreparing = false }
             do {
                 let snapshot = try await Task.detached(priority: .userInitiated) {
                     guard isCompanionSourceDirectory(root) else { throw CocoaError(.fileNoSuchFile) }
-                    let aliases = (try? ClassAliasTable.load()) ?? .empty
+                    let aliases = try ClassAliasTable.load()
                     return try EmberLibrarySource(root: root, aliases: aliases).read()
                 }.value
+                guard isCompanionSourceDirectory(root) else {
+                    self.snapshot = nil
+                    self.scannedAt = nil
+                    self.message = "Source folder not found."
+                    return
+                }
                 self.snapshot = snapshot
-                self.scannedAt = finishedAt
+                self.scannedAt = Date()
                 self.deliverToOutbox(snapshot)
             } catch {
                 if isCompanionSourceDirectory(root) {
@@ -101,7 +108,6 @@ final class CompanionModel: ObservableObject {
                     self.message = "Source folder not found."
                 }
             }
-            self.isPreparing = false
         }
     }
 
