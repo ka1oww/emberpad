@@ -1,22 +1,8 @@
 #if os(macOS)
 import Foundation
 
-/// Reads the iPad library straight from the Ember main folder (`~/Documents/Ember Projects`), read-only.
-///
-/// Only finished Student/Teacher pairs are listed, and "finished" is decided by publication records and SHA-256
-/// values alone, never by a file or folder name:
-///
-/// - **R1, paper.** A project with `paper.json` is finished when `audit/visual/<build>.json` has `status: pass` and
-///   its `student_pdf_sha256` and `teacher_pdf_sha256` equal the bytes of `artifacts/<build>/student.pdf` and
-///   `teacher.pdf`. The newest such record wins, by `reviewed_at`, then by the build record's `finished_at`.
-/// - **R2, tutorial.** A project with `tutorial.tex` (and no `paper.json`) is finished when `artifacts/latest.json`
-///   names a build whose two copies match the hashes it records, in either the `{student, teacher}` or the
-///   `{pdfs: {student: {sha256}, teacher: {sha256}}}` schema. An H2 Math tutorial also needs a sign-off record under
-///   `evidence/` bound to that build id and both hashes, otherwise it is a miss.
-///
-/// Pairing is structural: both copies come from one build directory, and each copy's role is the record key its
-/// hash matched. Nothing is ever written below the root. A project that no longer yields a pair keeps its previous
-/// entries ("no update"); the reader never removes a paper from the iPad.
+/// Builds a library snapshot from the configured Ember Projects root. See `README.md`,
+/// "Library source: Ember Projects", for selection, privacy and carry-forward rules.
 public struct EmberLibrarySource: Sendable {
     /// The subject folders the Ember publisher knows, plus H2 Econs. Every other top-level folder is skipped.
     public static let subjectFolders = ["A-Math", "H2 Chemistry", "H2 Econs", "H2 Math", "H2 Physics", "Pure Chemistry",
