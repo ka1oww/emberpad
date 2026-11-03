@@ -174,6 +174,17 @@ public actor LibraryStore {
         try refreshPairs()
     }
 
+    public func unarchive(documentID: UUID) throws {
+        var record = try read(documentID)
+        guard record.status == .archived else { throw LibraryError.invalidDocument }
+        let hasCurrentCollision = try documents().contains {
+            $0.id != documentID && $0.status == .current && $0.identity == record.identity
+        }
+        record.status = hasCurrentCollision ? .olderVersion : .current
+        try write(record)
+        try refreshPairs()
+    }
+
     public func relink(documentID: UUID, entry: ManifestEntry, status: DocumentStatus = .current) throws {
         var record = try read(documentID)
         guard record.source.sha256 == entry.sha256 else { throw LibraryError.hashMismatch }

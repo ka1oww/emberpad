@@ -40,8 +40,9 @@ final class LibraryControllerStatusTests: XCTestCase {
         let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
         let archivedEntry = try entry(classFolder: "Synthetic Class", path: "archived.pdf", key: "paper", bytes: "archived")
         let archived = try await store.importPDF(data: Data("archived".utf8), entry: archivedEntry, pageCount: 1)
+        try await store.saveDrawing(Data("ink".utf8), documentID: archived.id, page: 0, hasInk: true)
         _ = try await store.importPDF(data: Data("current".utf8),
-                                     entry: entry(classFolder: "Synthetic Class", path: "current.pdf", key: "paper", bytes: "current"),
+                                     entry: entry(classFolder: "Synthetic Class", path: "archived.pdf", key: "paper", bytes: "current"),
                                      pageCount: 1)
         try await store.archive(documentID: archived.id)
         let library = LibraryController(store: store, inbox: inbox)
@@ -67,6 +68,37 @@ final class LibraryControllerStatusTests: XCTestCase {
 
         let restored = try await store.document(archived.id)
         XCTAssertEqual(restored.status, .current)
+    }
+
+    func testUnarchiveUsesStoreIdentityDespiteMismatchedPublicationMetadata() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
+        let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
+        let archivedSource = try SourcePath(classFolder: "Synthetic Class", relativePath: "same-path.pdf")
+        let archivedData = Data("archived".utf8)
+        let archivedEntry = try ManifestEntry(
+            source: archivedSource, sha256: .digest(archivedData), size: Int64(archivedData.count), modifiedAt: Date(),
+            publication: Publication(subject: "Old Subject", classTag: "Old Tag", paperKey: PaperKey(rawValue: "old-paper"),
+                                     role: .student, title: "Archived Worksheet")
+        )
+        let archived = try await store.importPDF(data: archivedData, entry: archivedEntry, pageCount: 1)
+        try await store.archive(documentID: archived.id)
+
+        let currentData = Data("current".utf8)
+        let currentEntry = try ManifestEntry(
+            source: archivedSource, sha256: .digest(currentData), size: Int64(currentData.count), modifiedAt: Date(),
+            publication: Publication(subject: "New Subject", classTag: "New Tag", paperKey: PaperKey(rawValue: "new-paper"),
+                                     role: .student, title: "Current Worksheet")
+        )
+        _ = try await store.importPDF(data: currentData, entry: currentEntry, pageCount: 1)
+        let library = LibraryController(store: store, inbox: inbox)
+
+        await library.unarchiveDocument(archived.id)
+
+        let restored = try await store.document(archived.id)
+        XCTAssertEqual(restored.status, .olderVersion)
+        XCTAssertNil(library.errorMessage)
     }
 
     private func entry(classFolder: String, path: String, key: String, bytes: String) throws -> ManifestEntry {

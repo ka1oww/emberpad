@@ -14,6 +14,7 @@ import EmberSyncKit
 struct LibraryView: View {
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var thumbnails: ThumbnailCache
     private let signingExpiryDate: Date?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
@@ -53,6 +54,8 @@ struct LibraryView: View {
         .tint(Theme.tint)
         .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
         .task { await library.refresh() }
+        .onAppear { updateColumnVisibility(for: horizontalSizeClass) }
+        .onChange(of: horizontalSizeClass) { _, sizeClass in updateColumnVisibility(for: sizeClass) }
         .onChange(of: library.sidebarSelection) { _, new in
             if case .subject(let name) = new { library.selectedSubject = name }
             else if new == .allSubjects { library.selectedSubject = nil }
@@ -75,11 +78,16 @@ struct LibraryView: View {
         let rows = library.subjectsWithCounts
         let archivedCount = library.archivedStudentDocuments.count
         let totalCount = rows.reduce(0) { $0 + $1.count }
-        return List {
+        return List(selection: sidebarSelectionBinding) {
+            Text("EmberPad")
+                .font(.system(size: 28, design: .serif).weight(.semibold))
+                .foregroundStyle(Theme.text)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             Section {
-                SidebarSelectRow(title: "All subjects", systemImage: "square.grid.2x2",
-                                 count: totalCount, selected: library.sidebarSelection == .allSubjects) {
-                    library.sidebarSelection = .allSubjects
+                NavigationLink(value: LibrarySidebarSelection.allSubjects) {
+                    SidebarSelectRow(title: "All subjects", systemImage: "square.grid.2x2",
+                                     count: totalCount, selected: library.sidebarSelection == .allSubjects)
                 }
                 if rows.isEmpty {
                     Text("No subjects yet")
@@ -87,10 +95,10 @@ struct LibraryView: View {
                         .foregroundStyle(Theme.text3)
                 } else {
                     ForEach(rows.map(\.name), id: \.self) { name in
-                        SidebarSelectRow(title: name, systemImage: "folder",
-                                         count: rows.first(where: { $0.name == name })?.count ?? 0,
-                                         selected: library.sidebarSelection == .subject(name)) {
-                            library.sidebarSelection = .subject(name)
+                        NavigationLink(value: LibrarySidebarSelection.subject(name)) {
+                            SidebarSelectRow(title: name, systemImage: "folder",
+                                             count: rows.first(where: { $0.name == name })?.count ?? 0,
+                                             selected: library.sidebarSelection == .subject(name))
                         }
                     }
                 }
@@ -98,9 +106,9 @@ struct LibraryView: View {
                 Theme.sidebarSectionHeader("Subjects")
             }
             Section {
-                SidebarSelectRow(title: "Archived", systemImage: "archivebox",
-                                 count: archivedCount, selected: library.sidebarSelection == .archived) {
-                    library.sidebarSelection = .archived
+                NavigationLink(value: LibrarySidebarSelection.archived) {
+                    SidebarSelectRow(title: "Archived", systemImage: "archivebox",
+                                     count: archivedCount, selected: library.sidebarSelection == .archived)
                 }
             } header: {
                 Theme.sidebarSectionHeader("Library")
@@ -113,14 +121,10 @@ struct LibraryView: View {
 #endif
         }
         .listStyle(.sidebar)
+        .buttonStyle(.plain)
         .navigationSplitViewColumnWidth(min: 300, ideal: 300, max: 300)
         .navigationTitle("")
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Text("EmberPad")
-                    .font(.system(size: 28, design: .serif).weight(.semibold))
-                    .foregroundStyle(Theme.text)
-            }
             ToolbarItem(placement: .topBarLeading) {
                 Button("Sidebar", systemImage: "sidebar.left") { toggleSidebar() }
             }
@@ -130,6 +134,13 @@ struct LibraryView: View {
             }
         }
         .safeAreaInset(edge: .bottom) { sidebarFooter }
+    }
+
+    private var sidebarSelectionBinding: Binding<LibrarySidebarSelection?> {
+        Binding(
+            get: { library.sidebarSelection },
+            set: { if let selection = $0 { library.sidebarSelection = selection } }
+        )
     }
 
     private var sidebarFooter: some View {
@@ -338,6 +349,10 @@ struct LibraryView: View {
     private func toggleSidebar() {
         columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
     }
+
+    private func updateColumnVisibility(for sizeClass: UserInterfaceSizeClass?) {
+        columnVisibility = sizeClass == .compact ? .detailOnly : .all
+    }
 }
 
 private struct SidebarSelectRow: View {
@@ -345,27 +360,23 @@ private struct SidebarSelectRow: View {
     let systemImage: String
     let count: Int
     let selected: Bool
-    let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack {
-                Image(systemName: systemImage)
-                    .font(.system(size: 18))
-                    .foregroundStyle(selected ? Theme.onAccent : (systemImage == "folder" ? Theme.accent : Theme.text2))
-                Text(title)
-                Spacer()
-                Text("\(count)")
-                    .font(Theme.meta)
-                    .foregroundStyle(selected ? Theme.onAccent : Theme.text3)
-            }
-            .foregroundStyle(selected ? Theme.onAccent : Theme.text)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(selected ? Theme.accent : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        HStack {
+            Image(systemName: systemImage)
+                .font(.system(size: 18))
+                .foregroundStyle(selected ? Theme.onAccent : (systemImage == "folder" ? Theme.accent : Theme.text2))
+            Text(title)
+            Spacer()
+            Text("\(count)")
+                .font(Theme.meta)
+                .foregroundStyle(selected ? Theme.onAccent : Theme.text3)
         }
-        .buttonStyle(.plain)
+        .foregroundStyle(selected ? Theme.onAccent : Theme.text)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(selected ? Theme.accent : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .listRowBackground(Color.clear)
     }
 }

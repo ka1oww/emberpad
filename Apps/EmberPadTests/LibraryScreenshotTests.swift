@@ -6,6 +6,31 @@ import EmberSyncKit
 
 @MainActor
 final class LibraryScreenshotTests: XCTestCase {
+    func testCompactSidebarSelectionShowsDetailGrid() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
+        let source = try SourcePath(classFolder: "Synthetic Class", relativePath: "worksheet.pdf")
+        _ = try await store.importPDF(data: DeviceChecksTestPDF.data(), source: source, pageCount: 2)
+        let library = LibraryController(store: store, inbox: inbox)
+        await library.refresh()
+        let thumbnails = ThumbnailCache(store: store)
+        for document in library.documents { await thumbnails.thumbnail(for: document) }
+
+        for scheme: ColorScheme in [.light, .dark] {
+            attach(try await render(library, scheme: scheme, expiry: Date().addingTimeInterval(30 * 86_400),
+                                   thumbnails: thumbnails), named: "library-normal-\(scheme.label)")
+            let portrait = try await render(library, scheme: scheme, expiry: Date().addingTimeInterval(30 * 86_400),
+                                            thumbnails: thumbnails, width: 390, height: 844,
+                                            selection: .subject("Synthetic Class"))
+            XCTAssertEqual(library.selectedSubject, "Synthetic Class")
+            XCTAssertEqual(library.visibleCards.map(\.id), library.documents.map(\.id))
+            attach(portrait, named: "library-portrait-\(scheme.label)")
+        }
+    }
+
     func testRealLibraryViewStatesRenderWithSyntheticDocuments() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
@@ -42,6 +67,11 @@ final class LibraryScreenshotTests: XCTestCase {
         for scheme: ColorScheme in [.light, .dark] {
             let validExpiry = Date().addingTimeInterval(30 * 86_400)
             attach(try await render(library, scheme: scheme, expiry: validExpiry, thumbnails: thumbnails), named: "library-normal-\(scheme.label)")
+            let compactImage = try await render(library, scheme: scheme, expiry: validExpiry, thumbnails: thumbnails,
+                                                width: 390, height: 844, selection: .subject("Synthetic Class"))
+            XCTAssertEqual(library.selectedSubject, "Synthetic Class")
+            XCTAssertEqual(library.visibleCards.count, 1)
+            attach(compactImage, named: "library-portrait-\(scheme.label)")
             attach(try await render(library, scheme: scheme, expiry: Date().addingTimeInterval(36 * 3_600), thumbnails: thumbnails),
                    named: "library-signing-amber-\(scheme.label)")
             attach(try await render(library, scheme: scheme, expiry: Date().addingTimeInterval(12 * 3_600), thumbnails: thumbnails),
@@ -61,8 +91,6 @@ final class LibraryScreenshotTests: XCTestCase {
             let emptyStore = try LibraryStore(root: root.appendingPathComponent("Empty-\(scheme.label)", isDirectory: true))
             let emptyLibrary = LibraryController(store: emptyStore, inbox: inbox)
             attach(try await render(emptyLibrary, scheme: scheme, expiry: validExpiry), named: "library-empty-\(scheme.label)")
-            attach(try await render(emptyLibrary, scheme: scheme, expiry: validExpiry, width: 390, height: 844),
-                   named: "library-portrait-\(scheme.label)")
 
             let importingRoot = root.appendingPathComponent("Importing-\(scheme.label)", isDirectory: true)
             let importingStore = try LibraryStore(root: importingRoot)
@@ -86,14 +114,16 @@ final class LibraryScreenshotTests: XCTestCase {
     private func render(_ library: LibraryController, scheme: ColorScheme, expiry: Date?,
                         presentation: PresentationState? = nil,
                         thumbnails: ThumbnailCache? = nil,
-                        width: CGFloat = 1024, height: CGFloat = 768) async throws -> UIImage {
+                        width: CGFloat = 1024, height: CGFloat = 768,
+                        selection: LibrarySidebarSelection? = nil) async throws -> UIImage {
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
         let hosting = UIHostingController(rootView: LibraryView(
             library: library,
             presentation: presentation ?? PresentationState(),
             signingExpiryDate: expiry,
             thumbnailCache: thumbnails
-        ).environment(\.colorScheme, scheme))
+        ).environment(\.colorScheme, scheme)
+            .environment(\.horizontalSizeClass, width < 600 ? .compact : .regular))
         let window: UIWindow
         if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
             window = UIWindow(windowScene: scene)
@@ -106,6 +136,10 @@ final class LibraryScreenshotTests: XCTestCase {
         hosting.view.frame = bounds
         hosting.view.setNeedsLayout()
         hosting.view.layoutIfNeeded()
+        if let selection {
+            library.sidebarSelection = selection
+            try await Task.sleep(for: .milliseconds(80))
+        }
         try await Task.sleep(for: .milliseconds(80))
         hosting.view.layoutIfNeeded()
 

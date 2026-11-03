@@ -66,10 +66,10 @@ struct WorksheetCard: View {
 
     private var badgeRow: some View {
         HStack(spacing: 6) {
-            if record.isUpdated {
-                badge("Updated", foreground: Theme.onAccent, background: Theme.accent, outline: nil)
-            } else if record.status == .olderVersion {
+            if record.status == .olderVersion {
                 badge("Older version", foreground: Theme.text3, background: .clear, outline: Theme.text3)
+            } else if record.isUpdated {
+                badge("Updated", foreground: Theme.onAccent, background: Theme.accent, outline: nil)
             }
             if hasTeacherCopy {
                 HStack(spacing: 4) {

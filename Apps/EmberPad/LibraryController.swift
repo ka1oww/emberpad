@@ -133,19 +133,7 @@ final class LibraryController: ObservableObject {
     func unarchiveDocument(_ id: UUID) async {
         let operation = FailedOperation.unarchive(id)
         do {
-            let record = try await store.document(id)
-            let documents = try await store.documents()
-            let hasCurrentCopyInClass = documents.contains { candidate in
-                guard candidate.id != id, candidate.status == .current,
-                      candidate.role == record.role,
-                      candidate.subject == record.subject,
-                      candidate.classTag == record.classTag,
-                      candidate.source.source.classFolder == record.source.source.classFolder else { return false }
-                if let paperKey = record.paperKey { return candidate.paperKey == paperKey }
-                return candidate.source.source.relativePath == record.source.source.relativePath
-            }
-            let status: DocumentStatus = hasCurrentCopyInClass ? .olderVersion : .current
-            try await store.relink(documentID: id, entry: record.source, status: status)
+            try await store.unarchive(documentID: id)
             clearError(for: operation)
         } catch { setError(error.localizedDescription, for: operation) }
         await refresh(preservingFailureFor: operation)
