@@ -6,9 +6,10 @@ Base code for a personal offline iPad teaching app. Visual design and the teache
 
 | Path | Responsibility |
 | --- | --- |
-| `EmberPad.xcodeproj` | iPad app, macOS Companion, and inert `resign` aggregate target; local package dependency |
-| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene |
-| `Apps/Companion` | macOS menu-bar shell: choose a local folder and generate a manifest preview, with no networking |
+| `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; file-system synchronized folders; local package dependency |
+| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene (add `.swift` files here with no project edit) |
+| `Apps/Companion` | macOS menu-bar shell: choose a local folder and generate a manifest preview, with no networking (add `.swift` files here with no project edit) |
+| `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app (add `.swift` test files here with no project edit) |
 | `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser and tests |
 | `Config/Shared.xcconfig` | One placeholder `EMBERPAD_BUNDLE_ID`, used by both native platforms |
 | `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
@@ -22,6 +23,10 @@ swift test --package-path EmberSyncKit
 xcodebuild -project EmberPad.xcodeproj -scheme EmberPad \
   -configuration Debug -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath /tmp/emberpad-ios CODE_SIGNING_ALLOWED=NO build
+UDID=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; c=[x for v in d.values() for x in v]; print(next((x for x in c if x["name"].startswith("iPad")), c[0])["udid"])')
+xcodebuild -project EmberPad.xcodeproj -scheme EmberPad \
+  -configuration Debug -destination "id=$UDID" \
+  -derivedDataPath /tmp/emberpad-test CODE_SIGNING_ALLOWED=NO test
 xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' \
   -configuration Debug -destination 'generic/platform=macOS' \
   -derivedDataPath /tmp/emberpad-mac CODE_SIGNING_ALLOWED=NO build
@@ -29,9 +34,9 @@ zsh -n resign/renew.zsh
 plutil -lint resign/dev.emberpad.renew.plist
 ```
 
-These commands do not install on a device, provision an App ID or need an Apple account. Never sign the placeholder ID. The checked-in `EmberPad.xcodeproj` and shared schemes are the source of truth; commit project changes with source changes.
+These commands do not install on a device, provision an App ID or need an Apple account. Never sign the placeholder ID. The checked-in `EmberPad.xcodeproj` and shared schemes are the source of truth. `Apps/EmberPad`, `Apps/Companion` and `Apps/EmberPadTests` are file-system synchronized folders, so adding or removing a `.swift` file there needs no `project.pbxproj` edit (`Info.plist` files stay referenced by path and are excluded from membership). Commit test changes with source changes.
 
-The GitHub workflow runs package tests, both unsigned builds, and syntax/plist checks. Ink feel, touch routing, Pencil double-tap, rendering at 1x/2x, capture traits, external-display behavior and signing cannot be established by those checks.
+The GitHub workflow runs package tests, both unsigned builds, the EmberPadTests simulator suite, and syntax/plist checks. Ink feel, touch routing, Pencil double-tap, rendering at 1x/2x, capture traits, external-display behavior and signing cannot be established by those checks.
 
 ## Offline library
 
