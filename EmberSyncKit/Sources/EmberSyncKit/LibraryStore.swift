@@ -174,15 +174,19 @@ public actor LibraryStore {
         try refreshPairs()
     }
 
-    public func relink(documentID: UUID, entry: ManifestEntry) throws {
+    public func relink(documentID: UUID, entry: ManifestEntry, status: DocumentStatus = .current) throws {
         var record = try read(documentID)
         guard record.source.sha256 == entry.sha256 else { throw LibraryError.hashMismatch }
-        guard record.role == entry.role,
-              try !documents().contains(where: { $0.id != documentID && $0.status == .current && $0.identity == entry.identity })
-        else { throw LibraryError.invalidDocument }
+        guard record.role == entry.role else { throw LibraryError.invalidDocument }
+        if status == .current {
+            let hasCurrentCollision = try documents().contains {
+                $0.id != documentID && $0.status == .current && $0.identity == entry.identity
+            }
+            guard !hasCurrentCollision else { throw LibraryError.invalidDocument }
+        }
         record.source = entry
         record.title = entry.title
-        record.status = .current
+        record.status = status
         try write(record)
         try refreshPairs()
     }

@@ -3,6 +3,12 @@ import PDFKit
 import PencilKit
 import EmberSyncKit
 
+enum LibrarySidebarSelection: Hashable {
+    case allSubjects
+    case subject(String)
+    case archived
+}
+
 @MainActor
 final class LibraryController: ObservableObject {
     let store: LibraryStore
@@ -47,8 +53,9 @@ final class LibraryController: ObservableObject {
     @Published var selectedSubject: String?
     /// Selected class tag chip. `nil` shows all classes within the subject.
     @Published var selectedClassTag: String?
+    @Published var sidebarSelection: LibrarySidebarSelection = .allSubjects
     /// When true the detail column shows archived Student worksheets instead of the subject grid.
-    @Published var showingArchived = false
+    var showingArchived: Bool { sidebarSelection == .archived }
     /// Design 5.1 detail toolbar sort. Newest first by `importedAt`, then title.
     @Published var sortNewestFirst = true
 
@@ -114,26 +121,40 @@ final class LibraryController: ObservableObject {
     /// Long-press Archive from the card context menu. Teacher copies never reach this path
     /// because they are never cards.
     func archiveDocument(_ id: UUID) async {
+        let operation = FailedOperation.archive(id)
         do {
             try await store.archive(documentID: id)
-            clearError(for: .archive(id))
-        } catch { setError(error.localizedDescription, for: .archive(id)) }
-        await refresh()
+            clearError(for: operation)
+        } catch { setError(error.localizedDescription, for: operation) }
+        await refresh(preservingFailureFor: operation)
     }
 
-    /// Long-press Unarchive from the Archived grid. Relinking the same entry restores `.current`.
+    /// Long-press Unarchive from the Archived grid.
     func unarchiveDocument(_ id: UUID) async {
+        let operation = FailedOperation.unarchive(id)
         do {
             let record = try await store.document(id)
-            try await store.relink(documentID: id, entry: record.source)
-            clearError(for: .unarchive(id))
-        } catch { setError(error.localizedDescription, for: .unarchive(id)) }
-        await refresh()
+            let documents = try await store.documents()
+            let hasCurrentCopyInClass = documents.contains { candidate in
+                guard candidate.id != id, candidate.status == .current,
+                      candidate.role == record.role,
+                      candidate.subject == record.subject,
+                      candidate.classTag == record.classTag,
+                      candidate.source.source.classFolder == record.source.source.classFolder else { return false }
+                if let paperKey = record.paperKey { return candidate.paperKey == paperKey }
+                return candidate.source.source.relativePath == record.source.source.relativePath
+            }
+            let status: DocumentStatus = hasCurrentCopyInClass ? .olderVersion : .current
+            try await store.relink(documentID: id, entry: record.source, status: status)
+            clearError(for: operation)
+        } catch { setError(error.localizedDescription, for: operation) }
+        await refresh(preservingFailureFor: operation)
     }
 
     /// Long-press Move to class: files the same bytes under a new class folder via relink.
     /// For v1 copies the subject follows the class folder; v2 publication metadata is preserved.
     func moveDocument(_ id: UUID, toClassFolder classFolder: String) async {
+        let operation = FailedOperation.move(id, classFolder)
         do {
             let record = try await store.document(id)
             guard record.role == .student else { throw LibraryError.invalidDocument }
@@ -142,17 +163,22 @@ final class LibraryController: ObservableObject {
             let entry = try ManifestEntry(source: target, sha256: record.source.sha256,
                                           size: record.source.size, modifiedAt: record.source.modifiedAt,
                                           publication: record.source.publication)
-            try await store.relink(documentID: id, entry: entry)
-            clearError(for: .move(id, classFolder))
-        } catch { setError(error.localizedDescription, for: .move(id, classFolder)) }
-        await refresh()
+            try await store.relink(documentID: id, entry: entry, status: record.status)
+            clearError(for: operation)
+        } catch { setError(error.localizedDescription, for: operation) }
+        await refresh(preservingFailureFor: operation)
     }
 
     func refresh() async {
+        await refresh(preservingFailureFor: nil)
+    }
+
+    private func refresh(preservingFailureFor operation: FailedOperation?) async {
         do {
             documents = try await store.documents()
             clearError(for: .refresh)
         } catch {
+            if let operation, failedOperation?.kind == operation.kind { return }
             setError(error.localizedDescription, for: .refresh)
         }
     }
@@ -270,10 +296,11 @@ final class LibraryController: ObservableObject {
             }
             clearError(for: operation)
         } catch { setError(error.localizedDescription, for: operation) }
-        await refresh()
+        await refresh(preservingFailureFor: operation)
     }
 
     func fileInbox() async {
+        let operation = FailedOperation.inbox
         guard !isImporting else { return }
         isImporting = true
         defer { isImporting = false }
@@ -295,9 +322,9 @@ final class LibraryController: ObservableObject {
             }
         } catch { inboxError = error.localizedDescription }
         if let inboxError {
-            setError(inboxError, for: .inbox)
-        } else { clearError(for: .inbox) }
-        await refresh()
+            setError(inboxError, for: operation)
+        } else { clearError(for: operation) }
+        await refresh(preservingFailureFor: operation)
     }
 
     private func importData(_ data: Data, source: SourcePath) async throws {

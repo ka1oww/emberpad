@@ -27,7 +27,7 @@ final class LibraryScreenshotTests: XCTestCase {
         try await archivedStore.archive(documentID: archivedRecord.id)
         let archivedLibrary = LibraryController(store: archivedStore, inbox: inbox)
         await archivedLibrary.refresh()
-        archivedLibrary.showingArchived = true
+        archivedLibrary.sidebarSelection = .archived
         let archivedThumbnails = ThumbnailCache(store: archivedStore)
         for document in archivedLibrary.documents { await archivedThumbnails.thumbnail(for: document) }
 
@@ -62,7 +62,7 @@ final class LibraryScreenshotTests: XCTestCase {
             let emptyLibrary = LibraryController(store: emptyStore, inbox: inbox)
             attach(try await render(emptyLibrary, scheme: scheme, expiry: validExpiry), named: "library-empty-\(scheme.label)")
             attach(try await render(emptyLibrary, scheme: scheme, expiry: validExpiry, width: 390, height: 844),
-                   named: "library-portrait-collapse-\(scheme.label)")
+                   named: "library-portrait-\(scheme.label)")
 
             let importingRoot = root.appendingPathComponent("Importing-\(scheme.label)", isDirectory: true)
             let importingStore = try LibraryStore(root: importingRoot)

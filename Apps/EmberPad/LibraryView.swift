@@ -17,7 +17,6 @@ struct LibraryView: View {
     @StateObject private var thumbnails: ThumbnailCache
     private let signingExpiryDate: Date?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
-    @State private var selection: LibrarySidebarSelection = .allSubjects
     @State private var showImport = false
     @State private var movingDocument: DocumentRecord?
     @State private var moveClassName = ""
@@ -52,9 +51,9 @@ struct LibraryView: View {
             }
         }
         .tint(Theme.tint)
+        .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
         .task { await library.refresh() }
-        .onChange(of: selection) { _, new in
-            library.showingArchived = (new == .archived)
+        .onChange(of: library.sidebarSelection) { _, new in
             if case .subject(let name) = new { library.selectedSubject = name }
             else if new == .allSubjects { library.selectedSubject = nil }
             library.selectedClassTag = nil
@@ -62,7 +61,7 @@ struct LibraryView: View {
         .onChange(of: library.selectedSubject) { _, subject in
             if let subject, !library.subjectsWithCounts.contains(where: { $0.name == subject }) {
                 library.selectedSubject = nil
-                selection = .allSubjects
+                library.sidebarSelection = .allSubjects
             }
             if let tag = library.selectedClassTag, !library.availableClassTags.contains(tag) {
                 library.selectedClassTag = nil
@@ -79,8 +78,8 @@ struct LibraryView: View {
         return List {
             Section {
                 SidebarSelectRow(title: "All subjects", systemImage: "square.grid.2x2",
-                                 count: totalCount, selected: selection == .allSubjects) {
-                    selection = .allSubjects
+                                 count: totalCount, selected: library.sidebarSelection == .allSubjects) {
+                    library.sidebarSelection = .allSubjects
                 }
                 if rows.isEmpty {
                     Text("No subjects yet")
@@ -90,8 +89,8 @@ struct LibraryView: View {
                     ForEach(rows.map(\.name), id: \.self) { name in
                         SidebarSelectRow(title: name, systemImage: "folder",
                                          count: rows.first(where: { $0.name == name })?.count ?? 0,
-                                         selected: selection == .subject(name)) {
-                            selection = .subject(name)
+                                         selected: library.sidebarSelection == .subject(name)) {
+                            library.sidebarSelection = .subject(name)
                         }
                     }
                 }
@@ -100,8 +99,8 @@ struct LibraryView: View {
             }
             Section {
                 SidebarSelectRow(title: "Archived", systemImage: "archivebox",
-                                 count: archivedCount, selected: selection == .archived) {
-                    selection = .archived
+                                 count: archivedCount, selected: library.sidebarSelection == .archived) {
+                    library.sidebarSelection = .archived
                 }
             } header: {
                 Theme.sidebarSectionHeader("Library")
@@ -131,7 +130,6 @@ struct LibraryView: View {
             }
         }
         .safeAreaInset(edge: .bottom) { sidebarFooter }
-        .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
     }
 
     private var sidebarFooter: some View {
@@ -268,7 +266,6 @@ struct LibraryView: View {
             }
         }
         .refreshable { await library.fileInbox() }
-        .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
         .sheet(item: $movingDocument) { record in
             MoveToClassSheet(library: library, record: record, className: $moveClassName)
         }
@@ -341,12 +338,6 @@ struct LibraryView: View {
     private func toggleSidebar() {
         columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
     }
-}
-
-enum LibrarySidebarSelection: Hashable {
-    case allSubjects
-    case subject(String)
-    case archived
 }
 
 private struct SidebarSelectRow: View {
