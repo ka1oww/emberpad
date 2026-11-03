@@ -19,6 +19,7 @@ final class DocumentSession: ObservableObject {
     private var inFlight: Task<Void, Error>?
     private var inFlightID: UUID?
     var drawingDidChange: ((Int, PKDrawing) -> Void)?
+    var hasUnsavedInk: Bool { !dirty.isEmpty }
 
     init(record: DocumentRecord, pdf: PDFDocument, originalURL: URL, drawings: [Int: PKDrawing], store: LibraryStore) {
         self.record = record; self.pdf = pdf; self.originalURL = originalURL

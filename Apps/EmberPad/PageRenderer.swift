@@ -268,7 +268,7 @@ private struct EditorTitleBlock: View {
                 .font(Theme.documentTitle)
                 .foregroundStyle(Theme.text)
                 .lineLimit(1)
-            Text("Page \(currentPage + 1) of \(session.pdf.pageCount) · \(session.saveError == nil ? "saved" : "not saved")")
+            Text("Page \(currentPage + 1) of \(session.pdf.pageCount) · \(session.saveError == nil && !session.hasUnsavedInk ? "saved" : "not saved")")
                 .font(Theme.pageMeta)
                 .foregroundStyle(Theme.text2)
                 .lineLimit(1)
