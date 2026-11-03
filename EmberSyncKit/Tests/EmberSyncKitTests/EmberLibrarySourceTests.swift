@@ -82,23 +82,30 @@ struct SyntheticEmberTree {
                      "teacher": ["path": "artifacts/\(build)/teacher.pdf", "sha256": Self.sha(teacher), "pages": 4]]])
     }
 
-    /// An H2 Math sign-off record in one of the shapes seen under `evidence/`.
-    func signoff(_ project: String, _ path: String, build: String, student: String, teacher: String, shape: SignoffShape) throws {
+    /// An H2 Math evidence record, including rejected legacy alternatives for negative fixtures.
+    func signoff(_ project: String, _ path: String, build: String, student: String, teacher: String, shape: SignoffShape,
+                 verbatim: Any? = "synthetic approval") throws {
         let hashes = ["student": Self.sha(student), "teacher": Self.sha(teacher)]
         var record: [String: Any] = ["build_id": build]
         switch shape {
         case .signoffSchema: record["schema"] = "ember.math-tutorial-signoff/v1"; record["pdf_sha256"] = hashes
-            record["verbatim"] = "synthetic approval"
-        case .boardVerdict: record["schema"] = "ember.tutorial-signoff-board/v1"; record["pdfs"] = hashes
+            if let verbatim { record["verbatim"] = verbatim }
+        case .signoffSchemaPdfs:
+            record["schema"] = "ember.math-tutorial-signoff/v1"
+            record["pdfs"] = ["student": ["sha256": Self.sha(student)], "teacher": ["sha256": Self.sha(teacher)]]
+            if let verbatim { record["verbatim"] = verbatim }
+        case .captainVerdict: record["schema"] = "ember.tutorial-signoff-board/v1"; record["pdfs"] = hashes
             record["captain_verdict"] = ["round": 2, "result": "synthetic"]
-        case .embeddedSignoff: record["schema"] = "ember.math-tutorial-visual-review/v2"; record["pdf_sha256"] = hashes
+        case .captainApproval: record["schema"] = "ember.math-tutorial-visual-review/v2"; record["pdf_sha256"] = hashes
+            record["captain_approval"] = ["round": 2, "words": "synthetic approval"]
+        case .captainSignoff: record["schema"] = "ember.math-tutorial-visual-review/v2"; record["pdf_sha256"] = hashes
             record["captain_signoff"] = ["round": 3, "words": "synthetic approval"]
         case .machineCheckOnly: record["schema"] = "ember.math-tutorial-final-check/v1"; record["pdf_sha256"] = hashes
         }
         try write("\(project)/evidence/\(path)", json: record)
     }
 
-    enum SignoffShape { case signoffSchema, boardVerdict, embeddedSignoff, machineCheckOnly }
+    enum SignoffShape { case signoffSchema, signoffSchemaPdfs, captainVerdict, captainApproval, captainSignoff, machineCheckOnly }
 }
 
 struct EmberLibrarySourceTests {
@@ -162,18 +169,34 @@ struct EmberLibrarySourceTests {
         #expect(snapshot.misses.allSatisfy { $0.reason == .paperNotSignedOff })
     }
 
-    @Test func paperSignoffOrderingDoesNotUseSignedAt() throws {
+    @Test func paperSignoffRequiresAValidReviewTimestamp() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         let project = "H2 Chemistry/Synthetic Review Timestamp Paper"
         try tree.paper(project)
         try tree.build(project, "reviewed", student: "reviewed student", teacher: "reviewed teacher")
         try tree.build(project, "signed", student: "signed student", teacher: "signed teacher")
+        try tree.build(project, "invalid", student: "invalid student", teacher: "invalid teacher")
         try tree.g11(project, "reviewed", student: "reviewed student", teacher: "reviewed teacher",
                      reviewedAt: "2026-08-23")
         try tree.g11(project, "signed", student: "signed student", teacher: "signed teacher",
                      reviewedAt: nil, signedAt: "2099-01-01")
+        try tree.g11(project, "invalid", student: "invalid student", teacher: "invalid teacher",
+                     reviewedAt: "not-a-timestamp")
+        let missing = "H2 Chemistry/Synthetic Missing Review Timestamp Paper"
+        try tree.paper(missing)
+        try tree.build(missing, "b1", student: "missing student", teacher: "missing teacher")
+        try tree.g11(missing, "b1", student: "missing student", teacher: "missing teacher",
+                     reviewedAt: nil, signedAt: "2099-01-01")
+        let unparseable = "H2 Chemistry/Synthetic Invalid Review Timestamp Paper"
+        try tree.paper(unparseable)
+        try tree.build(unparseable, "b1", student: "unparseable student", teacher: "unparseable teacher")
+        try tree.g11(unparseable, "b1", student: "unparseable student", teacher: "unparseable teacher",
+                     reviewedAt: "not-a-timestamp")
 
-        #expect(try read(tree).pairs.first?.buildID == "reviewed")
+        let snapshot = try read(tree)
+        #expect(snapshot.pairs.first?.buildID == "reviewed")
+        #expect(snapshot.misses.map(\.project) == [unparseable, missing])
+        #expect(snapshot.misses.allSatisfy { $0.reason == .paperNotSignedOff })
     }
 
     @Test func equalReviewDatesFallBackToTheBuildRecordFinishTime() throws {
@@ -333,25 +356,49 @@ struct EmberLibrarySourceTests {
         try math("A Signed Schema Tutorial") {
             try tree.signoff($0, "signoff.json", build: "b2", student: "A Signed Schema Tutorial s", teacher: "A Signed Schema Tutorial t", shape: .signoffSchema)
         }
+        try math("AA Signed Schema PDFs Tutorial") {
+            try tree.signoff($0, "signoff.json", build: "b2", student: "AA Signed Schema PDFs Tutorial s",
+                             teacher: "AA Signed Schema PDFs Tutorial t", shape: .signoffSchemaPdfs)
+        }
         try math("B Signed Board Tutorial") {
             try tree.signoff($0, "signoff/round2/board-record.json", build: "b2", student: "B Signed Board Tutorial s",
-                             teacher: "B Signed Board Tutorial t", shape: .boardVerdict)
+                             teacher: "B Signed Board Tutorial t", shape: .captainVerdict)
         }
-        try math("C Signed Review Tutorial") {
-            try tree.signoff($0, "visual-review.json", build: "b2", student: "C Signed Review Tutorial s",
-                             teacher: "C Signed Review Tutorial t", shape: .embeddedSignoff)
+        try math("C Captain Approval Tutorial") {
+            try tree.signoff($0, "visual-review.json", build: "b2", student: "C Captain Approval Tutorial s",
+                             teacher: "C Captain Approval Tutorial t", shape: .captainApproval)
         }
-        try math("D Unsigned Tutorial", signoff: nil)
-        try math("E Earlier Build Signed Tutorial") {
-            try tree.signoff($0, "signoff.json", build: "b1", student: "E Earlier Build Signed Tutorial s",
-                             teacher: "E Earlier Build Signed Tutorial t", shape: .signoffSchema)
+        try math("D Captain Signoff Tutorial") {
+            try tree.signoff($0, "signoff.json", build: "b2", student: "D Captain Signoff Tutorial s",
+                             teacher: "D Captain Signoff Tutorial t", shape: .captainSignoff)
         }
-        try math("F Other Bytes Signed Tutorial") {
-            try tree.signoff($0, "signoff.json", build: "b2", student: "F Other Bytes Signed Tutorial s", teacher: "older", shape: .signoffSchema)
+        try math("E Unsigned Tutorial", signoff: nil)
+        try math("F Empty Verbatim Tutorial") {
+            try tree.signoff($0, "signoff.json", build: "b2", student: "F Empty Verbatim Tutorial s",
+                             teacher: "F Empty Verbatim Tutorial t", shape: .signoffSchema, verbatim: "")
         }
-        try math("G Machine Check Only Tutorial") {
-            try tree.signoff($0, "final-check.json", build: "b2", student: "G Machine Check Only Tutorial s",
-                             teacher: "G Machine Check Only Tutorial t", shape: .machineCheckOnly)
+        try math("G Whitespace Verbatim Tutorial") {
+            try tree.signoff($0, "signoff.json", build: "b2", student: "G Whitespace Verbatim Tutorial s",
+                             teacher: "G Whitespace Verbatim Tutorial t", shape: .signoffSchema, verbatim: " \n\t ")
+        }
+        try math("H Missing Verbatim Tutorial") {
+            try tree.signoff($0, "signoff.json", build: "b2", student: "H Missing Verbatim Tutorial s",
+                             teacher: "H Missing Verbatim Tutorial t", shape: .signoffSchema, verbatim: nil)
+        }
+        try math("I Nonstring Verbatim Tutorial") {
+            try tree.signoff($0, "signoff.json", build: "b2", student: "I Nonstring Verbatim Tutorial s",
+                             teacher: "I Nonstring Verbatim Tutorial t", shape: .signoffSchema, verbatim: 42)
+        }
+        try math("J Earlier Build Signed Tutorial") {
+            try tree.signoff($0, "signoff.json", build: "b1", student: "J Earlier Build Signed Tutorial s",
+                             teacher: "J Earlier Build Signed Tutorial t", shape: .signoffSchema)
+        }
+        try math("K Other Bytes Signed Tutorial") {
+            try tree.signoff($0, "signoff.json", build: "b2", student: "K Other Bytes Signed Tutorial s", teacher: "older", shape: .signoffSchema)
+        }
+        try math("L Machine Check Only Tutorial") {
+            try tree.signoff($0, "final-check.json", build: "b2", student: "L Machine Check Only Tutorial s",
+                             teacher: "L Machine Check Only Tutorial t", shape: .machineCheckOnly)
         }
         // H2 Chemistry tutorials need no sign-off.
         let chem = "H2 Chemistry/Synthetic Chemistry Tutorial"
@@ -360,9 +407,13 @@ struct EmberLibrarySourceTests {
 
         let snapshot = try read(tree)
         #expect(snapshot.pairs.map(\.project) == ["H2 Chemistry/Synthetic Chemistry Tutorial", "H2 Math/A Signed Schema Tutorial",
-                                                  "H2 Math/B Signed Board Tutorial", "H2 Math/C Signed Review Tutorial"])
-        #expect(snapshot.misses.map(\.project) == ["H2 Math/D Unsigned Tutorial", "H2 Math/E Earlier Build Signed Tutorial",
-                                                   "H2 Math/F Other Bytes Signed Tutorial", "H2 Math/G Machine Check Only Tutorial"])
+                                                  "H2 Math/AA Signed Schema PDFs Tutorial"])
+        #expect(snapshot.misses.map(\.project) == ["H2 Math/B Signed Board Tutorial", "H2 Math/C Captain Approval Tutorial",
+                                                   "H2 Math/D Captain Signoff Tutorial", "H2 Math/E Unsigned Tutorial",
+                                                   "H2 Math/F Empty Verbatim Tutorial", "H2 Math/G Whitespace Verbatim Tutorial",
+                                                   "H2 Math/H Missing Verbatim Tutorial", "H2 Math/I Nonstring Verbatim Tutorial",
+                                                   "H2 Math/J Earlier Build Signed Tutorial", "H2 Math/K Other Bytes Signed Tutorial",
+                                                   "H2 Math/L Machine Check Only Tutorial"])
         #expect(snapshot.misses.allSatisfy { $0.reason == .mathTutorialUnsigned })
     }
 

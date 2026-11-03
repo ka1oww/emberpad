@@ -447,7 +447,7 @@ private struct Reader {
         guard let paper = json(project.appendingPathComponent("paper.json")) else {
             return .miss(.invalidRecord, "paper.json is not a JSON object", key)
         }
-        struct Candidate { let reviewedAt: Date?; let finishedAt: Date?; let build: String }
+        struct Candidate { let reviewedAt: Date; let finishedAt: Date?; let build: String }
         var candidates: [Candidate] = []
         var seen: Set<String> = []
         let audit = project.appendingPathComponent("audit/visual", isDirectory: true)
@@ -460,15 +460,15 @@ private struct Reader {
             guard let signoff = json(record), let schema = signoff["schema_version"] as? String,
                   Self.visualSignoffSchemas.contains(schema), signoff["status"] as? String == "pass",
                   let build = signoff["build_id"] as? String, Self.isSafeComponent(build), !seen.contains(build),
+                  let reviewedAt = Self.timestamp(signoff["reviewed_at"] as? String),
                   let student = signoff["student_pdf_sha256"] as? String, let teacher = signoff["teacher_pdf_sha256"] as? String,
                   matches(project: project, build: build, student: student, teacher: teacher) else { continue }
             seen.insert(build)
             let finished = json(project.appendingPathComponent("artifacts/\(build)/build-record.json"))?["finished_at"] as? String
-            candidates.append(Candidate(reviewedAt: Self.timestamp(signoff["reviewed_at"] as? String),
-                                        finishedAt: Self.timestamp(finished), build: build))
+            candidates.append(Candidate(reviewedAt: reviewedAt, finishedAt: Self.timestamp(finished), build: build))
         }
         guard let pick = candidates.max(by: { lhs, rhs in
-            if lhs.reviewedAt != rhs.reviewedAt { return Self.datePrecedes(lhs.reviewedAt, rhs.reviewedAt) }
+            if lhs.reviewedAt != rhs.reviewedAt { return lhs.reviewedAt < rhs.reviewedAt }
             if lhs.finishedAt != rhs.finishedAt { return Self.datePrecedes(lhs.finishedAt, rhs.finishedAt) }
             return lhs.build < rhs.build
         }) else {
@@ -522,9 +522,7 @@ private struct Reader {
         }
     }
 
-    /// A JSON object under `evidence/` naming the build, recording both hashes (`pdf_sha256` or `pdfs`), and carrying
-    /// a captain approval: the `ember.math-tutorial-signoff/v1` schema or a `captain_verdict`, `captain_approval` or
-    /// `captain_signoff` object.
+    /// A JSON object under `evidence/` with the required schema, build, hashes and non-empty verbatim approval.
     private mutating func hasSignoff(project: URL, build: String, student: String, teacher: String) -> Bool {
         let evidence = project.appendingPathComponent("evidence", isDirectory: true)
         guard hasRealDirectoryChain(project: project, relativePath: "evidence"), let walker = fileManager.enumerator(
@@ -532,10 +530,10 @@ private struct Reader {
         else { return false }
         for case let url as URL in walker where url.pathExtension == "json" && isFile(url) &&
             hasRealDirectoryChain(project: project, relativePath: relativeDirectory(of: url, below: project)) {
-            guard let record = json(url), record["build_id"] as? String == build else { continue }
-            let approved = record["schema"] as? String == "ember.math-tutorial-signoff/v1" ||
-                ["captain_verdict", "captain_approval", "captain_signoff"].contains { record[$0] is [String: Any] }
-            guard approved else { continue }
+            guard let record = json(url), record["schema"] as? String == "ember.math-tutorial-signoff/v1",
+                  record["build_id"] as? String == build,
+                  let verbatim = record["verbatim"] as? String,
+                  !verbatim.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             for field in ["pdf_sha256", "pdfs"] {
                 guard let map = record[field] as? [String: Any] else { continue }
                 func hash(_ role: String) -> String? { map[role] as? String ?? (map[role] as? [String: Any])?["sha256"] as? String }
