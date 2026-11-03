@@ -38,8 +38,12 @@ public struct EmberLibrarySource: Sendable {
         var unrecorded: [String] = []
         var seenKeys: Set<PaperKey> = []
 
+        let subjectDirectories = Dictionary(uniqueKeysWithValues: try reader.directories(in: root).map {
+            ($0.lastPathComponent, $0)
+        })
         for subject in Self.subjectFolders {
-            for project in try reader.directories(in: root.appendingPathComponent(subject, isDirectory: true)) {
+            guard let folder = subjectDirectories[subject] else { continue }
+            for project in try reader.directories(in: folder) {
                 let name = project.lastPathComponent
                 let label = subject + "/" + name
                 switch reader.examine(project: project, subject: subject) {
@@ -568,10 +572,7 @@ private struct Reader {
 
     /// Real (non-symlink) subdirectories, sorted by name. A missing folder has none.
     func directories(in folder: URL) throws -> [URL] {
-        guard isDirectory(root) else { return [] }
-        var isFolder: ObjCBool = false
-        guard fileManager.fileExists(atPath: folder.path, isDirectory: &isFolder), isFolder.boolValue else { return [] }
-        guard try folder.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { return [] }
+        guard isDirectory(folder) else { return [] }
         let children = try fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
                                                            options: [.skipsHiddenFiles])
         return try children.filter { child in

@@ -567,6 +567,15 @@ struct EmberLibrarySourceTests {
         #expect(throws: (any Error).self) { try read(tree) }
     }
 
+    @Test func unreadableSourceRootFailsTheRead() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let attributes = try FileManager.default.attributesOfItem(atPath: tree.root.path)
+        defer { try? FileManager.default.setAttributes(attributes, ofItemAtPath: tree.root.path) }
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: tree.root.path)
+
+        #expect(throws: (any Error).self) { try read(tree) }
+    }
+
     @Test func readingNeverWritesInsideTheRoot() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         let p = "A-Math/SEC 3 Synthetic Paper 1"
