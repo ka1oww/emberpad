@@ -6,10 +6,10 @@ Base code for a personal offline iPad teaching app. Visual design and the teache
 
 | Path | Responsibility |
 | --- | --- |
-| `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; file-system synchronized folders; local package dependency |
-| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene (add `.swift` files here with no project edit) |
-| `Apps/Companion` | macOS menu-bar shell: choose a local folder and generate a manifest preview, with no networking (add `.swift` files here with no project edit) |
-| `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app (add `.swift` test files here with no project edit) |
+| `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; local package dependency |
+| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene |
+| `Apps/Companion` | macOS menu-bar shell: choose a local folder and generate a manifest preview, with no networking |
+| `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
 | `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser and tests |
 | `Config/Shared.xcconfig` | One placeholder `EMBERPAD_BUNDLE_ID`, used by both native platforms |
 | `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
@@ -26,7 +26,7 @@ xcodebuild -project EmberPad.xcodeproj -scheme EmberPad \
 UDID=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; c=[x for v in d.values() for x in v]; print(next((x for x in c if x["name"].startswith("iPad")), c[0])["udid"])')
 xcodebuild -project EmberPad.xcodeproj -scheme EmberPad \
   -configuration Debug -destination "id=$UDID" \
-  -derivedDataPath /tmp/emberpad-test CODE_SIGNING_ALLOWED=NO test
+  -derivedDataPath /tmp/emberpad-test CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES test
 xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' \
   -configuration Debug -destination 'generic/platform=macOS' \
   -derivedDataPath /tmp/emberpad-mac CODE_SIGNING_ALLOWED=NO build

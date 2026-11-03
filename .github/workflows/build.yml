@@ -20,7 +20,7 @@ jobs:
       - name: Test iPad app on Simulator
         run: |
           UDID=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; devs=json.load(sys.stdin)["devices"]; cands=[d for lst in devs.values() for d in lst]; pick=next((d for d in cands if d["name"].startswith("iPad")), next((d for d in cands if d["name"].startswith("iPhone")), None)); assert pick, "no simulator device"; print(pick["udid"])')
-          xcodebuild -project EmberPad.xcodeproj -scheme EmberPad -configuration Debug -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/ios-test" CODE_SIGNING_ALLOWED=NO test
+          xcodebuild -project EmberPad.xcodeproj -scheme EmberPad -configuration Debug -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/ios-test" CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES test
       - name: Build Companion without signing
         run: xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' -configuration Debug -destination 'generic/platform=macOS' -derivedDataPath "$RUNNER_TEMP/mac-build" CODE_SIGNING_ALLOWED=NO build
       - name: Lint renewal artifacts without executing them
