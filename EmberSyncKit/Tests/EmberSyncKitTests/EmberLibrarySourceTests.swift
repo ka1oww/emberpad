@@ -558,6 +558,34 @@ struct EmberLibrarySourceTests {
         }
     }
 
+    @Test func everySectionTokenIsCheckedAndLaterNameSegmentsAreRemoved() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let cases = [
+            (project: "SEC 3 Synthfirst Synthlast Sec 3 EOY Paper", displayName: "SEC 3 Sec 3 EOY Paper",
+             names: ["Synthfirst", "Synthlast"]),
+            (project: "SEC 3 SEC 2 Synthsecond Synthlast S3 EOY Paper", displayName: "SEC 3 SEC 2 S3 EOY Paper",
+             names: ["Synthsecond", "Synthlast"])
+        ]
+        for (index, item) in cases.enumerated() {
+            let project = "A-Math/\(item.project)"
+            try tree.paper(project)
+            try tree.build(project, "synthetic-build-\(index)", student: "student-\(index)", teacher: "teacher-\(index)")
+            try tree.g11(project, "synthetic-build-\(index)", student: "student-\(index)", teacher: "teacher-\(index)")
+        }
+
+        let snapshot = try read(tree)
+        #expect(snapshot.pairs.count == cases.count)
+        for item in cases {
+            let pair = try #require(snapshot.pairs.first { $0.project == "A-Math/\(item.project)" })
+            #expect(pair.student.entry.classTag == nil)
+            #expect(pair.withheldTerms == item.names)
+            #expect(pair.paperKey.rawValue == "A-Math/\(item.displayName)")
+            #expect(pair.student.entry.title == item.displayName)
+        }
+        let encoded = String(decoding: try ManifestCodec.encode(snapshot.manifest), as: UTF8.self).lowercased()
+        #expect(!encoded.contains("synthfirst") && !encoded.contains("synthlast") && !encoded.contains("synthsecond"))
+    }
+
     @Test func invalidAliasTagsAreSkippedAndTheirKeysRemainWithheld() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         let project = "A-Math/Synthname Sec 3 Synthetic Paper"
@@ -590,12 +618,16 @@ struct EmberLibrarySourceTests {
         }
         let residual = try fallbackPair("Synthfirst Synthlast Sec 3 Paper", classTag: "SEC 3",
                                         title: "Synthfirst Synthlast Sec 3 Paper")
+        let laterResidual = try fallbackPair("SEC 3 Synthfirst Synthlast Sec 3 Paper", classTag: "SEC 3",
+                                             title: "SEC 3 Synthfirst Synthlast Sec 3 Paper")
+        let afterSecondToken = try fallbackPair("SEC 3 SEC 2 Synthsecond Synthlast S3 Paper", classTag: "SEC 3",
+                                                title: "SEC 3 SEC 2 Synthsecond Synthlast S3 Paper")
         let invalidTag = try fallbackPair("Synthetic Safe Paper", classTag: "Synthetic Student", title: "Synthetic Safe Paper")
 
-        let snapshot = try read(tree, fallback: StubFallback(pairs: [residual, invalidTag]))
+        let snapshot = try read(tree, fallback: StubFallback(pairs: [residual, laterResidual, afterSecondToken, invalidTag]))
         #expect(snapshot.pairs.isEmpty)
         #expect(snapshot.manifest.files.isEmpty)
-        #expect(snapshot.misses.count == 2 && snapshot.misses.allSatisfy { $0.reason == .privacyWithheld })
+        #expect(snapshot.misses.count == 4 && snapshot.misses.allSatisfy { $0.reason == .privacyWithheld })
         #expect(snapshot.misses.allSatisfy { $0.detail == "a manifest string failed the final privacy check" })
     }
 

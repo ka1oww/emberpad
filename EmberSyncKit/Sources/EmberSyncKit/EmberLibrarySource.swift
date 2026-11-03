@@ -264,7 +264,19 @@ enum ClassResolver {
                              "SEC 1", "SEC 2", "SEC 3", "SEC 4"]
 
     static func resolve(_ name: String, aliases: ClassAliasTable) -> ClassResolution {
-        if let section = sectionPrefix(name) {
+        let personalSegments = personalNameSegments(name, aliases: aliases.aliases.keys.map { $0 })
+        if !personalSegments.isEmpty {
+            let cleanedName = removingPersonalNameSegments(name, aliases: aliases.aliases.keys.map { $0 })
+            let safe = resolve(cleanedName, aliases: aliases)
+            let rewrite: @Sendable (String) -> String = { value in
+                safe.rewrite(removingPersonalNameSegments(value, aliases: aliases.aliases.keys.map { $0 }))
+            }
+            return ClassResolution(classTag: nil, displayName: rewrite(name),
+                                   withheldTerms: personalSegments.flatMap { nameWords(String(name[$0])) } + safe.withheldTerms,
+                                   rewrite: rewrite)
+        }
+
+        if let section = sectionPrefix(name, aliases: aliases.aliases.keys.map { $0 }) {
             let prefixWords = normalizedWords(section.prefix)
             let fullWords = normalizedWords(section.fullPrefix)
             if let alias = aliases.aliases.keys.sorted().first(where: {
@@ -304,20 +316,8 @@ enum ClassResolver {
 
     /// The complete prefix before `Sec <1-4>` or `S<1-4>`, unless that prefix is already a class code.
     static func personalNameShape(_ name: String) -> String? {
-        let words = name.split(whereSeparator: \.isWhitespace)
-        guard let token = words.indices.first(where: { index in
-                let word = words[index].lowercased()
-                if word == "sec" {
-                    return words.index(after: index) < words.endIndex &&
-                    ["1", "2", "3", "4"].contains(String(words[words.index(after: index)]))
-            }
-            return ["s1", "s2", "s3", "s4"].contains(word)
-        }), token > words.startIndex else { return nil }
-
-        let prefix = String(name[..<words[token].startIndex]).trimmingCharacters(in: .whitespaces)
-        let normalized = nameWords(prefix).joined(separator: " ")
-        guard !classCodes.contains(where: { $0.caseInsensitiveCompare(normalized) == .orderedSame }) else { return nil }
-        return prefix
+        guard let segment = personalNameSegments(name, aliases: []).first else { return nil }
+        return String(name[segment])
     }
 
     static func aliasNameWords(_ alias: String) -> [String] {
@@ -342,7 +342,8 @@ enum ClassResolver {
         }
     }
 
-    private static func sectionPrefix(_ name: String) -> (prefix: String, fullPrefix: String)? {
+    private static func sectionPrefix(_ name: String, aliases: [String]) -> (prefix: String, fullPrefix: String)? {
+        guard personalNameSegments(name, aliases: aliases).isEmpty else { return nil }
         let words = name.split(whereSeparator: \.isWhitespace)
         guard let token = words.indices.first(where: { index in
             let word = words[index].lowercased()
@@ -365,7 +366,50 @@ enum ClassResolver {
     }
 
     static func containsPersonalNameShape(_ value: String) -> Bool {
-        value.split(separator: "/", omittingEmptySubsequences: false).contains { personalNameShape(String($0)) != nil }
+        value.split(separator: "/", omittingEmptySubsequences: false)
+            .contains { !personalNameSegments(String($0), aliases: []).isEmpty }
+    }
+
+    private static func personalNameSegments(_ name: String, aliases: [String]) -> [Range<String.Index>] {
+        let words = name.split(whereSeparator: \.isWhitespace)
+        var markers: [(start: String.Index, end: String.Index)] = []
+        var index = 0
+        while index < words.count {
+            let word = words[index].lowercased()
+            if word == "sec", index + 1 < words.count, ["1", "2", "3", "4"].contains(String(words[index + 1])) {
+                markers.append((words[index].startIndex, words[index + 1].endIndex))
+                index += 2
+            } else if ["s1", "s2", "s3", "s4"].contains(word) {
+                markers.append((words[index].startIndex, words[index].endIndex))
+                index += 1
+            } else {
+                index += 1
+            }
+        }
+
+        var previousEnd = name.startIndex
+        var personal: [Range<String.Index>] = []
+        for marker in markers {
+            let segment = name[previousEnd..<marker.start].trimmingCharacters(in: .whitespaces)
+            let token = name[marker.start..<marker.end]
+            let normalized = normalizedWords(segment)
+            let full = normalizedWords(String(segment) + " " + String(token))
+            let allowed = segment.isEmpty || classCodes.contains { normalizedWords($0) == normalized } ||
+                aliases.contains { let alias = normalizedWords($0); return alias == normalized || alias == full }
+            if !allowed, let range = name.range(of: segment, range: previousEnd..<marker.start) {
+                personal.append(range)
+            }
+            previousEnd = marker.end
+        }
+        return personal
+    }
+
+    private static func removingPersonalNameSegments(_ name: String, aliases: [String]) -> String {
+        var result = name
+        for range in personalNameSegments(name, aliases: aliases).reversed() {
+            result.replaceSubrange(range, with: "")
+        }
+        return result.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     private static func nameWords(_ name: String) -> [String] {
