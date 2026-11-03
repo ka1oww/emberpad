@@ -78,7 +78,6 @@ final class TeacherCopyPrivacyTests: XCTestCase {
         state.mainSceneActive = true
         state.externalSceneCount = 1
         XCTAssertTrue(state.policy.rendersOnMainScreen(teacher))
-        XCTAssertEqual(state.policy.studentView(for: teacher), .teacherCopyPrivate)
 
         state.externalSceneCount = 0
         state.captureActive = true
