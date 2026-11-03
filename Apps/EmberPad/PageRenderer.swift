@@ -155,7 +155,7 @@ struct EditorScreen: View {
     @State private var renderer: (any WorksheetPageRenderer)?
     @State private var errorMessage: String?
     @StateObject private var chrome = PageChromeState()
-    @SceneStorage("cardOpen") private var teacherCardOpen = true
+    @State private var teacherCardOpen = true
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
