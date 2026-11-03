@@ -70,7 +70,7 @@ public struct EmberLibrarySource: Sendable {
             found += try fallback.pairs(excluding: present).filter { !present.contains($0.paperKey) }
         }
 
-        let withheld = aliases.withheldTerms + found.flatMap(\.withheldTerms)
+        let withheld = aliases.withheldTerms + reader.withheldTerms + found.flatMap(\.withheldTerms)
         var pairs = Gate.uniqueKeys(found, misses: &misses)
         pairs = Gate.privacy(pairs, terms: withheld, misses: &misses)
 
@@ -100,6 +100,7 @@ public struct EmberLibrarySource: Sendable {
         }
         files = Gate.crossRole(files, retained: &retained, pairs: &pairs, misses: &misses,
                                previous: previous?.files ?? [], withheldTerms: withheld)
+        files = Gate.finalPrivacy(files, pairs: &pairs, retained: &retained, terms: withheld, misses: &misses)
 
         let manifest = try Manifest(version: 2, generatedAt: generatedAt, files: files)
         return LibrarySnapshot(manifest: manifest, pairs: pairs, misses: misses.sorted { ($0.project, $0.reason.rawValue) < ($1.project, $1.reason.rawValue) },
@@ -213,14 +214,16 @@ public struct ClassAliasTable: Equatable, Sendable {
 
     public let aliases: [String: String]
     public let withheldTerms: [String]
+    public let skippedAliasCount: Int
 
-    private init() { aliases = [:]; withheldTerms = [] }
+    private init() { aliases = [:]; withheldTerms = []; skippedAliasCount = 0 }
 
     public init(aliases: [String: String], withheldTerms: [String] = []) throws {
-        guard aliases.allSatisfy({ Publication.isValidLabel($0.key) && Publication.isValidLabel($0.value) }),
+        guard aliases.keys.allSatisfy(Publication.isValidLabel),
               withheldTerms.allSatisfy(Publication.isValidLabel),
               Set(aliases.keys.map { $0.lowercased() }).count == aliases.count else { throw LibraryError.invalidManifest }
-        self.aliases = aliases
+        self.aliases = aliases.filter { ClassResolver.isClassTag($0.value) }
+        self.skippedAliasCount = aliases.count - self.aliases.count
         self.withheldTerms = withheldTerms
             + aliases.keys.flatMap { ClassResolver.aliasNameWords($0) }
             .filter { term in !withheldTerms.contains { $0.caseInsensitiveCompare(term) == .orderedSame } }
@@ -261,6 +264,24 @@ enum ClassResolver {
                              "SEC 1", "SEC 2", "SEC 3", "SEC 4"]
 
     static func resolve(_ name: String, aliases: ClassAliasTable) -> ClassResolution {
+        if let section = sectionPrefix(name) {
+            let prefixWords = normalizedWords(section.prefix)
+            let fullWords = normalizedWords(section.fullPrefix)
+            if let alias = aliases.aliases.keys.sorted().first(where: {
+                normalizedWords($0) == fullWords || normalizedWords($0) == prefixWords
+            }), let tag = aliases.aliases[alias] {
+                let replacementPrefix = normalizedWords(alias) == fullWords ? section.fullPrefix : section.prefix
+                let rewrite: @Sendable (String) -> String = { replacingWordPrefix($0, replacementPrefix, with: tag) }
+                return ClassResolution(classTag: tag, displayName: rewrite(name), withheldTerms: aliasNameWords(alias), rewrite: rewrite)
+            }
+            if let code = classCodes.first(where: { normalizedWords($0) == fullWords || normalizedWords($0) == prefixWords }) {
+                return ClassResolution(classTag: code, displayName: name, withheldTerms: [], rewrite: { $0 })
+            }
+            let rewrite: @Sendable (String) -> String = { replacingWordPrefix($0, section.prefix, with: nil) }
+            return ClassResolution(classTag: nil, displayName: rewrite(name),
+                                   withheldTerms: nameWords(section.prefix), rewrite: rewrite)
+        }
+
         // 1. Alias table, longest matching prefix first.
         if let alias = aliases.aliases.keys.filter({ hasWordPrefix(name, $0) }).max(by: { $0.count < $1.count }),
            let tag = aliases.aliases[alias] {
@@ -300,9 +321,51 @@ enum ClassResolver {
     }
 
     static func aliasNameWords(_ alias: String) -> [String] {
-        if let prefix = personalNameShape(alias) { return nameWords(prefix) }
-        if classCodes.contains(where: { hasWordPrefix(alias, $0) }) { return [] }
-        return nameWords(alias)
+        let words = nameWords(alias)
+        let withheld = personalNameShape(alias).map(nameWords) ?? words
+        guard let code = classCodes.filter({ hasWordPrefix(alias, $0) }).max(by: { $0.count < $1.count }) else {
+            return withheld
+        }
+        return Array(withheld.dropFirst(min(nameWords(code).count, withheld.count)))
+    }
+
+    static func isClassTag(_ tag: String) -> Bool {
+        guard Publication.isValidLabel(tag) else { return false }
+        if classCodes.contains(where: { $0 == tag }) { return true }
+        let words = tag.split(separator: " ", omittingEmptySubsequences: false)
+        guard (1...3).contains(words.count) else { return false }
+        return words.allSatisfy { word in
+            (1...12).contains(word.count) && word.unicodeScalars.enumerated().allSatisfy { index, scalar in
+                (scalar.value >= 65 && scalar.value <= 90) || (scalar.value >= 48 && scalar.value <= 57) ||
+                    (index > 0 && scalar == "-")
+            } && word.first.map { ($0 >= "A" && $0 <= "Z") || ($0 >= "0" && $0 <= "9") } == true
+        }
+    }
+
+    private static func sectionPrefix(_ name: String) -> (prefix: String, fullPrefix: String)? {
+        let words = name.split(whereSeparator: \.isWhitespace)
+        guard let token = words.indices.first(where: { index in
+            let word = words[index].lowercased()
+            if word == "sec" {
+                return words.index(after: index) < words.endIndex &&
+                    ["1", "2", "3", "4"].contains(String(words[words.index(after: index)]))
+            }
+            return ["s1", "s2", "s3", "s4"].contains(word)
+        }) else { return nil }
+        let prefix = String(name[..<words[token].startIndex]).trimmingCharacters(in: .whitespaces)
+        let tokenEnd = words[token].count == 2 && words[token].uppercased().hasPrefix("S")
+            ? words[token].endIndex
+            : words[words.index(after: token)].endIndex
+        let fullPrefix = String(name[..<tokenEnd]).trimmingCharacters(in: .whitespaces)
+        return (prefix, fullPrefix)
+    }
+
+    private static func normalizedWords(_ value: String) -> String {
+        nameWords(value).joined(separator: " ").uppercased()
+    }
+
+    static func containsPersonalNameShape(_ value: String) -> Bool {
+        value.split(separator: "/", omittingEmptySubsequences: false).contains { personalNameShape(String($0)) != nil }
     }
 
     private static func nameWords(_ name: String) -> [String] {
@@ -343,14 +406,42 @@ enum Gate {
 
     static func privacy(_ pairs: [LibraryPair], terms: [String], misses: inout [LibraryMiss]) -> [LibraryPair] {
         pairs.filter { pair in
-            let strings = [pair.student.entry, pair.teacher.entry].flatMap {
-                [$0.source.key, $0.title, $0.subject] + ($0.classTag.map { [$0] } ?? [])
-            } + [pair.paperKey.rawValue]
-            guard let term = firstWithheld(in: strings, terms: terms) else { return true }
-            misses.append(LibraryMiss(project: pair.project, reason: .privacyWithheld,
-                                      detail: "a manifest string would carry a withheld term (\(term.count) characters)"))
-            return false
+            let entries = [pair.student.entry, pair.teacher.entry]
+            guard passesPrivacy(entries, key: pair.paperKey, terms: terms) else {
+                misses.append(LibraryMiss(project: pair.project, reason: .privacyWithheld,
+                                          detail: "a manifest string failed the final privacy check"))
+                return false
+            }
+            return true
         }
+    }
+
+    static func finalPrivacy(_ files: [ManifestEntry], pairs: inout [LibraryPair], retained: inout [LibraryRetained],
+                             terms: [String], misses: inout [LibraryMiss]) -> [ManifestEntry] {
+        let groups = Dictionary(grouping: files, by: \.paperKey)
+        let blocked = Set(groups.compactMap { key, entries -> PaperKey? in
+            guard passesPrivacy(entries, key: key, terms: terms) else {
+                misses.append(LibraryMiss(project: key?.rawValue ?? "manifest-entry", reason: .privacyWithheld,
+                                          detail: "a manifest string failed the final privacy check"))
+                return key
+            }
+            return nil
+        })
+        pairs.removeAll { blocked.contains($0.paperKey) }
+        retained.removeAll { blocked.contains($0.paperKey) }
+        return files.filter { entry in
+            guard let key = entry.paperKey else { return false }
+            return !blocked.contains(key)
+        }
+    }
+
+    private static func passesPrivacy(_ entries: [ManifestEntry], key: PaperKey?, terms: [String]) -> Bool {
+        let strings = entries.flatMap { entry in
+            [entry.source.key, entry.source.relativePath, entry.title, entry.subject] + (entry.classTag.map { [$0] } ?? [])
+        } + (key.map { [$0.rawValue] } ?? [])
+        let invalidClassTag = entries.contains { $0.classTag.map { !ClassResolver.isClassTag($0) } ?? false }
+        return !invalidClassTag && !strings.contains(where: ClassResolver.containsPersonalNameShape) &&
+            firstWithheld(in: strings, terms: terms) == nil
     }
 
     /// Whole-word, case-insensitive search.
@@ -434,6 +525,7 @@ private struct Reader {
     let aliases: ClassAliasTable
     let fileManager = FileManager.default
     var hashes: [String: ContentHash] = [:]
+    var withheldTerms: [String] = []
 
     init(root: URL, aliases: ClassAliasTable) {
         self.root = root
@@ -450,6 +542,7 @@ private struct Reader {
 
     mutating func examine(project: URL, subject: String) -> Outcome {
         let naming = ClassResolver.resolve(project.lastPathComponent, aliases: aliases)
+        withheldTerms += naming.withheldTerms
         let key = try? PaperKey(rawValue: subject + "/" + naming.displayName)
         if isFile(project.appendingPathComponent("paper.json")) {
             return paper(project: project, subject: subject, naming: naming, key: key)

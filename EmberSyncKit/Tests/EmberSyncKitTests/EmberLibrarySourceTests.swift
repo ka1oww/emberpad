@@ -538,6 +538,67 @@ struct EmberLibrarySourceTests {
         }
     }
 
+    @Test func sectionTokenRequiresTheCompletePrecedingSequenceToBeAClassOrAlias() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let project = "A-Math/MI PU3 Synthfirst Synthlast Sec 3 EOY Paper 1"
+        try tree.paper(project)
+        try tree.build(project, "synthetic-build", student: "student", teacher: "teacher")
+        try tree.g11(project, "synthetic-build", student: "student", teacher: "teacher")
+        let partialAlias = try ClassAliasTable(aliases: ["MI PU3 Synthfirst": "SEC 3"])
+
+        for snapshot in [try read(tree), try read(tree, aliases: partialAlias)] {
+            let pair = try #require(snapshot.pairs.first)
+            #expect(pair.student.entry.classTag == nil)
+            #expect(pair.paperKey.rawValue == "A-Math/Sec 3 EOY Paper 1")
+            #expect(pair.student.entry.title == "Sec 3 EOY Paper 1")
+            #expect(pair.teacher.entry.title == "Sec 3 EOY Paper 1 (Teacher)")
+            #expect(Set(pair.withheldTerms) == ["MI", "PU3", "Synthfirst", "Synthlast"])
+            let encoded = String(decoding: try ManifestCodec.encode(snapshot.manifest), as: UTF8.self).lowercased()
+            #expect(!encoded.contains("synthfirst") && !encoded.contains("synthlast"))
+        }
+    }
+
+    @Test func invalidAliasTagsAreSkippedAndTheirKeysRemainWithheld() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let project = "A-Math/Synthname Sec 3 Synthetic Paper"
+        try tree.paper(project)
+        try tree.build(project, "synthetic-build", student: "student", teacher: "teacher")
+        try tree.g11(project, "synthetic-build", student: "student", teacher: "teacher")
+        let aliases = try ClassAliasTable(aliases: ["Synthname Sec 3": "Synthetic Student"])
+
+        #expect(aliases.aliases.isEmpty)
+        #expect(aliases.skippedAliasCount == 1)
+        #expect(aliases.withheldTerms.contains("Synthname"))
+        let snapshot = try read(tree, aliases: aliases)
+        let pair = try #require(snapshot.pairs.first)
+        #expect(pair.student.entry.classTag == nil)
+        #expect(!String(decoding: try ManifestCodec.encode(snapshot.manifest), as: UTF8.self).contains("Synthname"))
+    }
+
+    @Test func finalPrivacyGateRejectsResidualNameShapesAndInvalidClassTags() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        func fallbackPair(_ name: String, classTag: String, title: String) throws -> LibraryPair {
+            let key = try PaperKey(rawValue: "H2 Chemistry/\(name)")
+            func copy(_ role: DocumentRole) throws -> LibraryCopy {
+                let entry = try publishedEntry(key.rawValue, role,
+                                               path: "\(name)/\(role.rawValue).pdf", bytes: "\(name)-\(role.rawValue)",
+                                               subject: "H2 Chemistry", classTag: classTag, title: title)
+                return LibraryCopy(entry: entry, fileURL: URL(fileURLWithPath: "/dev/null"))
+            }
+            return try LibraryPair(paperKey: key, project: "fallback/synthetic", rule: .fallback, buildID: "synthetic",
+                                   student: copy(.student), teacher: copy(.teacher))
+        }
+        let residual = try fallbackPair("Synthfirst Synthlast Sec 3 Paper", classTag: "SEC 3",
+                                        title: "Synthfirst Synthlast Sec 3 Paper")
+        let invalidTag = try fallbackPair("Synthetic Safe Paper", classTag: "Synthetic Student", title: "Synthetic Safe Paper")
+
+        let snapshot = try read(tree, fallback: StubFallback(pairs: [residual, invalidTag]))
+        #expect(snapshot.pairs.isEmpty)
+        #expect(snapshot.manifest.files.isEmpty)
+        #expect(snapshot.misses.count == 2 && snapshot.misses.allSatisfy { $0.reason == .privacyWithheld })
+        #expect(snapshot.misses.allSatisfy { $0.detail == "a manifest string failed the final privacy check" })
+    }
+
     @Test func aPairThatWouldStillCarryAWithheldTermIsHeldBack() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         // The name is not a prefix here, so only the table's withhold list can catch it.
@@ -568,12 +629,16 @@ struct EmberLibrarySourceTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         #expect(try ClassAliasTable.load(from: dir.appendingPathComponent("absent.json")) == .empty)
         for bad in ["not json", "{\"aliases\": {}}", "{\"schema\": \"emberpad.class-aliases/v1\", \"aliases\": {\"a\": 3}}",
-                    "{\"schema\": \"emberpad.class-aliases/v1\", \"aliases\": {\"a\": \" padded\"}}",
                     "{\"schema\": \"emberpad.class-aliases/v1\", \"extra\": 1}"] {
             let url = dir.appendingPathComponent(UUID().uuidString + ".json")
             try Data(bad.utf8).write(to: url)
             #expect(throws: (any Error).self) { try ClassAliasTable.load(from: url) }
         }
+        let skipped = dir.appendingPathComponent("skipped.json")
+        try Data("{\"schema\": \"emberpad.class-aliases/v1\", \"aliases\": {\"Synthetic Sec 3\": \" padded\"}}".utf8).write(to: skipped)
+        let skippedTable = try ClassAliasTable.load(from: skipped)
+        #expect(skippedTable.aliases.isEmpty && skippedTable.skippedAliasCount == 1)
+        #expect(skippedTable.withheldTerms == ["Synthetic"])
     }
 
     @Test func personalNameShapeRecognisesSecAndShortForms() {
