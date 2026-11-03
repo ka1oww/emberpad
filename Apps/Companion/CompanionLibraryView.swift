@@ -57,10 +57,10 @@ struct CompanionLibraryContent: View {
 
     private var headerSection: some View {
         HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Self.emberRed)
+            Image("CompanionBadge")
+                .resizable()
                 .frame(width: 34, height: 34)
-                .overlay(Image(systemName: "doc.text").foregroundStyle(.white))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
                 Text("EmberPad Companion").font(.system(size: 14, weight: .semibold))
                 Text("Local library preparation").font(.system(size: 12)).opacity(0.65)
