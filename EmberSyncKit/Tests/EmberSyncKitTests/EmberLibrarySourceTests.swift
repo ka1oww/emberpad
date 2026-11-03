@@ -500,6 +500,44 @@ struct EmberLibrarySourceTests {
         #expect(!unaliasedJSON.lowercased().contains("synthname"))
     }
 
+    @Test func multiwordPersonalPrefixesAreRemovedAndEveryNameWordIsWithheld() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let cases: [(project: String, words: [String], displayName: String, classTag: String?)] = [
+            ("Synthfirst Synthlast Sec 3 EOY Paper 1", ["Synthfirst", "Synthlast"], "SEC 3 EOY Paper 1", "SEC 3"),
+            ("Synththird Synthfourth S3 EOY Paper 2", ["Synththird", "Synthfourth"], "S3 EOY Paper 2", nil),
+            ("Synthalpha Synthbeta Synthgamma Sec 4 EOY Paper 3", ["Synthalpha", "Synthbeta", "Synthgamma"], "Sec 4 EOY Paper 3", nil),
+            ("Synthdelta Synthepsilon Synthzeta S4 EOY Paper 4", ["Synthdelta", "Synthepsilon", "Synthzeta"], "SEC 4 EOY Paper 4", "SEC 4")
+        ]
+        for (index, item) in cases.enumerated() {
+            let project = "A-Math/\(item.project)"
+            let build = "synthetic-build-\(index)"
+            try tree.paper(project)
+            try tree.build(project, build, student: "student-\(index)", teacher: "teacher-\(index)")
+            try tree.g11(project, build, student: "student-\(index)", teacher: "teacher-\(index)")
+        }
+
+        let aliases = try ClassAliasTable(aliases: [
+            "Synthfirst Synthlast Sec 3": "SEC 3",
+            "Synthdelta Synthepsilon Synthzeta S4": "SEC 4"
+        ])
+        #expect(Set(aliases.withheldTerms).isSuperset(of: [
+            "Synthfirst", "Synthlast", "Synthdelta", "Synthepsilon", "Synthzeta"
+        ]))
+
+        let snapshot = try read(tree, aliases: aliases)
+        #expect(snapshot.pairs.count == cases.count)
+        for item in cases {
+            let pair = try #require(snapshot.pairs.first { $0.project == "A-Math/\(item.project)" })
+            #expect(pair.student.entry.classTag == item.classTag)
+            #expect(pair.paperKey.rawValue == "A-Math/\(item.displayName)")
+            #expect(pair.student.entry.title == item.displayName)
+        }
+        let encoded = String(decoding: try ManifestCodec.encode(snapshot.manifest), as: UTF8.self).lowercased()
+        for word in cases.flatMap(\.words) {
+            #expect(!encoded.contains(word.lowercased()))
+        }
+    }
+
     @Test func aPairThatWouldStillCarryAWithheldTermIsHeldBack() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         // The name is not a prefix here, so only the table's withhold list can catch it.
@@ -541,6 +579,8 @@ struct EmberLibrarySourceTests {
     @Test func personalNameShapeRecognisesSecAndShortForms() {
         #expect(ClassResolver.personalNameShape("Synthname Sec 3 EOY Paper") == "Synthname")
         #expect(ClassResolver.personalNameShape("Synthname S3 Physics") == "Synthname")
+        #expect(ClassResolver.personalNameShape("Synthfirst Synthlast Sec 3 EOY Paper") == "Synthfirst Synthlast")
+        #expect(ClassResolver.resolve("Synthfirst Synthlast Sec 3 Paper", aliases: .empty).withheldTerms == ["Synthfirst", "Synthlast"])
         #expect(ClassResolver.personalNameShape("SEC 3 EOY Paper") == nil)
         #expect(ClassResolver.personalNameShape("MI PU3 H2 Physics") == nil)
         #expect(ClassResolver.personalNameShape("Second Law Sec 5") == nil)

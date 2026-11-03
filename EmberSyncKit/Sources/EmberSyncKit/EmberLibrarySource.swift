@@ -222,7 +222,7 @@ public struct ClassAliasTable: Equatable, Sendable {
               Set(aliases.keys.map { $0.lowercased() }).count == aliases.count else { throw LibraryError.invalidManifest }
         self.aliases = aliases
         self.withheldTerms = withheldTerms
-            + aliases.keys.compactMap { ClassResolver.personalNameShape($0) }
+            + aliases.keys.flatMap { ClassResolver.aliasNameWords($0) }
             .filter { term in !withheldTerms.contains { $0.caseInsensitiveCompare(term) == .orderedSame } }
     }
 
@@ -264,7 +264,7 @@ enum ClassResolver {
         // 1. Alias table, longest matching prefix first.
         if let alias = aliases.aliases.keys.filter({ hasWordPrefix(name, $0) }).max(by: { $0.count < $1.count }),
            let tag = aliases.aliases[alias] {
-            let withheld = [alias] + (personalNameShape(alias).map { [$0] } ?? [])
+            let withheld = aliasNameWords(alias)
             let rewrite: @Sendable (String) -> String = { replacingWordPrefix($0, alias, with: tag) }
             return ClassResolution(classTag: tag, displayName: rewrite(name), withheldTerms: withheld, rewrite: rewrite)
         }
@@ -273,32 +273,50 @@ enum ClassResolver {
             return ClassResolution(classTag: code, displayName: name, withheldTerms: [], rewrite: { $0 })
         }
         // 3. A personal-name-shaped prefix with no alias: the name is dropped and the copy goes to every class.
-        if let word = personalNameShape(name) {
-            let rewrite: @Sendable (String) -> String = { replacingWordPrefix($0, word, with: nil) }
-            return ClassResolution(classTag: nil, displayName: rewrite(name), withheldTerms: [word], rewrite: rewrite)
+        if let prefix = personalNameShape(name) {
+            let rewrite: @Sendable (String) -> String = { replacingWordPrefix($0, prefix, with: nil) }
+            return ClassResolution(classTag: nil, displayName: rewrite(name),
+                                   withheldTerms: nameWords(prefix), rewrite: rewrite)
         }
         return ClassResolution(classTag: nil, displayName: name, withheldTerms: [], rewrite: { $0 })
     }
 
-    /// The leading word of `<word> Sec <1-4>` or `<word> S<1-4>`, where the word is not itself a class code.
+    /// The complete prefix before `Sec <1-4>` or `S<1-4>`, unless that prefix is already a class code.
     static func personalNameShape(_ name: String) -> String? {
-        let words = name.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard words.count >= 2, let first = words.first, first.lowercased() != "sec" else { return nil }
-        let digits: Set<String> = ["1", "2", "3", "4"]
-        let second = words[1].lowercased()
-        let shaped = (second == "sec" && words.count >= 3 && digits.contains(words[2])) ||
-            (second.count == 2 && second.hasPrefix("s") && digits.contains(String(second.dropFirst())))
-        return shaped ? first : nil
+        let words = name.split(whereSeparator: \.isWhitespace)
+        guard let token = words.indices.first(where: { index in
+                let word = words[index].lowercased()
+                if word == "sec" {
+                    return words.index(after: index) < words.endIndex &&
+                    ["1", "2", "3", "4"].contains(String(words[words.index(after: index)]))
+            }
+            return ["s1", "s2", "s3", "s4"].contains(word)
+        }), token > words.startIndex else { return nil }
+
+        let prefix = String(name[..<words[token].startIndex]).trimmingCharacters(in: .whitespaces)
+        let normalized = nameWords(prefix).joined(separator: " ")
+        guard !classCodes.contains(where: { $0.caseInsensitiveCompare(normalized) == .orderedSame }) else { return nil }
+        return prefix
+    }
+
+    static func aliasNameWords(_ alias: String) -> [String] {
+        if let prefix = personalNameShape(alias) { return nameWords(prefix) }
+        if classCodes.contains(where: { hasWordPrefix(alias, $0) }) { return [] }
+        return nameWords(alias)
+    }
+
+    private static func nameWords(_ name: String) -> [String] {
+        name.split(whereSeparator: \.isWhitespace).map(String.init)
     }
 
     static func hasWordPrefix(_ text: String, _ prefix: String) -> Bool {
         guard text.count >= prefix.count, text.prefix(prefix.count).lowercased() == prefix.lowercased() else { return false }
-        return text.count == prefix.count || text.dropFirst(prefix.count).first == " "
+        return text.count == prefix.count || text.dropFirst(prefix.count).first?.isWhitespace == true
     }
 
     static func replacingWordPrefix(_ text: String, _ prefix: String, with replacement: String?) -> String {
         guard hasWordPrefix(text, prefix) else { return text }
-        let rest = text.dropFirst(prefix.count).drop(while: { $0 == " " })
+        let rest = text.dropFirst(prefix.count).drop(while: { $0.isWhitespace })
         guard let replacement else { return String(rest) }
         return rest.isEmpty ? replacement : replacement + " " + rest
     }
