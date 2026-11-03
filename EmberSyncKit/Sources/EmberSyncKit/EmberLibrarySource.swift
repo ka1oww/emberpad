@@ -98,7 +98,8 @@ public struct EmberLibrarySource: Sendable {
                 files += entries
             }
         }
-        files = Gate.crossRole(files, retained: &retained, pairs: &pairs, misses: &misses)
+        files = Gate.crossRole(files, retained: &retained, pairs: &pairs, misses: &misses,
+                               previous: previous?.files ?? [], withheldTerms: withheld)
 
         let manifest = try Manifest(version: 2, generatedAt: generatedAt, files: files)
         return LibrarySnapshot(manifest: manifest, pairs: pairs, misses: misses.sorted { ($0.project, $0.reason.rawValue) < ($1.project, $1.reason.rawValue) },
@@ -354,17 +355,46 @@ enum Gate {
     /// A Student entry whose bytes equal any Teacher copy in the library would show answers to students, so the
     /// whole paper it belongs to is held back.
     static func crossRole(_ files: [ManifestEntry], retained: inout [LibraryRetained], pairs: inout [LibraryPair],
-                          misses: inout [LibraryMiss]) -> [ManifestEntry] {
+                          misses: inout [LibraryMiss], previous: [ManifestEntry], withheldTerms: [String]) -> [ManifestEntry] {
         let teacherHashes = Set(files.filter { $0.role == .teacher }.map(\.sha256))
         let blocked = Set(files.filter { $0.role == .student && teacherHashes.contains($0.sha256) }.compactMap(\.paperKey))
         guard !blocked.isEmpty else { return files }
+        let blockedPairs = pairs.filter { blocked.contains($0.paperKey) }
         for key in blocked.sorted() {
             misses.append(LibraryMiss(project: pairs.first { $0.paperKey == key }?.project ?? key.rawValue, reason: .studentMatchesTeacher,
                                       detail: "a Student copy has the same bytes as a Teacher copy"))
         }
         pairs.removeAll { blocked.contains($0.paperKey) }
         retained.removeAll { blocked.contains($0.paperKey) }
-        return files.filter { !($0.paperKey.map(blocked.contains) ?? false) }
+        var remaining = files.filter { !($0.paperKey.map(blocked.contains) ?? false) }
+        var previousByKey: [PaperKey: [ManifestEntry]] = [:]
+        for entry in previous {
+            if let key = entry.paperKey { previousByKey[key, default: []].append(entry) }
+        }
+        let occupied = Set(remaining.map(\.source))
+        let candidates = blockedPairs.compactMap { pair -> (PaperKey, [ManifestEntry])? in
+            guard let entries = previousByKey[pair.paperKey], entries.count == 2,
+                  entries.filter({ $0.role == .student }).count == 1,
+                  entries.filter({ $0.role == .teacher }).count == 1,
+                  entries.allSatisfy({ $0.paperKey == pair.paperKey && !occupied.contains($0.source) }),
+                  Gate.firstWithheld(in: entries.flatMap {
+                      [$0.source.key, $0.title, $0.subject] + ($0.classTag.map { [$0] } ?? [])
+                  } + [pair.paperKey.rawValue], terms: withheldTerms) == nil else { return nil }
+            return (pair.paperKey, entries)
+        }
+        let candidateFiles = candidates.flatMap(\.1)
+        for (key, entries) in candidates {
+            guard let student = entries.first(where: { $0.role == .student }),
+                  let teacher = entries.first(where: { $0.role == .teacher }) else { continue }
+            let others = remaining + candidateFiles.filter { $0.paperKey != key }
+            let otherStudentHashes = Set(others.filter { $0.role == .student }.map(\.sha256))
+            let otherTeacherHashes = Set(others.filter { $0.role == .teacher }.map(\.sha256))
+            guard student.sha256 != teacher.sha256,
+                  !otherTeacherHashes.contains(student.sha256), !otherStudentHashes.contains(teacher.sha256) else { continue }
+            retained.append(LibraryRetained(paperKey: key, reason: .noLongerFinished, entries: entries))
+            remaining += entries
+        }
+        return remaining
     }
 }
 
@@ -412,12 +442,14 @@ private struct Reader {
         guard let paper = json(project.appendingPathComponent("paper.json")) else {
             return .miss(.invalidRecord, "paper.json is not a JSON object", key)
         }
-        struct Candidate { let reviewedAt: String; let finishedAt: String; let build: String }
+        struct Candidate { let reviewedAt: Date?; let finishedAt: Date?; let build: String }
         var candidates: [Candidate] = []
         var seen: Set<String> = []
         let audit = project.appendingPathComponent("audit/visual", isDirectory: true)
-        let records = (try? fileManager.contentsOfDirectory(at: audit, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-                                                            options: [.skipsHiddenFiles])) ?? []
+        let records = hasRealDirectoryChain(project: project, relativePath: "audit/visual")
+            ? (try? fileManager.contentsOfDirectory(at: audit, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+                                                             options: [.skipsHiddenFiles])) ?? []
+            : []
         for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
         where record.pathExtension == "json" && isFile(record) {
             guard let signoff = json(record), signoff["status"] as? String == "pass",
@@ -426,10 +458,14 @@ private struct Reader {
                   matches(project: project, build: build, student: student, teacher: teacher) else { continue }
             seen.insert(build)
             let finished = json(project.appendingPathComponent("artifacts/\(build)/build-record.json"))?["finished_at"] as? String
-            candidates.append(Candidate(reviewedAt: signoff["reviewed_at"] as? String ?? signoff["signed_at"] as? String ?? "",
-                                        finishedAt: finished ?? "", build: build))
+            candidates.append(Candidate(reviewedAt: Self.timestamp(signoff["reviewed_at"] as? String ?? signoff["signed_at"] as? String),
+                                        finishedAt: Self.timestamp(finished), build: build))
         }
-        guard let pick = candidates.max(by: { ($0.reviewedAt, $0.finishedAt, $0.build) < ($1.reviewedAt, $1.finishedAt, $1.build) }) else {
+        guard let pick = candidates.max(by: { lhs, rhs in
+            if lhs.reviewedAt != rhs.reviewedAt { return Self.datePrecedes(lhs.reviewedAt, rhs.reviewedAt) }
+            if lhs.finishedAt != rhs.finishedAt { return Self.datePrecedes(lhs.finishedAt, rhs.finishedAt) }
+            return lhs.build < rhs.build
+        }) else {
             return .miss(.paperNotSignedOff, "no passing audit/visual record whose two hashes match its build's copies", key)
         }
         let output = paper["output"] as? [String: Any]
@@ -447,7 +483,9 @@ private struct Reader {
     // R2
     private mutating func tutorial(project: URL, subject: String, naming: ClassResolution, key: PaperKey?) -> Outcome {
         let pointerURL = project.appendingPathComponent("artifacts/latest.json")
-        guard isFile(pointerURL) else { return .miss(.tutorialPointerMissing, "no artifacts/latest.json", key) }
+        guard hasRealDirectoryChain(project: project, relativePath: "artifacts"), isFile(pointerURL) else {
+            return .miss(.tutorialPointerMissing, "no artifacts/latest.json", key)
+        }
         guard let pointer = json(pointerURL), let build = pointer["build_id"] as? String, Self.isSafeComponent(build),
               let recorded = Self.pointerHashes(pointer) else {
             return .miss(.tutorialPointerUnreadable, "artifacts/latest.json names no build with hashes in a known schema", key)
@@ -483,10 +521,11 @@ private struct Reader {
     /// `captain_signoff` object.
     private mutating func hasSignoff(project: URL, build: String, student: String, teacher: String) -> Bool {
         let evidence = project.appendingPathComponent("evidence", isDirectory: true)
-        guard isDirectory(evidence), let walker = fileManager.enumerator(
+        guard hasRealDirectoryChain(project: project, relativePath: "evidence"), let walker = fileManager.enumerator(
             at: evidence, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: [.skipsHiddenFiles])
         else { return false }
-        for case let url as URL in walker where url.pathExtension == "json" && isFile(url) {
+        for case let url as URL in walker where url.pathExtension == "json" && isFile(url) &&
+            hasRealDirectoryChain(project: project, relativePath: relativeDirectory(of: url, below: project)) {
             guard let record = json(url), record["build_id"] as? String == build else { continue }
             let approved = record["schema"] as? String == "ember.math-tutorial-signoff/v1" ||
                 ["captain_verdict", "captain_approval", "captain_signoff"].contains { record[$0] is [String: Any] }
@@ -506,7 +545,9 @@ private struct Reader {
         let directory = project.appendingPathComponent("artifacts/\(build)", isDirectory: true)
         let studentURL = directory.appendingPathComponent("student.pdf"), teacherURL = directory.appendingPathComponent("teacher.pdf")
         do {
-            guard let key else { throw LibraryError.invalidManifest }
+            guard let key, hasRealDirectoryChain(project: project, relativePath: "artifacts/\(build)") else {
+                throw LibraryError.invalidManifest
+            }
             guard let studentHash = hash(studentURL), let teacherHash = hash(teacherURL) else { throw LibraryError.documentMissing }
             guard studentHash != teacherHash else { return .miss(.identicalCopies, "the Student and Teacher copies are the same bytes", key) }
             func copy(_ url: URL, _ hash: ContentHash, _ role: DocumentRole, _ title: String) throws -> LibraryCopy {
@@ -532,6 +573,7 @@ private struct Reader {
 
     private mutating func matches(project: URL, build: String, student: String, teacher: String) -> Bool {
         let directory = project.appendingPathComponent("artifacts/\(build)", isDirectory: true)
+        guard hasRealDirectoryChain(project: project, relativePath: "artifacts/\(build)") else { return false }
         guard let s = hash(directory.appendingPathComponent("student.pdf")), s.rawValue == student.lowercased(),
               let t = hash(directory.appendingPathComponent("teacher.pdf")), t.rawValue == teacher.lowercased() else { return false }
         return true
@@ -558,6 +600,42 @@ private struct Reader {
     private func isDirectory(_ url: URL) -> Bool {
         guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
         return values.isDirectory == true && values.isSymbolicLink != true
+    }
+
+    private func hasRealDirectoryChain(project: URL, relativePath: String) -> Bool {
+        var directory = project
+        for component in relativePath.split(separator: "/") {
+            guard component != ".", component != ".." else { return false }
+            directory.appendPathComponent(String(component), isDirectory: true)
+            guard isDirectory(directory) else { return false }
+        }
+        return true
+    }
+
+    private func relativeDirectory(of file: URL, below project: URL) -> String {
+        let root = project.standardizedFileURL.path + "/"
+        let parent = file.deletingLastPathComponent().standardizedFileURL.path
+        guard parent.hasPrefix(root) else { return ".." }
+        return String(parent.dropFirst(root.count))
+    }
+
+    private static func timestamp(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withFullDate]
+        return formatter.date(from: value)
+    }
+
+    private static func datePrecedes(_ lhs: Date?, _ rhs: Date?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil), (.some, nil): return false
+        case (nil, .some): return true
+        case let (.some(left), .some(right)): return left < right
+        }
     }
 
     static func isSafeComponent(_ name: String) -> Bool {

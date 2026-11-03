@@ -23,6 +23,13 @@ struct SyntheticEmberTree {
     }
     func delete(_ relative: String) throws { try FileManager.default.removeItem(at: root.appendingPathComponent(relative)) }
 
+    func replaceDirectoryWithSymlink(_ relative: String) throws {
+        let directory = root.appendingPathComponent(relative, isDirectory: true)
+        let target = root.deletingLastPathComponent().appendingPathComponent("external-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.moveItem(at: directory, to: target)
+        try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: target)
+    }
+
     static func sha(_ text: String) -> String { ContentHash.digest(Data(text.utf8)).rawValue }
 
     /// Writes `artifacts/<build>/student.pdf` and `teacher.pdf` with the given bytes.
@@ -136,6 +143,58 @@ struct EmberLibrarySourceTests {
         try tree.g11(p, "z-early", student: "e-s", teacher: "e-t", reviewedAt: "2026-08-21")
         try tree.g11(p, "a-late", student: "l-s", teacher: "l-t", reviewedAt: "2026-08-21")
         #expect(try read(tree).pairs.first?.buildID == "a-late")
+    }
+
+    @Test func reviewTimestampsWithOffsetsAreOrderedChronologically() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let p = "H2 Chemistry/Synthetic Offset Review Paper"
+        try tree.paper(p)
+        try tree.build(p, "z-earlier", student: "earlier s", teacher: "earlier t")
+        try tree.build(p, "a-later", student: "later s", teacher: "later t")
+        try tree.g11(p, "z-earlier", student: "earlier s", teacher: "earlier t", reviewedAt: "2026-11-03T09:00:00+08:00")
+        try tree.g11(p, "a-later", student: "later s", teacher: "later t", reviewedAt: "2026-11-03T02:00:00Z")
+        #expect(try read(tree).pairs.first?.buildID == "a-later")
+    }
+
+    @Test func buildFinishTimestampsWithOffsetsAreOrderedChronologically() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let p = "H2 Chemistry/Synthetic Offset Finish Paper"
+        try tree.paper(p)
+        try tree.build(p, "z-earlier", student: "earlier s", teacher: "earlier t", finishedAt: "2026-08-20T09:00:00+08:00")
+        try tree.build(p, "a-later", student: "later s", teacher: "later t", finishedAt: "2026-08-20T02:00:00Z")
+        try tree.g11(p, "z-earlier", student: "earlier s", teacher: "earlier t", reviewedAt: "2026-08-21")
+        try tree.g11(p, "a-later", student: "later s", teacher: "later t", reviewedAt: "2026-08-21")
+        #expect(try read(tree).pairs.first?.buildID == "a-later")
+    }
+
+    @Test func projectRecordsAreNotReadThroughSymlinkedDirectoryAncestors() throws {
+        let cases: [(project: String, path: String, kind: String)] = [
+            ("H2 Chemistry/Synthetic Audit Root Paper", "audit", "paper"),
+            ("H2 Chemistry/Synthetic Audit Visual Paper", "audit/visual", "paper"),
+            ("H2 Chemistry/Synthetic Artifact Root Paper", "artifacts", "paper"),
+            ("H2 Chemistry/Synthetic Artifact Build Paper", "artifacts/b1", "paper"),
+            ("H2 Chemistry/Synthetic Pointer Root Tutorial", "artifacts", "tutorial"),
+            ("H2 Chemistry/Synthetic Pointer Build Tutorial", "artifacts/b1", "tutorial"),
+            ("H2 Math/Synthetic Evidence Tutorial", "evidence", "math")
+        ]
+        for item in cases {
+            let tree = try SyntheticEmberTree(); defer { tree.remove() }
+            if item.kind == "paper" {
+                try tree.paper(item.project)
+                try tree.build(item.project, "b1", student: "questions", teacher: "answers")
+                try tree.g11(item.project, "b1", student: "questions", teacher: "answers")
+            } else {
+                try tree.tutorial(item.project)
+                try tree.build(item.project, "b1", student: "questions", teacher: "answers")
+                try tree.nestedPointer(item.project, "b1", student: "questions", teacher: "answers")
+                if item.kind == "math" {
+                    try tree.signoff(item.project, "signoff.json", build: "b1", student: "questions", teacher: "answers", shape: .signoffSchema)
+                }
+            }
+            try tree.replaceDirectoryWithSymlink("\(item.project)/\(item.path)")
+            let snapshot = try read(tree)
+            #expect(snapshot.pairs.isEmpty)
+        }
     }
 
     @Test func rolesComeFromTheRecordNeverFromFileNames() throws {
@@ -411,6 +470,79 @@ struct EmberLibrarySourceTests {
         #expect(snapshot.pairs.map(\.project) == [a, c])
         #expect(snapshot.misses.map(\.reason) == [.studentMatchesTeacher])
         #expect(snapshot.misses.first?.project == b)
+    }
+
+    @Test func blockedReplacementCarriesForwardItsSafePreviousPair() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let a = "H2 Chemistry/Synthetic Replacement Paper", b = "H2 Chemistry/Synthetic Other Paper"
+        try tree.paper(a)
+        try tree.build(a, "a1", student: "old questions", teacher: "old answers")
+        try tree.g11(a, "a1", student: "old questions", teacher: "old answers")
+        try tree.paper(b)
+        try tree.build(b, "b1", student: "other questions", teacher: "shared answers")
+        try tree.g11(b, "b1", student: "other questions", teacher: "shared answers")
+        let initial = try read(tree)
+
+        try tree.build(a, "a2", student: "shared answers", teacher: "new answers")
+        try tree.g11(a, "a2", student: "shared answers", teacher: "new answers", reviewedAt: "2026-09-01")
+        let updated = try read(tree, previous: initial.manifest)
+
+        #expect(updated.pairs.map(\.project) == [b])
+        #expect(updated.retained.map(\.paperKey.rawValue) == [a])
+        #expect(updated.manifest.files.count == initial.manifest.files.count)
+        let local = initial.manifest.files.map { DocumentRecord(source: $0, pageCount: 1, importedAt: fixtureDate) }
+        let actions = try DiffPlanner.plan(remote: updated.manifest, local: local, now: fixtureDate)
+        #expect(!actions.contains { if case .archive = $0 { true } else { false } })
+    }
+
+    @Test func privacyBlockedReplacementCarriesForwardItsSafePreviousPair() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let p = "H2 Chemistry/Synthetic Privacy Paper"
+        try tree.paper(p, title: "Synthetic Privacy Paper")
+        try tree.build(p, "p1", student: "old questions", teacher: "old answers")
+        try tree.g11(p, "p1", student: "old questions", teacher: "old answers")
+        let initial = try read(tree)
+
+        try tree.paper(p, title: "Synthetic Restricted Paper")
+        try tree.write("\(p)/paper.json", json: [
+            "paper": ["title": "Synthetic Restricted Paper"],
+            "output": ["student_pdf": "Synthetic Restricted Student.pdf", "teacher_pdf": "Synthetic Restricted Teacher.pdf"]])
+        try tree.build(p, "p2", student: "new questions", teacher: "new answers")
+        try tree.g11(p, "p2", student: "new questions", teacher: "new answers", reviewedAt: "2026-09-01")
+        let aliases = try ClassAliasTable(aliases: [:], withheldTerms: ["Restricted"])
+        let updated = try read(tree, aliases: aliases, previous: initial.manifest)
+
+        #expect(updated.pairs.isEmpty)
+        #expect(updated.retained.map(\.paperKey.rawValue) == [p])
+        #expect(updated.manifest.files.count == initial.manifest.files.count)
+        #expect(updated.misses.contains { $0.reason == .privacyWithheld })
+        let local = initial.manifest.files.map { DocumentRecord(source: $0, pageCount: 1, importedAt: fixtureDate) }
+        let actions = try DiffPlanner.plan(remote: updated.manifest, local: local, now: fixtureDate)
+        #expect(!actions.contains { if case .archive = $0 { true } else { false } })
+    }
+
+    @Test func duplicateKeyReplacementCarriesForwardItsSafePreviousPair() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let original = "A-Math/SEC 3 Synthetic Duplicate Paper"
+        try tree.paper(original)
+        try tree.build(original, "p1", student: "old questions", teacher: "old answers")
+        try tree.g11(original, "p1", student: "old questions", teacher: "old answers")
+        let initial = try read(tree)
+
+        let duplicate = "A-Math/Synthname Sec 3 Synthetic Duplicate Paper"
+        try tree.paper(duplicate)
+        try tree.build(duplicate, "p2", student: "new questions", teacher: "new answers")
+        try tree.g11(duplicate, "p2", student: "new questions", teacher: "new answers", reviewedAt: "2026-09-01")
+        let aliases = try ClassAliasTable(aliases: ["Synthname Sec 3": "SEC 3"])
+        let updated = try read(tree, aliases: aliases, previous: initial.manifest)
+
+        #expect(updated.pairs.isEmpty)
+        #expect(updated.retained.map(\.paperKey.rawValue) == ["A-Math/SEC 3 Synthetic Duplicate Paper"])
+        #expect(updated.manifest.files.count == initial.manifest.files.count)
+        #expect(updated.misses.filter { $0.reason == .duplicatePaperKey }.count == 2)
+        let local = initial.manifest.files.map { DocumentRecord(source: $0, pageCount: 1, importedAt: fixtureDate) }
+        let actions = try DiffPlanner.plan(remote: updated.manifest, local: local, now: fixtureDate)
+        #expect(!actions.contains { if case .archive = $0 { true } else { false } })
     }
 
     @Test func projectsThatWouldShareAPaperKeyAreBothHeldBack() throws {
