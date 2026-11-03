@@ -73,7 +73,9 @@ The iOS 18+ system picker requests fountain pen, marker, partial and stroke eras
 
 The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`. Its model accepts only a worksheet page and committed drawing. It shows a neutral **Paused** view while the main scene is inactive. The base follows the current page in full-page mode; in-progress strokes, follow-zoom and recording are future work.
 
-`sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. The presentation layer does not use roles or pairs yet, and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
+Debug builds expose **Device checks** in the library's Debug section, with pass/fail results for the scene, log, PDF and Pencil checks. The probe appends scene and capture snapshots to `Documents/device-checks.log`, provides a runtime-generated synthetic writing-trial PDF, and can replace the external student scene with a solid-colour, role-labelled test pattern. These controls are compiled out of Release builds.
+
+`sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. No pairing policy is implemented and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
 
 The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or less, red below 24 hours, unknown when absent/malformed (normal for unsigned Simulator builds). This parses only a reminder, not a signature or security decision. The current display reports Inbox delivery time, not a fabricated network sync time.
 
