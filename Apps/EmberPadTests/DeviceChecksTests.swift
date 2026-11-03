@@ -51,7 +51,7 @@ final class DeviceChecksTests: XCTestCase {
         let passing = DeviceChecksEvaluator.results(snapshot: sampleSnapshot(), logWritable: true, testPDFOK: true, pencilReadable: true)
         XCTAssertEqual(passing.map(\.title),
                        ["External display", "Scene capture state", "Main scene active", "Check log", "Test PDF", "Apple Pencil tap action"])
-        XCTAssertTrue(passing.allSatisfy { $0.passed ?? true })
+        XCTAssertTrue(passing.allSatisfy(\.passed))
         let offline = DeviceChecksSnapshot(captureState: "inactive", externalSceneCount: 0,
                                            mainSceneActive: false, screenCount: 1, screenCaptured: false)
         let failing = DeviceChecksEvaluator.results(
@@ -61,7 +61,7 @@ final class DeviceChecksTests: XCTestCase {
         XCTAssertEqual(byTitle("Check log")?.passed, false)
         XCTAssertEqual(byTitle("Test PDF")?.passed, false)
         XCTAssertEqual(byTitle("Apple Pencil tap action")?.passed, false)
-        XCTAssertNil(byTitle("Main scene active")?.passed, "main scene readout is informational, not pass/fail")
+        XCTAssertEqual(byTitle("Main scene active")?.passed, false)
     }
 
     func testPencilLabelsAreDistinctAndReadable() {

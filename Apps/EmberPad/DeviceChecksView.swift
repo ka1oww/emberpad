@@ -79,11 +79,9 @@ struct DeviceChecksView: View {
                             Text(row.detail).font(.footnote).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if let passed = row.passed {
-                            Text(passed ? "Pass" : "Fail")
-                                .font(.footnote).bold()
-                                .foregroundStyle(passed ? .green : .red)
-                        }
+                        Text(row.passed ? "Pass" : "Fail")
+                            .font(.footnote).bold()
+                            .foregroundStyle(row.passed ? .green : .red)
                     }
                 }
             }
@@ -122,9 +120,9 @@ struct DeviceChecksView: View {
         }
     }
 
-    private func statusDot(_ passed: Bool?) -> some View {
+    private func statusDot(_ passed: Bool) -> some View {
         Circle()
-            .fill(passed.map { $0 ? Color.green : Color.red } ?? Color.gray)
+            .fill(passed ? Color.green : Color.red)
             .frame(width: 10, height: 10)
     }
 }
@@ -193,11 +191,10 @@ private struct SceneCaptureReader: UIViewControllerRepresentable {
 // MARK: - Synthetic-PDF writing trial
 
 enum DeviceChecksPDFTool: CaseIterable {
-    case ink, highlighter, lasso
+    case ink, lasso
     var title: String {
         switch self {
         case .ink: return "Ink"
-        case .highlighter: return "Highlight"
         case .lasso: return "Lasso"
         }
     }
@@ -254,7 +251,6 @@ private final class DeviceChecksPDFTestController: UIViewController, PDFPageOver
         let pencilTool: PKTool
         switch tool {
         case .ink: pencilTool = PKInkingTool(.pen, color: .black, width: 2)
-        case .highlighter: pencilTool = PKInkingTool(.marker, color: .systemYellow, width: 18)
         case .lasso: pencilTool = PKLassoTool()
         }
         picker.selectedTool = pencilTool

@@ -10,11 +10,6 @@ import PDFKit
 /// flag that tells the external scene to show the test colour. EP-04 adds one
 /// more section to the screen; extend `DeviceChecksSnapshot` and
 /// `DeviceChecksEvaluator` rather than restructuring.
-enum DeviceChecksSection {
-    /// Reserved for EP-04 (peer-to-peer). Kept as a named placeholder so the
-    /// screen grows by adding one section, not by reworking this file.
-    case networkPlaceholder
-}
 
 // MARK: - Snapshot
 
@@ -48,8 +43,7 @@ struct DeviceChecksSnapshot: Equatable {
 struct DeviceCheckResult: Equatable {
     let title: String
     let detail: String
-    /// nil means informational (no pass/fail applies).
-    let passed: Bool?
+    let passed: Bool
 }
 
 enum DeviceChecksEvaluator {
@@ -70,7 +64,7 @@ enum DeviceChecksEvaluator {
             DeviceCheckResult(
                 title: "Main scene active",
                 detail: snapshot.mainSceneActive ? "active" : "inactive",
-                passed: nil
+                passed: snapshot.mainSceneActive
             ),
             DeviceCheckResult(
                 title: "Check log",
