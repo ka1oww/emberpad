@@ -6,6 +6,11 @@ import Testing
 /// Synthetic Ember Projects trees. Record shapes mirror the real publisher, G11 and tutorial records with every
 /// value made up; no student, school roster or personal name appears.
 struct SyntheticEmberTree {
+    static let subjectCodes = [
+        "A-Math": "amath", "H2 Chemistry": "h2_chem", "H2 Math": "h2_math", "H2 Physics": "h2_physics",
+        "Pure Chemistry": "pure_chem", "H2 Econs": "h2_econs", "Pure Physics": "pure_physics"
+    ]
+
     let root: URL
     init() throws {
         root = temporaryRoot().appendingPathComponent("Ember Projects", isDirectory: true)
@@ -33,7 +38,8 @@ struct SyntheticEmberTree {
     static func sha(_ text: String) -> String { ContentHash.digest(Data(text.utf8)).rawValue }
 
     /// Writes `artifacts/<build>/student.pdf` and `teacher.pdf` with the given bytes.
-    func build(_ project: String, _ build: String, student: String, teacher: String, finishedAt: String? = nil) throws {
+    func build(_ project: String, _ build: String, student: String, teacher: String,
+               finishedAt: Any? = "2026-08-20T12:00:00Z") throws {
         try write("\(project)/artifacts/\(build)/student.pdf", Data(student.utf8))
         try write("\(project)/artifacts/\(build)/teacher.pdf", Data(teacher.utf8))
         if let finishedAt {
@@ -46,12 +52,17 @@ struct SyntheticEmberTree {
     /// `paper.json` as the paper runtime writes it, with the publisher's output names.
     func paper(_ project: String, title: String? = nil) throws {
         let name = String(project.split(separator: "/").last!)
+        let subjectFolder = String(project.split(separator: "/").first!)
+        try paperRecord(project, paper: [
+            "subject": Self.subjectCodes[subjectFolder] ?? "h2_physics", "school": "Synthetic School", "level": "PU3",
+            "title": title ?? name, "teacher_title": (title ?? name) + " (Teacher)", "total_marks": 80
+        ], output: ["student_pdf": name + ".pdf", "teacher_pdf": name + " (Teacher).pdf"])
+    }
+
+    func paperRecord(_ project: String, paper: [String: Any], output: [String: Any]) throws {
         try write("\(project)/paper.json", json: [
             "schema_version": "ember.mockpaper/v3.2", "project_id": "synthetic-paper",
-            "paper": ["subject": "h2_physics", "school": "Synthetic School", "level": "PU3", "title": title ?? name,
-                      "teacher_title": (title ?? name) + " (Teacher)", "total_marks": 80],
-            "output": ["student_pdf": name + ".pdf", "teacher_pdf": name + " (Teacher).pdf"],
-            "questions": []])
+            "paper": paper, "output": output, "questions": []])
     }
 
     /// A G11 visual sign-off record, `audit/visual/<build>.json`.
@@ -143,6 +154,58 @@ struct EmberLibrarySourceTests {
         #expect(pair.student.entry.size == 3)
         #expect(snapshot.manifest.version == 2 && snapshot.manifest.files.count == 2)
         #expect(try ManifestCodec.decode(ManifestCodec.encode(snapshot.manifest)) == snapshot.manifest)
+    }
+
+    @Test func paperSubjectCodesMustMatchTheirTopLevelFolders() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        for (folder, code) in SyntheticEmberTree.subjectCodes {
+            let project = "\(folder)/Synthetic Mapping \(code)"
+            try tree.paperRecord(project, paper: ["title": "Synthetic Mapping \(code)", "subject": code],
+                                 output: ["student_pdf": "Student.pdf", "teacher_pdf": "Teacher.pdf"])
+            try tree.build(project, "b1", student: "student \(code)", teacher: "teacher \(code)")
+            try tree.g11(project, "b1", student: "student \(code)", teacher: "teacher \(code)")
+        }
+
+        let snapshot = try read(tree)
+        #expect(Set(snapshot.pairs.map(\.project)) == Set(SyntheticEmberTree.subjectCodes.map { "\($0.key)/Synthetic Mapping \($0.value)" }))
+        #expect(snapshot.misses.isEmpty)
+    }
+
+    @Test func paperAndBuildRecordsRequireCompleteTypedFields() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let normalOutput: [String: Any] = ["student_pdf": "Student.pdf", "teacher_pdf": "Teacher.pdf"]
+        let cases: [(name: String, paper: [String: Any], output: [String: Any], finishedAt: Any?)] = [
+            ("missing-title", ["subject": "h2_chem"], normalOutput, "2026-08-20T12:00:00Z"),
+            ("typed-title", ["subject": "h2_chem", "title": 42], normalOutput, "2026-08-20T12:00:00Z"),
+            ("empty-title", ["subject": "h2_chem", "title": " "], normalOutput, "2026-08-20T12:00:00Z"),
+            ("missing-student", ["subject": "h2_chem", "title": "Synthetic"], ["teacher_pdf": "Teacher.pdf"], "2026-08-20T12:00:00Z"),
+            ("typed-student", ["subject": "h2_chem", "title": "Synthetic"], ["student_pdf": 42, "teacher_pdf": "Teacher.pdf"], "2026-08-20T12:00:00Z"),
+            ("empty-student", ["subject": "h2_chem", "title": "Synthetic"], ["student_pdf": " ", "teacher_pdf": "Teacher.pdf"], "2026-08-20T12:00:00Z"),
+            ("missing-teacher", ["subject": "h2_chem", "title": "Synthetic"], ["student_pdf": "Student.pdf"], "2026-08-20T12:00:00Z"),
+            ("typed-teacher", ["subject": "h2_chem", "title": "Synthetic"], ["student_pdf": "Student.pdf", "teacher_pdf": false], "2026-08-20T12:00:00Z"),
+            ("empty-teacher", ["subject": "h2_chem", "title": "Synthetic"], ["student_pdf": "Student.pdf", "teacher_pdf": ""], "2026-08-20T12:00:00Z"),
+            ("missing-subject", ["title": "Synthetic"], normalOutput, "2026-08-20T12:00:00Z"),
+            ("typed-subject", ["subject": 42, "title": "Synthetic"], normalOutput, "2026-08-20T12:00:00Z"),
+            ("unknown-subject", ["subject": "unknown", "title": "Synthetic"], normalOutput, "2026-08-20T12:00:00Z"),
+            ("mismatched-subject", ["subject": "h2_math", "title": "Synthetic"], normalOutput, "2026-08-20T12:00:00Z"),
+            ("missing-finished-at", ["subject": "h2_chem", "title": "Synthetic"], normalOutput, nil),
+            ("malformed-finished-at", ["subject": "h2_chem", "title": "Synthetic"], normalOutput, "not-a-timestamp"),
+            ("typed-finished-at", ["subject": "h2_chem", "title": "Synthetic"], normalOutput, 42)
+        ]
+
+        for item in cases {
+            let project = "H2 Chemistry/Synthetic Invalid Record \(item.name)"
+            try tree.paperRecord(project, paper: item.paper, output: item.output)
+            try tree.build(project, "b1", student: "student \(item.name)", teacher: "teacher \(item.name)",
+                           finishedAt: item.finishedAt)
+            try tree.g11(project, "b1", student: "student \(item.name)", teacher: "teacher \(item.name)")
+        }
+
+        let snapshot = try read(tree)
+        #expect(snapshot.pairs.isEmpty)
+        #expect(snapshot.misses.count == cases.count)
+        #expect(snapshot.misses.allSatisfy { $0.reason == .invalidRecord })
+        #expect(snapshot.misses.allSatisfy { !$0.detail.contains("Synthetic Invalid Record") })
     }
 
     @Test func paperSignoffsRequireAnExplicitlyAcceptedSchemaVersion() throws {
@@ -639,7 +702,8 @@ struct EmberLibrarySourceTests {
         // A name-prefixed project whose paper title repeats the name mid-string.
         let q = "A-Math/Othername S3 Paper 1"
         try tree.paper(q, title: "Paper 1 revised by Othername")
-        try tree.write("\(q)/paper.json", json: ["paper": ["title": "Paper 1 revised by Othername"], "output": [:]])
+        try tree.paperRecord(q, paper: ["subject": "amath", "title": "Paper 1 revised by Othername"],
+                             output: ["student_pdf": "Othername Student.pdf", "teacher_pdf": "Othername Teacher.pdf"])
         try tree.build(q, "b1", student: "qs", teacher: "qt"); try tree.g11(q, "b1", student: "qs", teacher: "qt")
 
         let snapshot = try read(tree, aliases: ClassAliasTable(aliases: [:], withheldTerms: ["Synthname"]))
@@ -734,9 +798,9 @@ struct EmberLibrarySourceTests {
         let initial = try read(tree)
 
         try tree.paper(p, title: "Synthetic Restricted Paper")
-        try tree.write("\(p)/paper.json", json: [
-            "paper": ["title": "Synthetic Restricted Paper"],
-            "output": ["student_pdf": "Synthetic Restricted Student.pdf", "teacher_pdf": "Synthetic Restricted Teacher.pdf"]])
+        try tree.paperRecord(p, paper: ["subject": "h2_chem", "title": "Synthetic Restricted Paper"],
+                             output: ["student_pdf": "Synthetic Restricted Student.pdf",
+                                      "teacher_pdf": "Synthetic Restricted Teacher.pdf"])
         try tree.build(p, "p2", student: "new questions", teacher: "new answers")
         try tree.g11(p, "p2", student: "new questions", teacher: "new answers", reviewedAt: "2026-09-01")
         let aliases = try ClassAliasTable(aliases: [:], withheldTerms: ["Restricted"])

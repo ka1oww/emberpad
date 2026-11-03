@@ -558,6 +558,10 @@ private struct Reader {
     private static let visualSignoffSchemas: Set<String> = [
         "ember.visual-signoff/v1", "ember.visual-signoff/v3", "ember.visual-signoff/v4", "ember.visual-signoff/v5"
     ]
+    private static let paperSubjectFolders = [
+        "amath": "A-Math", "h2_chem": "H2 Chemistry", "h2_math": "H2 Math", "h2_physics": "H2 Physics",
+        "pure_chem": "Pure Chemistry", "h2_econs": "H2 Econs", "pure_physics": "Pure Physics"
+    ]
 
     enum Outcome {
         case pair(LibraryPair)
@@ -602,9 +606,20 @@ private struct Reader {
         guard let paper = json(project.appendingPathComponent("paper.json")) else {
             return .miss(.invalidRecord, "paper.json is not a JSON object", key)
         }
-        struct Candidate { let reviewedAt: Date; let finishedAt: Date?; let build: String }
+        guard let details = paper["paper"] as? [String: Any],
+              let title = details["title"] as? String, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let paperSubject = details["subject"] as? String, Self.paperSubjectFolders[paperSubject] == subject,
+              let output = paper["output"] as? [String: Any],
+              let studentOutput = output["student_pdf"] as? String,
+              !studentOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let teacherOutput = output["teacher_pdf"] as? String,
+              !teacherOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .miss(.invalidRecord, "paper.json is incomplete or its subject does not match the project folder", key)
+        }
+        struct Candidate { let reviewedAt: Date; let finishedAt: Date; let build: String }
         var candidates: [Candidate] = []
         var seen: Set<String> = []
+        var invalidBuildRecord = false
         let audit = project.appendingPathComponent("audit/visual", isDirectory: true)
         let records = hasRealDirectoryChain(project: project, relativePath: "audit/visual")
             ? (try? fileManager.contentsOfDirectory(at: audit, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
@@ -618,25 +633,30 @@ private struct Reader {
                   let reviewedAt = Self.timestamp(signoff["reviewed_at"] as? String),
                   let student = signoff["student_pdf_sha256"] as? String, let teacher = signoff["teacher_pdf_sha256"] as? String,
                   matches(project: project, build: build, student: student, teacher: teacher) else { continue }
+            guard let buildRecord = json(project.appendingPathComponent("artifacts/\(build)/build-record.json")),
+                  let finishedAt = Self.timestamp(buildRecord["finished_at"] as? String) else {
+                invalidBuildRecord = true
+                continue
+            }
             seen.insert(build)
-            let finished = json(project.appendingPathComponent("artifacts/\(build)/build-record.json"))?["finished_at"] as? String
-            candidates.append(Candidate(reviewedAt: reviewedAt, finishedAt: Self.timestamp(finished), build: build))
+            candidates.append(Candidate(reviewedAt: reviewedAt, finishedAt: finishedAt, build: build))
         }
         guard let pick = candidates.max(by: { lhs, rhs in
             if lhs.reviewedAt != rhs.reviewedAt { return lhs.reviewedAt < rhs.reviewedAt }
-            if lhs.finishedAt != rhs.finishedAt { return Self.datePrecedes(lhs.finishedAt, rhs.finishedAt) }
+            if lhs.finishedAt != rhs.finishedAt { return lhs.finishedAt < rhs.finishedAt }
             return lhs.build < rhs.build
         }) else {
+            if invalidBuildRecord {
+                return .miss(.invalidRecord, "a hash-matched candidate has no valid build finish timestamp", key)
+            }
             return .miss(.paperNotSignedOff, "no passing audit/visual record whose two hashes match its build's copies", key)
         }
-        let output = paper["output"] as? [String: Any]
-        let title = (paper["paper"] as? [String: Any])?["title"] as? String
-        func displayName(_ field: String, fallback: String) -> String {
-            guard let file = output?[field] as? String, file.lowercased().hasSuffix(".pdf"), file.count > 4 else { return fallback }
+        func displayName(_ file: String, fallback: String) -> String {
+            guard file.lowercased().hasSuffix(".pdf"), file.count > 4 else { return fallback }
             return naming.rewrite(String(file.dropLast(4))).trimmingCharacters(in: .whitespaces)
         }
-        let studentTitle = displayName("student_pdf", fallback: naming.rewrite(title ?? naming.displayName))
-        let teacherTitle = displayName("teacher_pdf", fallback: studentTitle + " (Teacher)")
+        let studentTitle = displayName(studentOutput, fallback: naming.rewrite(title))
+        let teacherTitle = displayName(teacherOutput, fallback: studentTitle + " (Teacher)")
         return makePair(project: project, subject: subject, naming: naming, key: key, rule: .paper, build: pick.build,
                         titles: (studentTitle, teacherTitle))
     }
@@ -787,14 +807,6 @@ private struct Reader {
         if let date = formatter.date(from: value) { return date }
         formatter.formatOptions = [.withFullDate]
         return formatter.date(from: value)
-    }
-
-    private static func datePrecedes(_ lhs: Date?, _ rhs: Date?) -> Bool {
-        switch (lhs, rhs) {
-        case (nil, nil), (.some, nil): return false
-        case (nil, .some): return true
-        case let (.some(left), .some(right)): return left < right
-        }
     }
 
     static func isSafeComponent(_ name: String) -> Bool {
