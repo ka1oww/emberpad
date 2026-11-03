@@ -1,5 +1,5 @@
-// Change only this setting after the teacher approves a final ID. Never sign the placeholder.
-EMBERPAD_BUNDLE_ID = dev.emberpad.placeholder
+// Final bundle ID approved by the teacher (EP-05). Never change the iPad ID: changing it later means deleting the app and its ink.
+EMBERPAD_BUNDLE_ID = io.github.ka1oww.emberpad
 PRODUCT_BUNDLE_IDENTIFIER = $(EMBERPAD_BUNDLE_ID)
 SWIFT_VERSION = 5.0
 CLANG_ENABLE_MODULES = YES
