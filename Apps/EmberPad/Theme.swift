@@ -53,6 +53,8 @@ enum ThemeToken: String, CaseIterable, Sendable {
 }
 
 enum Theme {
+    static let hairlineWidth: CGFloat = 0.5
+
     // MARK: - Canvas and chrome
 
     static let canvas = ThemeToken.canvas.color
@@ -214,7 +216,7 @@ struct ThemeTokenPreviewContent: View {
                             .frame(height: 48)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .stroke(Theme.line, lineWidth: 1)
+                                    .stroke(Theme.line, lineWidth: Theme.hairlineWidth)
                             )
                         Text(name)
                             .font(Theme.pageMeta)
