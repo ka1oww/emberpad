@@ -38,8 +38,12 @@ public struct EmberLibrarySource: Sendable {
         var unrecorded: [String] = []
         var seenKeys: Set<PaperKey> = []
 
+        let subjectDirectories = Dictionary(uniqueKeysWithValues: try reader.directories(in: root).map {
+            ($0.lastPathComponent, $0)
+        })
         for subject in Self.subjectFolders {
-            for project in reader.directories(in: root.appendingPathComponent(subject, isDirectory: true)) {
+            guard let folder = subjectDirectories[subject] else { continue }
+            for project in try reader.directories(in: folder) {
                 let name = project.lastPathComponent
                 let label = subject + "/" + name
                 switch reader.examine(project: project, subject: subject) {
@@ -567,11 +571,14 @@ private struct Reader {
     }
 
     /// Real (non-symlink) subdirectories, sorted by name. A missing folder has none.
-    func directories(in folder: URL) -> [URL] {
-        guard isDirectory(folder),
-              let children = try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
-                                                                  options: [.skipsHiddenFiles]) else { return [] }
-        return children.filter(isDirectory).sorted { $0.lastPathComponent < $1.lastPathComponent }
+    func directories(in folder: URL) throws -> [URL] {
+        guard isDirectory(folder) else { return [] }
+        let children = try fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                                                           options: [.skipsHiddenFiles])
+        return try children.filter { child in
+            let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            return values.isDirectory == true && values.isSymbolicLink != true
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
     mutating func examine(project: URL, subject: String) -> Outcome {

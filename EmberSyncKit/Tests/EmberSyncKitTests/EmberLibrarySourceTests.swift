@@ -361,6 +361,20 @@ struct EmberLibrarySourceTests {
         }
     }
 
+    @Test func sourceRootSymlinkIsNotTraversed() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let project = "H2 Chemistry/Synthetic Root Symlink Paper"
+        try tree.paper(project)
+        try tree.build(project, "b1", student: "questions", teacher: "answers")
+        try tree.g11(project, "b1", student: "questions", teacher: "answers")
+
+        let target = tree.root.deletingLastPathComponent().appendingPathComponent("external-root", isDirectory: true)
+        try FileManager.default.moveItem(at: tree.root, to: target)
+        try FileManager.default.createSymbolicLink(at: tree.root, withDestinationURL: target)
+
+        #expect(try read(tree).pairs.isEmpty)
+    }
+
     @Test func rolesComeFromTheRecordNeverFromFileNames() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         // The G11 record's student hash names the bytes stored as teacher.pdf: the copies are swapped, so no pair.
@@ -540,6 +554,26 @@ struct EmberLibrarySourceTests {
         let snapshot = try read(tree)
         #expect(snapshot.pairs.map(\.project) == [real])
         #expect(snapshot.misses.map(\.project) == [linkedCopy])
+    }
+
+    @Test func unreadableSubjectFolderFailsTheRead() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let subject = tree.root.appendingPathComponent("H2 Chemistry", isDirectory: true)
+        try FileManager.default.createDirectory(at: subject, withIntermediateDirectories: true)
+        let attributes = try FileManager.default.attributesOfItem(atPath: subject.path)
+        defer { try? FileManager.default.setAttributes(attributes, ofItemAtPath: subject.path) }
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: subject.path)
+
+        #expect(throws: (any Error).self) { try read(tree) }
+    }
+
+    @Test func unreadableSourceRootFailsTheRead() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let attributes = try FileManager.default.attributesOfItem(atPath: tree.root.path)
+        defer { try? FileManager.default.setAttributes(attributes, ofItemAtPath: tree.root.path) }
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: tree.root.path)
+
+        #expect(throws: (any Error).self) { try read(tree) }
     }
 
     @Test func readingNeverWritesInsideTheRoot() throws {
