@@ -1,6 +1,7 @@
 import SwiftUI
 import PDFKit
 import PencilKit
+import EmberSyncKit
 
 @MainActor
 protocol WorksheetPageRenderer: AnyObject {
@@ -51,9 +52,13 @@ struct EditorScreen: View {
                 Text("Main screen capture detected. Private answers are hidden.").foregroundStyle(.red).padding(8)
             }
             if let session { SaveStatusView(session: session) }
-            if let renderer {
+            if let renderer, let session {
                 HStack(spacing: 0) {
-                    PageRendererHost(renderer: renderer)
+                    if presentation.policy.rendersOnMainScreen(session.record) { PageRendererHost(renderer: renderer) }
+                    else {
+                        // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
+                        PrivatePlaceholder(text: "Teacher copy · private. Hidden during capture or while inactive.")
+                    }
                     // Pairing and answer annotation policy await the teacher. This stays unset in the base.
                     if let url = presentation.privateAnswerURL {
                         PrivateAnswerPane(url: url, hidden: presentation.policy.hidePrivateContent)
@@ -77,12 +82,13 @@ struct EditorScreen: View {
         .task {
             do {
                 let opened = try await library.open(documentID)
+                presentation.student.opened(opened.record)
                 session = opened
                 renderer = PageRendererFactory.make(session: opened, student: presentation.student)
             } catch { errorMessage = error.localizedDescription }
         }
         .onDisappear {
-            presentation.student.snapshot = nil
+            presentation.student.clear()
             session?.drawingDidChange = nil
             Task { do { try await library.close(documentID) } catch { library.errorMessage = error.localizedDescription } }
         }
@@ -105,8 +111,16 @@ private struct PrivateAnswerPane: View {
     let url: URL
     let hidden: Bool
     var body: some View {
-        if hidden { Text("Private answers hidden during capture or while inactive.").padding() }
+        // Hidden removes the PDF view instead of blurring or covering it, so no answer pixels are drawn.
+        if hidden { PrivatePlaceholder(text: "Private answers hidden during capture or while inactive.") }
         else { ReadOnlyPDF(url: url).accessibilityLabel("Private teacher answers") }
+    }
+}
+
+private struct PrivatePlaceholder: View {
+    let text: String
+    var body: some View {
+        Text(text).padding().frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(uiColor: .systemBackground))
     }
 }
 
@@ -114,4 +128,5 @@ private struct ReadOnlyPDF: UIViewRepresentable {
     let url: URL
     func makeUIView(context: Context) -> PDFView { let view = PDFView(); view.autoScales = true; view.document = PDFDocument(url: url); return view }
     func updateUIView(_ uiView: PDFView, context: Context) {}
+    static func dismantleUIView(_ uiView: PDFView, coordinator: ()) { uiView.document = nil }
 }

@@ -73,7 +73,7 @@ The iOS 18+ system picker requests fountain pen, marker, partial and stroke eras
 
 The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`. Its model accepts only a worksheet page and committed drawing. It shows a neutral **Paused** view while the main scene is inactive. The base follows the current page in full-page mode; in-progress strokes, follow-zoom and recording are future work.
 
-`sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. The presentation layer does not use roles or pairs yet, and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
+The student view's page snapshot can only be built through `StudentSafeDocument`, whose failable initializer accepts only a Student-role record, from a session that supplies that record's own page and drawing. A Teacher copy opened as the main page therefore shows **Teacher copy · private** on the student view, never its pages. `sceneCaptureState` hides private content when the main scene is captured without an external scene, and whenever inactive: a Teacher copy's pages and the private-answer pane then leave the view hierarchy and draw no pixels, rather than being blurred or covered. Pairing is not used by the presentation layer yet, and no private-answer URL is assigned. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
 
 The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or less, red below 24 hours, unknown when absent/malformed (normal for unsigned Simulator builds). This parses only a reminder, not a signature or security decision. The current display reports Inbox delivery time, not a fabricated network sync time.
 
@@ -81,7 +81,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 
 - Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
-- **Must resolve before first classroom use:** Teacher copies are identified by a version-2 manifest's role, but nothing yet keeps them off the student view: opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
+- **Closed (was must resolve before first classroom use):** a Teacher copy cannot reach the student view: the student snapshot can only be built from a Student-role document, so students see **Teacher copy · private** instead of its pages.
 - Sharing/recording method and the external-display/capture tests.
 - Scroll versus page navigation, visual design and tool presentation.
 - Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, recording, scribble detection, backup/export, lasso/eraser extras, and any Ember publish hook.
