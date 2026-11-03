@@ -32,6 +32,7 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     private var environment: AppEnvironment?
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
+        Theme.applyAppearance()
         let window = UIWindow(windowScene: scene)
         switch AppEnvironment.shared {
         case .success(let environment):

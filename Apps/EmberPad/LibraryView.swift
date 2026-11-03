@@ -44,6 +44,7 @@ struct LibraryView: View {
             .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
             .task { await library.refresh() }
         }
+        .tint(Theme.tint)
     }
 }
 
