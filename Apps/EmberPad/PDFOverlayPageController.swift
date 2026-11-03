@@ -15,6 +15,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var currentPage = 0
     private var menuTool: WorksheetTool?
     var viewController: UIViewController { self }
+    var pageCount: Int { session.pdf.pageCount }
+    var onPageChange: ((Int) -> Void)?
 
     init(session: DocumentSession, student: StudentDisplayModel) {
         self.session = session; self.student = student
@@ -49,11 +51,14 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         pdfView.pageOverlayViewProvider = self // Must precede document assignment.
         pdfView.usePageViewController(false)
         pdfView.isInMarkupMode = true
-        // Provisional spike layout; the teacher's scroll-versus-page choice replaces these settings.
+        // EP-11 continuous layout (design 5.2): vertical scrolling, 16 pt gaps, shadows, canvas chrome.
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
         pdfView.autoScales = true
         pdfView.displayBox = .cropBox
+        pdfView.pageBreakMargins = UIEdgeInsets(top: 8, left: 24, bottom: 8, right: 24)
+        pdfView.pageShadowsEnabled = true
+        pdfView.backgroundColor = .emberCanvas
         pdfView.focusCanvas = { [weak self] canvas in
             guard let self, self.activeCanvas !== canvas else { return }
             self.focus(canvas)
@@ -72,6 +77,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         redoTap.numberOfTapsRequired = 2; redoTap.numberOfTouchesRequired = 3
         pdfView.addGestureRecognizer(undoTap); pdfView.addGestureRecognizer(redoTap)
         publishPage()
+        onPageChange?(currentPage)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -87,12 +93,20 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     deinit { if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) } }
 
+    /// Ink canvases stay light in both themes, so black ink never inverts on the
+    /// white page (design 5.2 dark-mode rule). Every canvas is created here.
+    static func styleCanvas(_ canvas: PKCanvasView) {
+        canvas.overrideUserInterfaceStyle = .light
+        canvas.backgroundColor = .clear
+        canvas.isOpaque = false
+    }
+
     func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> UIView? {
         let index = session.pdf.index(for: page)
         guard index != NSNotFound else { return nil }
         if let existing = canvases[index] { return existing }
         let canvas = PKCanvasView(frame: CGRect(origin: .zero, size: page.bounds(for: .cropBox).size))
-        canvas.backgroundColor = .clear; canvas.isOpaque = false
+        Self.styleCanvas(canvas)
         canvas.isScrollEnabled = false
         canvas.drawingPolicy = .pencilOnly
         canvas.maximumSupportedContentVersion = .latest
@@ -153,14 +167,18 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.becomeFirstResponder()
         if let index = canvases.first(where: { $0.value === canvas })?.key, index != currentPage {
             currentPage = index
+            onPageChange?(index)
             publishPage()
         }
     }
 
     private func pageChanged() {
         guard let page = pdfView.currentPage else { return }
-        currentPage = session.pdf.index(for: page)
+        let index = session.pdf.index(for: page)
+        guard index != NSNotFound, index != currentPage else { return }
+        currentPage = index
         if let canvas = canvases[currentPage] { focus(canvas) }
+        onPageChange?(index)
         publishPage()
     }
 

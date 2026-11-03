@@ -88,9 +88,9 @@ Flow control is per transfer credit: the server sends only bytes the client has 
 
 ## Page and presentation seams
 
-`WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. A provisional vertical layout enables the spike; it is not the teacher's final navigation choice.
+`WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. The worksheet scrolls continuously (vertical, 16 pt page gaps with shadows on the canvas token); every ink canvas is forced to the light style so black ink never inverts in dark mode.
 
-Theme tokens are defined in `Apps/EmberPad/Theme.swift`; the app chrome uses light/dark color sets in `Apps/EmberPad/Assets.xcassets`, while ink colors stay fixed for the white worksheet page. The current fountain-pen default is black, and the marker default is translucent yellow. See the [light](docs/screenshots/theme-tokens-light.png) and [dark](docs/screenshots/theme-tokens-dark.png) token previews. Production in-app screen styling remains future work.
+Theme tokens are defined in `Apps/EmberPad/Theme.swift`; the app chrome uses light/dark color sets in `Apps/EmberPad/Assets.xcassets`, while ink colors stay fixed for the white worksheet page. The current fountain-pen default is black, and the marker default is translucent yellow. See the [light](docs/screenshots/theme-tokens-light.png) and [dark](docs/screenshots/theme-tokens-dark.png) token previews. The editor nav bar (serif title with page/save caption, share pill, Teacher-copy toggle, undo/redo, More menu), the capture-leak and ink-not-saved banners, and the page pill use those tokens; the GoodNotes-style toolbar strip and the floating Teacher card are later packages.
 
 The original worksheet-and-pen AppIcon and `bg`-coloured iOS launch screen, plus the Companion's monochrome menu-bar glyph and window badge, are documented with their vector sources and raster exporters in the [iPad](Apps/EmberPad/Brand.Sources/README.md) and [Companion](Apps/Companion/Brand.Sources/README.md) source notes. See the [home-screen icon screenshot](docs/screenshots/home-screen-icon.png).
 
