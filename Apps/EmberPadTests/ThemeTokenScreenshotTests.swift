@@ -3,11 +3,8 @@ import XCTest
 @testable import EmberPad
 
 /// Renders the debug token preview in light and dark via ImageRenderer and
-/// writes the PNGs to the test host's tmp dir. After a local
-/// `xcodebuild test` run, pull them out of the booted simulator with e.g.
-/// `xcrun simctl get_app_container <udid> dev.emberpad.placeholder data`
-/// and copy `tmp/theme-tokens-{light,dark}.png` to `docs/screenshots/`
-/// for the EP-06 PR.
+/// writes the PNGs to the test host's temporary directory. Checked-in reference
+/// captures are in `docs/screenshots/`.
 @MainActor
 final class ThemeTokenScreenshotTests: XCTestCase {
     func testTokenPreviewRendersLightAndDark() throws {

@@ -4,10 +4,7 @@ import XCTest
 
 /// EP-11 acceptance: screenshots of every share-pill state. Renders each state
 /// in light and dark via ImageRenderer and writes the PNGs to the test host's
-/// tmp dir. After a local `xcodebuild test` run, pull them out of the booted
-/// simulator with e.g.
-/// `xcrun simctl get_app_container <udid> dev.emberpad.placeholder data`
-/// and copy `tmp/share-pill-*.png` to `docs/screenshots/` for the EP-11 PR.
+/// temporary directory. Checked-in reference captures are in `docs/screenshots/`.
 @MainActor
 final class WorksheetChromeScreenshotTests: XCTestCase {
     func testSharePillStatesRenderLightAndDark() throws {
