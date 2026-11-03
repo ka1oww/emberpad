@@ -39,12 +39,13 @@ def draw_glyph(draw: ImageDraw.ImageDraw, s: float) -> None:
 
 def render_glyph(px: int) -> Image.Image:
     ss = 8
-    box = 20 * ss
+    scale = px / 18
+    box = round(20 * scale * ss)
     img = Image.new("RGBA", (box, box), (0, 0, 0, 0))
-    draw_glyph(ImageDraw.Draw(img), ss)
-    # Center the 20pt art in a px square (px == points for 1x/2x exports).
+    draw_glyph(ImageDraw.Draw(img), ss * scale)
     canvas = Image.new("RGBA", (px * ss, px * ss), (0, 0, 0, 0))
-    canvas.alpha_composite(img, (int((px - 20) / 2 * ss), int((px - 20) / 2 * ss)))
+    offset = round((px - 20 * scale) / 2 * ss)
+    canvas.alpha_composite(img, (offset, offset))
     return canvas.resize((px, px), Image.LANCZOS)
 
 
@@ -55,7 +56,7 @@ def draw_badge(draw: ImageDraw.ImageDraw, s: float) -> None:
     draw.polygon([(73 * s, 26 * s), (95 * s, 26 * s), (95 * s, 48 * s)], fill=FOLD)
     draw.rounded_rectangle([49 * s, 58 * s, 87 * s, 65 * s], radius=3.5 * s, fill=EMBER)
     draw.rounded_rectangle([49 * s, 72 * s, 79 * s, 79 * s], radius=3.5 * s, fill=EMBER)
-    draw.line([84 * s, 32 * s, 56 * s, 98 * s], fill=SLATE, width=max(1, round(9 * s)))
+    draw.line([88 * s, 34 * s, 52 * s, 96 * s], fill=SLATE, width=max(1, round(12 * s)))
     draw.polygon([(48 * s, 94 * s), (56 * s, 98 * s), (44 * s, 106 * s)], fill=SLATE)
 
 
