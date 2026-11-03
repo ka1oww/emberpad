@@ -50,6 +50,15 @@ final class WorksheetChromeTests: XCTestCase {
         XCTAssertFalse(chrome.pagePillVisible)
     }
 
+    func testEditedInkRemainsUnsavedUntilPersisted() throws {
+        let session = try Self.makeSession(pages: 1)
+        XCTAssertFalse(session.hasUnsavedInk)
+
+        session.update(PKDrawing(), page: 0)
+
+        XCTAssertTrue(session.hasUnsavedInk)
+    }
+
     func testEveryCanvasUsesLightStyle() throws {
         let session = try Self.makeSession(pages: 4)
         let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel())
