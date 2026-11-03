@@ -15,7 +15,6 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var currentPage = 0
     private var menuTool: WorksheetTool?
     var viewController: UIViewController { self }
-    var pageCount: Int { session.pdf.pageCount }
     var onPageChange: ((Int) -> Void)?
 
     init(session: DocumentSession, student: StudentDisplayModel) {

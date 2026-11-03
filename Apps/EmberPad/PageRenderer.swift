@@ -5,8 +5,6 @@ import PencilKit
 @MainActor
 protocol WorksheetPageRenderer: AnyObject {
     var viewController: UIViewController { get }
-    /// Total pages in the open document, for the nav caption and the page pill.
-    var pageCount: Int { get }
     /// Called on the main actor whenever the page under the viewport centre changes.
     var onPageChange: ((Int) -> Void)? { get set }
     func undo()
