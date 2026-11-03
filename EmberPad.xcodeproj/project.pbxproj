@@ -313,6 +313,7 @@
 				"SWIFT_VERSION" = "5.0";
 				"DEBUG_INFORMATION_FORMAT" = "dwarf";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+				"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "DEBUG";
 			};
 			"name" = "Debug";
 		};
