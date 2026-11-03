@@ -62,6 +62,33 @@ final class DeviceChecksTests: XCTestCase {
         XCTAssertEqual(byTitle("Test PDF")?.passed, false)
         XCTAssertEqual(byTitle("Apple Pencil tap action")?.passed, false)
         XCTAssertEqual(byTitle("Main scene active")?.passed, false)
+        XCTAssertEqual(byTitle("Scene capture state")?.passed, true)
+    }
+
+    func testCaptureAndExternalDisplayPassFailAcrossFourStates() {
+        let cases: [(captureState: String, screenCount: Int, screenCaptured: Bool, externalSceneCount: Int,
+                     capturePassed: Bool, externalPassed: Bool)] = [
+            ("inactive", 1, false, 0, true, false),
+            ("active", 1, false, 1, false, true),
+            ("unspecified", 1, false, 1, false, true),
+            ("inactive", 0, true, 0, false, false),
+        ]
+
+        for state in cases {
+            let snapshot = DeviceChecksSnapshot(
+                captureState: state.captureState,
+                externalSceneCount: state.externalSceneCount,
+                mainSceneActive: true,
+                screenCount: state.screenCount,
+                screenCaptured: state.screenCaptured
+            )
+            let results = DeviceChecksEvaluator.results(
+                snapshot: snapshot, logWritable: true, testPDFOK: true, pencilReadable: true)
+            let byTitle = { (title: String) in results.first(where: { $0.title == title }) }
+
+            XCTAssertEqual(byTitle("Scene capture state")?.passed, state.capturePassed)
+            XCTAssertEqual(byTitle("External display")?.passed, state.externalPassed)
+        }
     }
 
     func testPencilLabelsAreDistinctAndReadable() {

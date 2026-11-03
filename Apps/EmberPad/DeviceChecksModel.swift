@@ -59,7 +59,7 @@ enum DeviceChecksEvaluator {
             DeviceCheckResult(
                 title: "Scene capture state",
                 detail: "sceneCaptureState=\(snapshot.captureState) screens=\(snapshot.screenCount) captured=\(snapshot.screenCaptured)",
-                passed: snapshot.captureState != "unknown"
+                passed: snapshot.captureState == "inactive" && !snapshot.screenCaptured
             ),
             DeviceCheckResult(
                 title: "Main scene active",
