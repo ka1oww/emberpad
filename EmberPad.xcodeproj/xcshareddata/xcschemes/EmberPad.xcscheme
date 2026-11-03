@@ -12,7 +12,7 @@
   </BuildAction>
   <TestAction buildConfiguration="Debug" shouldUseLaunchSchemeArgsEnv="YES">
     <Testables>
-      <TestableReference skipped="NO" parallelizable="YES">
+      <TestableReference skipped="NO">
         <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10000000000000000000002" BuildableName="EmberPadTests.xctest" BlueprintName="EmberPadTests" ReferencedContainer="container:EmberPad.xcodeproj" />
       </TestableReference>
     </Testables>
