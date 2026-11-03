@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 import PDFKit
 import PencilKit
@@ -50,13 +51,23 @@ final class WorksheetChromeTests: XCTestCase {
         XCTAssertFalse(chrome.pagePillVisible)
     }
 
-    func testEditedInkRemainsUnsavedUntilPersisted() throws {
+    func testEditedInkPublishesUnsavedAndSavedTransitions() async throws {
         let session = try Self.makeSession(pages: 1)
+        var changeCount = 0
+        let observation = session.objectWillChange.sink { changeCount += 1 }
         XCTAssertFalse(session.hasUnsavedInk)
 
         session.update(PKDrawing(), page: 0)
 
         XCTAssertTrue(session.hasUnsavedInk)
+        let changesAfterEdit = changeCount
+        XCTAssertGreaterThan(changesAfterEdit, 0)
+
+        try await session.flush()
+
+        XCTAssertFalse(session.hasUnsavedInk)
+        XCTAssertGreaterThan(changeCount, changesAfterEdit)
+        withExtendedLifetime(observation) {}
     }
 
     func testEveryCanvasUsesLightStyle() throws {
