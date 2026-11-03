@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 import EmberSyncKit
 
 @main
@@ -8,58 +7,85 @@ struct EmberPadCompanion: App {
     @StateObject private var model = CompanionModel()
     var body: some Scene {
         MenuBarExtra("EmberPad", systemImage: "doc.text") {
-            Text("EmberPad Companion")
-            Text("Local library preparation").font(.caption)
-            if let folder = model.folder { Text(folder.lastPathComponent) }
-            Button("Choose master folder…") { model.chooseFolder() }
-            Button("Scan worksheets") { model.scan() }.disabled(model.folder == nil || model.isScanning)
-            if model.isScanning { Text("Scanning…") }
-            if let count = model.worksheetCount { Text("\(count) worksheets in manifest preview") }
-            if let message = model.message { Text(message) }
+            CompanionLibraryContent(
+                folder: model.folder,
+                isPreparing: model.isPreparing,
+                snapshot: model.snapshot,
+                scannedAt: model.scannedAt,
+                message: model.message,
+                onChooseFolder: { model.chooseFolder() },
+                onPrepare: { model.prepare() }
+            )
+            .frame(width: 340)
             Divider()
-            Text("Device sync and pairing await the next build phase.")
-            Button("Quit") { NSApplication.shared.terminate(nil) }
+            Button("Quit EmberPad Companion") { NSApplication.shared.terminate(nil) }
+                .keyboardShortcut("q")
+                .padding([.horizontal, .bottom], 14)
         }.menuBarExtraStyle(.window)
     }
 }
 
+/// Reads the Ember Projects source folder through EP-07's `EmberLibrarySource` and
+/// publishes the snapshot the window shows. It only reads: preparing never writes
+/// inside the source folder, and delivery to the iPad is EP-16's job (see
+/// `deliverToOutbox`). The read runs off the main thread.
 @MainActor
 final class CompanionModel: ObservableObject {
-    @Published private(set) var folder: URL?
-    @Published private(set) var worksheetCount: Int?
+    private static let sourceFolderKey = "EmberPadCompanion.sourceFolderPath"
+
+    @Published private(set) var folder: URL
+    @Published private(set) var snapshot: LibrarySnapshot?
+    @Published private(set) var scannedAt: Date?
+    @Published private(set) var isPreparing = false
     @Published private(set) var message: String?
-    @Published private(set) var isScanning = false
+
+    init() {
+        if let path = UserDefaults.standard.string(forKey: Self.sourceFolderKey), !path.isEmpty {
+            folder = URL(fileURLWithPath: path, isDirectory: true)
+        } else {
+            folder = EmberLibrarySource.defaultRoot
+        }
+    }
 
     func chooseFolder() {
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
-        panel.prompt = "Use local master folder"
-        guard panel.runModal() == .OK else { return }
-        folder = panel.url; worksheetCount = nil; message = nil
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use Ember Projects folder"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        folder = url
+        UserDefaults.standard.set(url.path, forKey: Self.sourceFolderKey)
+        snapshot = nil
+        scannedAt = nil
+        message = nil
+        prepare()
     }
 
-    func scan() {
-        guard let folder, !isScanning else { return }
-        isScanning = true
+    func prepare() {
+        guard !isPreparing else { return }
+        isPreparing = true
+        message = nil
+        let root = folder
         Task {
-            defer { isScanning = false }
+            let finishedAt = Date()
             do {
-                let manifest = try await Task.detached {
-                    let items = try InboxScanner.items(in: folder)
-                    let entries = try items.map { item in
-                        let values = try item.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-                        return try ManifestEntry(source: item.source, sha256: .digest(fileAt: item.url),
-                                                 size: Int64(values.fileSize ?? 0), modifiedAt: values.contentModificationDate ?? .distantPast)
-                    }
-                    return try Manifest(generatedAt: Date(), files: entries)
+                let snapshot = try await Task.detached(priority: .userInitiated) {
+                    let aliases = (try? ClassAliasTable.load()) ?? .empty
+                    return try EmberLibrarySource(root: root, aliases: aliases).read()
                 }.value
-                let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-                    .appendingPathComponent("EmberPad Companion", isDirectory: true)
-                try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-                try ManifestCodec.encode(manifest).write(to: support.appendingPathComponent("manifest-preview.json"), options: .atomic)
-                worksheetCount = manifest.files.count
-                message = "Manifest preview saved locally. No device connection is active."
-            } catch { message = error.localizedDescription }
+                self.snapshot = snapshot
+                self.scannedAt = finishedAt
+                self.deliverToOutbox(snapshot)
+            } catch {
+                self.message = error.localizedDescription
+            }
+            self.isPreparing = false
         }
     }
+
+    /// EP-16 hook: the prepared snapshot reaches the iPad Outbox from here.
+    /// TODO(EP-16): write the Outbox and hand it to sync/pairing in this hook. This
+    /// package only runs the EP-07 read above and refreshes the counts in the window.
+    func deliverToOutbox(_ snapshot: LibrarySnapshot) {}
 }

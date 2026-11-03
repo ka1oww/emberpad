@@ -8,7 +8,7 @@ Base code for a personal offline iPad teaching app. Visual design and the teache
 | --- | --- |
 | `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; local package dependency |
 | `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene |
-| `Apps/Companion` | macOS menu-bar shell: choose a local folder and generate a manifest preview, with no networking |
+| `Apps/Companion` | macOS menu-bar window: Ember Projects source folder, finished-pair counts per subject with a not-found list, phase-2 placeholders, with no networking |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
 | `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Ember Projects library reader and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
