@@ -108,7 +108,6 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 
 - Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
-- **Closed (was must resolve before first classroom use):** a Teacher copy cannot reach the student view: the student snapshot can only be built from a Student-role document, so students see **Teacher copy · private** instead of its pages.
 - External-display sharing/recording method and capture tests.
 - Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
