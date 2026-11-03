@@ -33,6 +33,12 @@ struct LibraryView: View {
                     if let last = library.lastInboxImport { Text("Inbox checked \(last.formatted(date: .abbreviated, time: .shortened))").font(.footnote) }
                     Text("Automatic Mac sync is planned. Worksheets imported here are available offline.").font(.footnote).foregroundStyle(.secondary)
                 }
+#if DEBUG
+                // EP-03 probe entry. Compiled out of Release; release behaviour unchanged.
+                Section("Debug") {
+                    NavigationLink("Device checks") { DeviceChecksView(presentation: presentation) }
+                }
+#endif
             }
             .navigationTitle("EmberPad")
             .toolbar {

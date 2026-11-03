@@ -85,18 +85,44 @@ final class StudentSceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard session.role == .windowExternalDisplayNonInteractive, let scene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: scene)
         if case .success(let environment) = AppEnvironment.shared {
-            window.rootViewController = UIHostingController(rootView: StudentDisplayView(model: environment.presentation.student))
+            window.rootViewController = Self.rootViewController(environment: environment)
             environment.presentation.externalSceneCount += 1
             registered = true
         } else { window.rootViewController = UIHostingController(rootView: Text("Paused")) }
         self.window = window
         window.isHidden = false
+#if DEBUG
+        // EP-03 probe: swap to the solid test colour while Device checks asks for it.
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshExternalRoot),
+                                               name: DeviceChecksExternalTest.didChangeNotification, object: nil)
+#endif
     }
     func sceneDidDisconnect(_ scene: UIScene) {
         if registered, case .success(let environment) = AppEnvironment.shared {
             environment.presentation.externalSceneCount = max(0, environment.presentation.externalSceneCount - 1)
         }
         registered = false
+#if DEBUG
+        NotificationCenter.default.removeObserver(self, name: DeviceChecksExternalTest.didChangeNotification, object: nil)
+#endif
         window = nil
     }
+#if DEBUG
+    @objc private func refreshExternalRoot() {
+        guard let window, case .success(let environment) = AppEnvironment.shared else { return }
+        window.rootViewController = Self.rootViewController(environment: environment)
+    }
+
+    private static func rootViewController(environment: AppEnvironment) -> UIViewController {
+        // Release behaviour is the student view below; the test pattern exists only in Debug.
+        if DeviceChecksExternalTest.shared.isEnabled {
+            return UIHostingController(rootView: DeviceChecksExternalTestView())
+        }
+        return UIHostingController(rootView: StudentDisplayView(model: environment.presentation.student))
+    }
+#else
+    private static func rootViewController(environment: AppEnvironment) -> UIViewController {
+        UIHostingController(rootView: StudentDisplayView(model: environment.presentation.student))
+    }
+#endif
 }
