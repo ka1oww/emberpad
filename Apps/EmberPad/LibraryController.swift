@@ -16,6 +16,111 @@ final class LibraryController: ObservableObject {
     init(store: LibraryStore, inbox: URL) { self.store = store; self.inbox = inbox }
     var classes: [String] { Set(documents.filter { $0.status != .archived }.map { $0.source.source.classFolder }).sorted() }
 
+    // MARK: - EP-10 library selection (subject sidebar + class filter)
+
+    /// Selected subject in the sidebar. `nil` shows every subject.
+    @Published var selectedSubject: String?
+    /// Selected class tag chip. `nil` shows all classes within the subject.
+    @Published var selectedClassTag: String?
+    /// When true the detail column shows archived Student worksheets instead of the subject grid.
+    @Published var showingArchived = false
+    /// Design 5.1 detail toolbar sort. Newest first by `importedAt`, then title.
+    @Published var sortNewestFirst = true
+
+    /// Student copies only: a Teacher copy is never its own card. It opens from its Student worksheet.
+    var studentDocuments: [DocumentRecord] { Self.studentCards(in: documents) }
+
+    /// Non-archived Student copies grouped for the SUBJECTS sidebar section, sorted by name.
+    var subjectsWithCounts: [(name: String, count: Int)] { Self.subjectsWithCounts(in: documents) }
+
+    /// Archived Student copies for the LIBRARY section. Teacher copies never appear here.
+    var archivedStudentDocuments: [DocumentRecord] { Self.archivedCards(in: documents, sortNewestFirst: sortNewestFirst) }
+
+    /// Distinct class tags among non-archived Student copies, optionally scoped to one subject.
+    /// Documents with a `nil` class tag appear under the "All classes" chip only.
+    var availableClassTags: [String] { Self.classTags(in: documents, subject: selectedSubject) }
+
+    /// Grid contents: non-archived Student copies filtered by subject and class tag.
+    var visibleCards: [DocumentRecord] {
+        Self.filteredCards(in: documents, subject: showingArchived ? nil : selectedSubject,
+                           classTag: showingArchived ? nil : selectedClassTag,
+                           archived: showingArchived, sortNewestFirst: sortNewestFirst)
+    }
+
+    /// Pure grouping helper: subjects with counts over non-archived Student copies.
+    /// Teacher copies and archived documents never produce rows or counts.
+    static func subjectsWithCounts(in documents: [DocumentRecord]) -> [(name: String, count: Int)] {
+        let grouped = Dictionary(grouping: studentCards(in: documents).filter { $0.status != .archived }, by: \.subject)
+        return grouped.map { (name: $0.key, count: $0.value.count) }.sorted { $0.name < $1.name }
+    }
+
+    /// Pure helper: distinct sorted class tags for the chip row.
+    static func classTags(in documents: [DocumentRecord], subject: String? = nil) -> [String] {
+        let pool = studentCards(in: documents).filter { $0.status != .archived && (subject == nil || $0.subject == subject) }
+        return Array(Set(pool.compactMap(\.classTag))).sorted()
+    }
+
+    /// Pure helper: the grid's documents. Teacher copies are always excluded.
+    static func filteredCards(in documents: [DocumentRecord], subject: String?, classTag: String?,
+                              archived: Bool, sortNewestFirst: Bool) -> [DocumentRecord] {
+        let pool = studentCards(in: documents).filter { doc in
+            guard (doc.status == .archived) == archived else { return false }
+            if let subject, doc.subject != subject { return false }
+            if let classTag, doc.classTag != classTag { return false }
+            return true
+        }
+        return sortCards(pool, sortNewestFirst: sortNewestFirst)
+    }
+
+    /// Pure helper: every card-eligible document (Student role only, any status).
+    static func studentCards(in documents: [DocumentRecord]) -> [DocumentRecord] {
+        documents.filter { $0.role == .student }
+    }
+
+    static func archivedCards(in documents: [DocumentRecord], sortNewestFirst: Bool) -> [DocumentRecord] {
+        sortCards(studentCards(in: documents).filter { $0.status == .archived }, sortNewestFirst: sortNewestFirst)
+    }
+
+    static func sortCards(_ docs: [DocumentRecord], sortNewestFirst: Bool) -> [DocumentRecord] {
+        docs.sorted {
+            if $0.importedAt != $1.importedAt { return sortNewestFirst ? $0.importedAt > $1.importedAt : $0.importedAt < $1.importedAt }
+            if $0.title != $1.title { return $0.title < $1.title }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+    }
+
+    /// Long-press Archive from the card context menu. Teacher copies never reach this path
+    /// because they are never cards.
+    func archiveDocument(_ id: UUID) async {
+        do { try await store.archive(documentID: id) } catch { errorMessage = error.localizedDescription }
+        await refresh()
+    }
+
+    /// Long-press Unarchive from the Archived grid. Relinking the same entry restores `.current`.
+    func unarchiveDocument(_ id: UUID) async {
+        do {
+            let record = try await store.document(id)
+            try await store.relink(documentID: id, entry: record.source)
+        } catch { errorMessage = error.localizedDescription }
+        await refresh()
+    }
+
+    /// Long-press Move to class: files the same bytes under a new class folder via relink.
+    /// For v1 copies the subject follows the class folder; v2 publication metadata is preserved.
+    func moveDocument(_ id: UUID, toClassFolder classFolder: String) async {
+        do {
+            let record = try await store.document(id)
+            guard record.role == .student else { throw LibraryError.invalidDocument }
+            let trimmed = classFolder.trimmingCharacters(in: .whitespacesAndNewlines)
+            let target = try SourcePath(classFolder: trimmed, relativePath: record.source.source.relativePath)
+            let entry = try ManifestEntry(source: target, sha256: record.source.sha256,
+                                          size: record.source.size, modifiedAt: record.source.modifiedAt,
+                                          publication: record.source.publication)
+            try await store.relink(documentID: id, entry: entry)
+        } catch { errorMessage = error.localizedDescription }
+        await refresh()
+    }
+
     func refresh() async {
         do { documents = try await store.documents() }
         catch { errorMessage = error.localizedDescription }

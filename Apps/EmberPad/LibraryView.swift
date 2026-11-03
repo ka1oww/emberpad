@@ -2,80 +2,412 @@ import SwiftUI
 import UniformTypeIdentifiers
 import EmberSyncKit
 
+/// Library: subjects in the sidebar, an optional class filter, a grid of papers (EP-10).
+///
+/// Adapted from design 5.1 to the Ember main folder: the sidebar groups by
+/// **subject** (publication subject, or the class folder for loose deliveries),
+/// with counts over non-archived Student copies. The class tag is an optional
+/// chip filter in the detail column. A Teacher copy is never its own card: the
+/// grid shows Student copies only, thumbnails render the Student copy's first
+/// page, and the Teacher badge opens from its Student worksheet (EP-13 owns
+/// that card). Every colour routes through the EP-06 `Theme` tokens.
 struct LibraryView: View {
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
+    @StateObject private var thumbnails: ThumbnailCache
+    @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @State private var selection: LibrarySidebarSelection = .allSubjects
     @State private var showImport = false
+    @State private var movingDocument: DocumentRecord?
+    @State private var moveClassName = ""
+
+    init(library: LibraryController, presentation: PresentationState) {
+        self.library = library
+        self.presentation = presentation
+        _thumbnails = StateObject(wrappedValue: ThumbnailCache(store: library.store))
+    }
 
     var body: some View {
-        NavigationStack {
-            List {
-                SigningBanner()
-                if presentation.captureActive && presentation.externalSceneCount == 0 {
-                    Text("Main screen capture detected. Private answers are hidden.").foregroundStyle(.red)
-                } else if presentation.externalSceneCount > 0 {
-                    Text("Student display connected. Stay in EmberPad while sharing.").foregroundStyle(.secondary)
-                }
-                if let error = library.errorMessage {
-                    Section("Library needs attention") {
-                        Text(error).foregroundStyle(.red)
-                        Button("Dismiss") { library.errorMessage = nil }
-                    }
-                }
-                Section("Classes") {
-                    ForEach(library.classes, id: \.self) { name in
-                        NavigationLink(name) { DocumentListView(library: library, presentation: presentation, className: name) }
-                    }
-                    if library.classes.isEmpty { Text("Import a worksheet to create a class folder.").foregroundStyle(.secondary) }
-                }
-                Section {
-                    NavigationLink("Archived") { DocumentListView(library: library, presentation: presentation, className: nil) }
-                    if let last = library.lastInboxImport { Text("Inbox checked \(last.formatted(date: .abbreviated, time: .shortened))").font(.footnote) }
-                    Text("Automatic Mac sync is planned. Worksheets imported here are available offline.").font(.footnote).foregroundStyle(.secondary)
-                }
-#if DEBUG
-                // EP-03 probe entry. Compiled out of Release; release behaviour unchanged.
-                Section("Debug") {
-                    NavigationLink("Device checks") { DeviceChecksView(presentation: presentation) }
-                }
-#endif
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebar
+        } detail: {
+            NavigationStack {
+                detail
             }
-            .navigationTitle("EmberPad")
-            .toolbar {
-                Button("Import from Files", systemImage: "square.and.arrow.down") { showImport = true }
-                    .disabled(library.isImporting)
-                Button("File Inbox", systemImage: "tray") { Task { await library.fileInbox() } }.disabled(library.isImporting)
-            }
-            .refreshable { await library.fileInbox() }
-            .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
-            .task { await library.refresh() }
         }
         .tint(Theme.tint)
+        .task { await library.refresh() }
+        .onChange(of: selection) { _, new in
+            library.showingArchived = (new == .archived)
+            if case .subject(let name) = new { library.selectedSubject = name }
+            else if new == .allSubjects { library.selectedSubject = nil }
+            library.selectedClassTag = nil
+        }
+        .onChange(of: library.selectedSubject) { _, subject in
+            if let subject, !library.subjectsWithCounts.contains(where: { $0.name == subject }) {
+                library.selectedSubject = nil
+                selection = .allSubjects
+            }
+            if let tag = library.selectedClassTag, !library.availableClassTags.contains(tag) {
+                library.selectedClassTag = nil
+            }
+        }
+    }
+
+    // MARK: - Sidebar
+
+    private var sidebar: some View {
+        let rows = library.subjectsWithCounts
+        let archivedCount = library.archivedStudentDocuments.count
+        let totalCount = rows.reduce(0) { $0 + $1.count }
+        return List {
+            Section {
+                SidebarSelectRow(title: "All subjects", systemImage: "square.grid.2x2",
+                                 count: totalCount, selected: selection == .allSubjects) {
+                    selection = .allSubjects
+                }
+                if rows.isEmpty {
+                    Text("No subjects yet")
+                        .font(Theme.meta)
+                        .foregroundStyle(Theme.text3)
+                } else {
+                    ForEach(rows.map(\.name), id: \.self) { name in
+                        SidebarSelectRow(title: name, systemImage: "folder",
+                                         count: rows.first(where: { $0.name == name })?.count ?? 0,
+                                         selected: selection == .subject(name)) {
+                            selection = .subject(name)
+                        }
+                    }
+                }
+            } header: {
+                Theme.sidebarSectionHeader("Subjects")
+            }
+            Section {
+                SidebarSelectRow(title: "Archived", systemImage: "archivebox",
+                                 count: archivedCount, selected: selection == .archived) {
+                    selection = .archived
+                }
+            } header: {
+                Theme.sidebarSectionHeader("Library")
+            }
+#if DEBUG
+            // EP-03 probe entry. Compiled out of Release; release behaviour unchanged.
+            Section("Debug") {
+                NavigationLink("Device checks") { DeviceChecksView(presentation: presentation) }
+            }
+#endif
+        }
+        .listStyle(.sidebar)
+        .navigationTitle("EmberPad")
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Sidebar", systemImage: "sidebar.left") { toggleSidebar() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Import from Files", systemImage: "square.and.arrow.down") { showImport = true }
+                    .disabled(library.isImporting)
+            }
+        }
+        .safeAreaInset(edge: .bottom) { sidebarFooter }
+        .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
+    }
+
+    private var sidebarFooter: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Divider()
+            if let last = library.lastInboxImport {
+                Text("Inbox checked \(last.formatted(date: .omitted, time: .shortened))")
+            } else {
+                Text("Inbox not checked yet")
+            }
+            HStack(spacing: 6) {
+                Text("Mac sync")
+                Text("Phase 2")
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Theme.surface2, in: Capsule())
+                    .foregroundStyle(Theme.text3)
+                Spacer()
+                Button("Sync now") {}
+                    .disabled(true)
+            }
+            SigningFooterLine()
+        }
+        .font(Theme.meta)
+        .foregroundStyle(Theme.text2)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Theme.surface2)
+    }
+
+    // MARK: - Detail
+
+    private var detail: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(detailTitle)
+                        .font(Theme.libraryLargeTitle)
+                        .foregroundStyle(Theme.text)
+                    Text(detailSubline)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Theme.text2)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 8)
+
+                SigningDetailBanner()
+
+                if let error = library.errorMessage {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle")
+                        Text(error)
+                        Spacer()
+                        Button("Retry") { Task { await library.refresh() } }
+                        Button("Dismiss") { library.errorMessage = nil }
+                    }
+                    .font(Theme.meta)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(Theme.dangerSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .foregroundStyle(Theme.danger)
+                    .padding(.horizontal, 24)
+                }
+
+                if !library.showingArchived && !library.availableClassTags.isEmpty {
+                    classFilterChips
+                }
+
+                if library.isImporting && library.visibleCards.isEmpty {
+                    HStack {
+                        ProgressView("Importing")
+                            .tint(Theme.accent)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 200)
+                } else if library.visibleCards.isEmpty {
+                    emptyState
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 22)], spacing: 26) {
+                        ForEach(library.visibleCards) { record in
+                            LibraryCardCell(record: record, library: library, presentation: presentation,
+                                            thumbnails: thumbnails,
+                                            movingDocument: $movingDocument, moveClassName: $moveClassName)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 24)
+                }
+            }
+        }
+        .background(Theme.bg)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Sidebar", systemImage: "sidebar.left") { toggleSidebar() }
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Menu(library.sortNewestFirst ? "Newest first" : "Oldest first") {
+                    Button("Newest first") { library.sortNewestFirst = true }
+                    Button("Oldest first") { library.sortNewestFirst = false }
+                }
+                .disabled(library.isImporting)
+                Button("File Inbox", systemImage: "tray") { Task { await library.fileInbox() } }
+                    .disabled(library.isImporting)
+                if library.isImporting {
+                    ProgressView()
+                } else {
+                    Button("Import from Files", systemImage: "square.and.arrow.down") { showImport = true }
+                }
+            }
+        }
+        .refreshable { await library.fileInbox() }
+        .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
+        .sheet(item: $movingDocument) { record in
+            MoveToClassSheet(library: library, record: record, className: $moveClassName)
+        }
+        .task { await library.refresh() }
+    }
+
+    private var detailTitle: String {
+        if library.showingArchived { return "Archived" }
+        return library.selectedSubject ?? "All subjects"
+    }
+
+    private var detailSubline: String {
+        let count = library.visibleCards.count
+        let noun = count == 1 ? "worksheet" : "worksheets"
+        let order = library.sortNewestFirst ? "newest first" : "oldest first"
+        return "\(count) \(noun) · \(order)"
+    }
+
+    private var classFilterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                chip("All classes", selected: library.selectedClassTag == nil) {
+                    library.selectedClassTag = nil
+                }
+                ForEach(library.availableClassTags, id: \.self) { tag in
+                    chip(tag, selected: library.selectedClassTag == tag) {
+                        library.selectedClassTag = (library.selectedClassTag == tag) ? nil : tag
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+        }
+    }
+
+    private func chip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .font(.system(size: 13, weight: .semibold))
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(selected ? Theme.accent : Theme.surface2, in: Capsule())
+            .foregroundStyle(selected ? Theme.onAccent : Theme.text2)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "folder")
+                .font(.system(size: 46))
+                .foregroundStyle(Theme.text3)
+            Text(library.showingArchived ? "No archived worksheets" : "No worksheets yet")
+                .font(.system(.title3, design: .serif).weight(.semibold))
+                .foregroundStyle(Theme.text)
+            Text(library.showingArchived
+                 ? "Archived worksheets appear here."
+                 : "Import PDFs from Files and choose a class, or let the Mac drop them into the Inbox overnight.")
+                .font(Theme.meta)
+                .foregroundStyle(Theme.text2)
+                .multilineTextAlignment(.center)
+            if !library.showingArchived {
+                Button("Import from Files") { showImport = true }
+                    .font(.system(.body, weight: .semibold))
+                    .padding(.horizontal, 20).padding(.vertical, 10)
+                    .background(Theme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .foregroundStyle(Theme.onAccent)
+                    .disabled(library.isImporting)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 320)
+        .padding(.horizontal, 24)
+    }
+
+    private func toggleSidebar() {
+        columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
     }
 }
 
-private struct DocumentListView: View {
+enum LibrarySidebarSelection: Hashable {
+    case allSubjects
+    case subject(String)
+    case archived
+}
+
+private struct SidebarSelectRow: View {
+    let title: String
+    let systemImage: String
+    let count: Int
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Image(systemName: systemImage)
+                    .font(.system(size: 18))
+                    .foregroundStyle(selected ? Theme.onAccent : (systemImage == "folder" ? Theme.accent : Theme.text2))
+                Text(title)
+                Spacer()
+                Text("\(count)")
+                    .font(Theme.meta)
+                    .foregroundStyle(selected ? Theme.onAccent : Theme.text3)
+            }
+            .foregroundStyle(selected ? Theme.onAccent : Theme.text)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(selected ? Theme.accent : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+    }
+}
+
+private struct LibraryCardCell: View {
+    let record: DocumentRecord
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
-    let className: String?
+    @ObservedObject var thumbnails: ThumbnailCache
+    @Binding var movingDocument: DocumentRecord?
+    @Binding var moveClassName: String
+
     var body: some View {
-        List {
-            ForEach(library.documents.filter {
-                className == nil ? $0.status == .archived : ($0.status != .archived && $0.source.source.classFolder == className)
-            }) { doc in
-                NavigationLink {
-                    EditorScreen(documentID: doc.id, library: library, presentation: presentation)
-                } label: {
-                    VStack(alignment: .leading) {
-                        Text(doc.title)
-                        if doc.status == .olderVersion { Text("Older version").font(.caption).foregroundStyle(.secondary) }
-                        else if doc.isUpdated { Text("Updated").font(.caption).foregroundStyle(.secondary) }
-                    }
+        // Subscribes the card to thumbnail arrivals for this document version.
+        let _ = thumbnails.revision(for: record.id)
+        NavigationLink {
+            EditorScreen(documentID: record.id, library: library, presentation: presentation)
+        } label: {
+            WorksheetCard(record: record, thumbnail: thumbnails.cachedImage(for: record))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Move to class…", systemImage: "folder") {
+                moveClassName = record.source.source.classFolder
+                movingDocument = record
+            }
+            if library.showingArchived {
+                Button("Unarchive", systemImage: "arrow.uturn.backward") {
+                    Task { await library.unarchiveDocument(record.id) }
+                }
+            } else {
+                Button("Archive", systemImage: "archivebox") {
+                    Task { await library.archiveDocument(record.id) }
                 }
             }
+            Button("Export flattened PDF") {}
+                .disabled(true)
         }
-        .navigationTitle(className ?? "Archived")
-        .task { await library.refresh() }
+        .task {
+            await thumbnails.thumbnail(for: record)
+        }
+    }
+}
+
+private struct MoveToClassSheet: View {
+    @ObservedObject var library: LibraryController
+    let record: DocumentRecord
+    @Binding var className: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Move to class") {
+                    TextField("Class folder", text: $className)
+                    if !library.classes.isEmpty {
+                        Menu("Use existing class") {
+                            ForEach(library.classes, id: \.self) { name in
+                                Button(name) { className = name }
+                            }
+                        }
+                    }
+                }
+                Section {
+                    Button("Move") {
+                        Task {
+                            await library.moveDocument(record.id, toClassFolder: className)
+                            if library.errorMessage == nil { dismiss() }
+                        }
+                    }
+                    .disabled(className.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if let error = library.errorMessage {
+                        Text(error).foregroundStyle(Theme.danger)
+                    }
+                }
+                .tint(Theme.tint)
+            }
+            .navigationTitle("Move worksheet")
+            .toolbar { Button("Close") { dismiss() } }
+        }
+        .tint(Theme.tint)
     }
 }
 
@@ -92,10 +424,10 @@ private struct ImportWorksheetView: View {
                 if !library.classes.isEmpty {
                     Menu("Use existing class") { ForEach(library.classes, id: \.self) { name in Button(name) { className = name } } }
                 }
-                Button("Choose PDFs") { showPicker = true }
+                Button("Choose PDFs…") { showPicker = true }
                     .disabled(className.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || library.isImporting)
                 if library.isImporting { ProgressView("Importing") }
-                if let error = library.errorMessage { Text(error).foregroundStyle(.red) }
+                if let error = library.errorMessage { Text(error).foregroundStyle(Theme.danger) }
             }
             .navigationTitle("Import worksheets")
             .toolbar { Button("Close") { dismiss() } }
@@ -106,25 +438,68 @@ private struct ImportWorksheetView: View {
                 }
             }
         }
+        .tint(Theme.tint)
     }
 }
 
-private struct SigningBanner: View {
+// MARK: - Signing
+
+private struct SigningFooterLine: View {
     private let expiry = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
         .flatMap { try? Data(contentsOf: $0) }.flatMap { ProvisioningProfile.expirationDate(in: $0) }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
             let status = SigningStatus(expirationDate: expiry, now: context.date)
-            VStack(alignment: .leading) {
-                if let expiry { Text("Signed until \(expiry.formatted(date: .abbreviated, time: .shortened))") }
-                else { Text("Signing expiry unknown") }
-                if status == .warning || status == .urgent || status == .expired {
-                    Text("Keep the iPad on home Wi-Fi near the Mac tonight.")
+            Group {
+                if let expiry {
+                    Text("Signed until \(expiry.formatted(date: .abbreviated, time: .shortened))")
+                } else {
+                    Text("Signing expiry unknown")
                 }
             }
-            .font(.footnote)
-            .foregroundStyle(status == .urgent || status == .expired ? Color.red : status == .warning ? .orange : .secondary)
+            .foregroundStyle(signingColor(for: status))
+        }
+    }
+
+    private func signingColor(for status: SigningStatus) -> Color {
+        switch status {
+        case .urgent, .expired: return Theme.danger
+        case .warning: return Theme.warn
+        case .valid, .unknown: return Theme.text2
+        }
+    }
+}
+
+private struct SigningDetailBanner: View {
+    private let expiry = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
+        .flatMap { try? Data(contentsOf: $0) }.flatMap { ProvisioningProfile.expirationDate(in: $0) }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            let status = SigningStatus(expirationDate: expiry, now: context.date)
+            if status == .warning || status == .urgent {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                    VStack(alignment: .leading, spacing: 4) {
+                        if status == .warning {
+                            Text("EmberPad stops opening in 2 days.")
+                                .font(.system(.body, weight: .semibold))
+                        } else {
+                            Text("EmberPad stops opening tonight at \(expiry?.formatted(date: .omitted, time: .shortened) ?? "expiry").")
+                                .font(.system(.body, weight: .semibold))
+                        }
+                        Text("Keep the iPad on home Wi-Fi near the Mac tonight so it can renew. Your ink is safe either way.")
+                            .font(Theme.meta)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(status == .warning ? Theme.warnSoft : Theme.dangerSoft,
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .foregroundStyle(status == .warning ? Theme.warn : Theme.danger)
+                .padding(.horizontal, 24)
+            }
         }
     }
 }
