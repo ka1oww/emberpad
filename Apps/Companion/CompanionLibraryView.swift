@@ -140,16 +140,21 @@ struct CompanionLibraryContent: View {
                     Text("Everything with a record finished.").font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(Array(snapshot.misses.enumerated()), id: \.offset) { _, miss in
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle").font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                            Text(miss.project).font(.system(size: 12))
-                            Spacer()
-                            Text(miss.reason.rawValue).font(.system(size: 11))
-                                .foregroundStyle(.secondary)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(snapshot.misses.enumerated()), id: \.offset) { _, miss in
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle").font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                    Text(miss.project).font(.system(size: 12))
+                                    Spacer()
+                                    Text(miss.reason.rawValue).font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
                     }
+                    .frame(maxHeight: 120)
                 }
             } else if !isPreparing {
                 Text("Prepare the library to see what is missing.").font(.system(size: 12))

@@ -3,8 +3,8 @@ import AppKit
 import EmberSyncKit
 
 private func isCompanionSourceDirectory(_ url: URL) -> Bool {
-    var isDirectory: ObjCBool = false
-    return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
+    return values.isDirectory == true && values.isSymbolicLink != true
 }
 
 @main

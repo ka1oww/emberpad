@@ -568,6 +568,7 @@ private struct Reader {
 
     /// Real (non-symlink) subdirectories, sorted by name. A missing folder has none.
     func directories(in folder: URL) throws -> [URL] {
+        guard isDirectory(root) else { return [] }
         var isFolder: ObjCBool = false
         guard fileManager.fileExists(atPath: folder.path, isDirectory: &isFolder), isFolder.boolValue else { return [] }
         guard try folder.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { return [] }

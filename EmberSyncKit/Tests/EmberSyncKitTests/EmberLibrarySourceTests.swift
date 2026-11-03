@@ -361,6 +361,20 @@ struct EmberLibrarySourceTests {
         }
     }
 
+    @Test func sourceRootSymlinkIsNotTraversed() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let project = "H2 Chemistry/Synthetic Root Symlink Paper"
+        try tree.paper(project)
+        try tree.build(project, "b1", student: "questions", teacher: "answers")
+        try tree.g11(project, "b1", student: "questions", teacher: "answers")
+
+        let target = tree.root.deletingLastPathComponent().appendingPathComponent("external-root", isDirectory: true)
+        try FileManager.default.moveItem(at: tree.root, to: target)
+        try FileManager.default.createSymbolicLink(at: tree.root, withDestinationURL: target)
+
+        #expect(try read(tree).pairs.isEmpty)
+    }
+
     @Test func rolesComeFromTheRecordNeverFromFileNames() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         // The G11 record's student hash names the bytes stored as teacher.pdf: the copies are swapped, so no pair.
