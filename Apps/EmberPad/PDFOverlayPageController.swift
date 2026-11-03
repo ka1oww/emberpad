@@ -164,11 +164,6 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         } else { canvas.tool = picker.selectedTool }
         picker.setVisible(true, forFirstResponder: canvas)
         canvas.becomeFirstResponder()
-        if let index = canvases.first(where: { $0.value === canvas })?.key, index != currentPage {
-            currentPage = index
-            onPageChange?(index)
-            publishPage()
-        }
     }
 
     private func pageChanged() {
