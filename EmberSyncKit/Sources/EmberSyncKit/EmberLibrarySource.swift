@@ -1,0 +1,568 @@
+#if os(macOS)
+import Foundation
+
+/// Reads the iPad library straight from the Ember main folder (`~/Documents/Ember Projects`), read-only.
+///
+/// Only finished Student/Teacher pairs are listed, and "finished" is decided by publication records and SHA-256
+/// values alone, never by a file or folder name:
+///
+/// - **R1, paper.** A project with `paper.json` is finished when `audit/visual/<build>.json` has `status: pass` and
+///   its `student_pdf_sha256` and `teacher_pdf_sha256` equal the bytes of `artifacts/<build>/student.pdf` and
+///   `teacher.pdf`. The newest such record wins, by `reviewed_at`, then by the build record's `finished_at`.
+/// - **R2, tutorial.** A project with `tutorial.tex` (and no `paper.json`) is finished when `artifacts/latest.json`
+///   names a build whose two copies match the hashes it records, in either the `{student, teacher}` or the
+///   `{pdfs: {student: {sha256}, teacher: {sha256}}}` schema. An H2 Math tutorial also needs a sign-off record under
+///   `evidence/` bound to that build id and both hashes, otherwise it is a miss.
+///
+/// Pairing is structural: both copies come from one build directory, and each copy's role is the record key its
+/// hash matched. Nothing is ever written below the root. A project that no longer yields a pair keeps its previous
+/// entries ("no update"); the reader never removes a paper from the iPad.
+public struct EmberLibrarySource: Sendable {
+    /// The subject folders the Ember publisher knows, plus H2 Econs. Every other top-level folder is skipped.
+    public static let subjectFolders = ["A-Math", "H2 Chemistry", "H2 Econs", "H2 Math", "H2 Physics", "Pure Chemistry",
+                                        "Pure Physics"]
+    /// Subjects whose tutorials also need a captain sign-off bound to the build `latest.json` names.
+    public static let signoffSubjects: Set<String> = ["H2 Math"]
+    /// Shown for an entry with no class tag: a nil `classTag` means the copy belongs under every class.
+    public static let allClassesLabel = "All classes"
+
+    public static var defaultRoot: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Ember Projects", isDirectory: true)
+    }
+
+    public let root: URL
+    public let aliases: ClassAliasTable
+    // TODO(emberpad-library-source-scope Q1): the captain has not decided whether the 12 published papers that no
+    // longer have a finished pair in Ember Projects should come from the main Drive EMBER folder through the
+    // publisher registry. Until he picks it, no fallback is configured and v1 lists Ember Projects pairs only.
+    public let fallback: (any LibraryFallbackSource)?
+
+    public init(root: URL = Self.defaultRoot, aliases: ClassAliasTable = .empty, fallback: (any LibraryFallbackSource)? = nil) {
+        self.root = root
+        self.aliases = aliases
+        self.fallback = fallback
+    }
+
+    /// Walks the root and returns a version-2 manifest plus the miss list. `previous` is the manifest last
+    /// delivered: any of its papers that is not found again is carried forward unchanged.
+    public func read(previous: Manifest? = nil, generatedAt: Date = Date()) throws -> LibrarySnapshot {
+        var reader = Reader(root: root, aliases: aliases)
+        var found: [LibraryPair] = []
+        var misses: [LibraryMiss] = []
+        var unrecorded: [String] = []
+        var seenKeys: Set<PaperKey> = []
+
+        for subject in Self.subjectFolders {
+            for project in reader.directories(in: root.appendingPathComponent(subject, isDirectory: true)) {
+                let name = project.lastPathComponent
+                let label = subject + "/" + name
+                switch reader.examine(project: project, subject: subject) {
+                case .pair(let pair): found.append(pair); seenKeys.insert(pair.paperKey)
+                case .miss(let reason, let detail, let key):
+                    misses.append(LibraryMiss(project: label, reason: reason, detail: detail))
+                    if let key { seenKeys.insert(key) }
+                case .unrecorded: unrecorded.append(label)
+                }
+            }
+        }
+        if let fallback {
+            let present = Set(found.map(\.paperKey))
+            found += try fallback.pairs(excluding: present).filter { !present.contains($0.paperKey) }
+        }
+
+        let withheld = aliases.withheldTerms + found.flatMap(\.withheldTerms)
+        var pairs = Gate.uniqueKeys(found, misses: &misses)
+        pairs = Gate.privacy(pairs, terms: withheld, misses: &misses)
+
+        var retained: [LibraryRetained] = []
+        var files = pairs.flatMap { [$0.student.entry, $0.teacher.entry] }
+        if let previous {
+            let current = Set(pairs.map(\.paperKey))
+            let carried = Dictionary(grouping: previous.files.filter { $0.paperKey.map { !current.contains($0) } ?? false },
+                                     by: { $0.paperKey! })
+            let occupied = Set(files.map(\.source))
+            for (key, entries) in carried.sorted(by: { $0.key < $1.key }) {
+                let strings = entries.flatMap { [$0.source.key, $0.title, $0.subject] + ($0.classTag.map { [$0] } ?? []) } + [key.rawValue]
+                if let term = Gate.firstWithheld(in: strings, terms: withheld) {
+                    misses.append(LibraryMiss(project: key.rawValue, reason: .privacyWithheld,
+                                              detail: "previous entry carries a withheld term (\(term.count) characters)"))
+                    continue
+                }
+                guard entries.allSatisfy({ !occupied.contains($0.source) }) else {
+                    misses.append(LibraryMiss(project: key.rawValue, reason: .duplicatePaperKey,
+                                              detail: "previous entry's path is now used by another paper"))
+                    continue
+                }
+                retained.append(LibraryRetained(paperKey: key, reason: seenKeys.contains(key) ? .noLongerFinished : .sourceVanished,
+                                                entries: entries))
+                files += entries
+            }
+        }
+        files = Gate.crossRole(files, retained: &retained, pairs: &pairs, misses: &misses)
+
+        let manifest = try Manifest(version: 2, generatedAt: generatedAt, files: files)
+        return LibrarySnapshot(manifest: manifest, pairs: pairs, misses: misses.sorted { ($0.project, $0.reason.rawValue) < ($1.project, $1.reason.rawValue) },
+                               retained: retained, unrecordedProjects: unrecorded)
+    }
+}
+
+/// An extension point for copies that live outside Ember Projects (open captain question
+/// emberpad-library-source-scope Q1). A fallback pair never replaces a pair found under the root, and passes the
+/// same duplicate-key, privacy and cross-role gates.
+public protocol LibraryFallbackSource: Sendable {
+    func pairs(excluding paperKeys: Set<PaperKey>) throws -> [LibraryPair]
+}
+
+/// One copy of a pair: the manifest entry the iPad sees, and the local file it was read from (Mac only).
+public struct LibraryCopy: Equatable, Sendable {
+    public let entry: ManifestEntry
+    public let fileURL: URL
+    public init(entry: ManifestEntry, fileURL: URL) { self.entry = entry; self.fileURL = fileURL }
+}
+
+public struct LibraryPair: Equatable, Sendable {
+    public enum Rule: String, Sendable { case paper, tutorial, fallback }
+    public let paperKey: PaperKey
+    /// Local only: the `<Subject>/<Project>` label the pair was read from.
+    public let project: String
+    public let rule: Rule
+    /// Local only: the build directory both copies came from. It can carry a person's name, so it is never put in
+    /// the manifest.
+    public let buildID: String
+    public let student: LibraryCopy
+    public let teacher: LibraryCopy
+    /// Terms that must not reach the iPad, found while naming this pair.
+    let withheldTerms: [String]
+    public var bytes: Int64 { student.entry.size + teacher.entry.size }
+
+    public init(paperKey: PaperKey, project: String, rule: Rule, buildID: String, student: LibraryCopy, teacher: LibraryCopy) throws {
+        try self.init(paperKey: paperKey, project: project, rule: rule, buildID: buildID, student: student, teacher: teacher,
+                      withheldTerms: [])
+    }
+
+    init(paperKey: PaperKey, project: String, rule: Rule, buildID: String, student: LibraryCopy, teacher: LibraryCopy,
+         withheldTerms: [String]) throws {
+        guard student.entry.role == .student, teacher.entry.role == .teacher,
+              student.entry.paperKey == paperKey, teacher.entry.paperKey == paperKey else { throw LibraryError.invalidManifest }
+        self.paperKey = paperKey
+        self.project = project
+        self.rule = rule
+        self.buildID = buildID
+        self.student = student
+        self.teacher = teacher
+        self.withheldTerms = withheldTerms
+    }
+}
+
+/// A project that has a publication record but yields no finished pair, or a pair the gates held back.
+/// `project` is the local `<Subject>/<Project>` label; the miss list stays on the Mac.
+public struct LibraryMiss: Equatable, Sendable {
+    public enum Reason: String, Sendable, CaseIterable {
+        case paperNotSignedOff = "paper-not-signed-off"
+        case tutorialPointerMissing = "tutorial-pointer-missing"
+        case tutorialPointerUnreadable = "tutorial-pointer-unreadable"
+        case tutorialHashMismatch = "tutorial-hash-mismatch"
+        case mathTutorialUnsigned = "math-tutorial-unsigned"
+        case identicalCopies = "identical-copies"
+        case studentMatchesTeacher = "student-matches-a-teacher-copy"
+        case privacyWithheld = "privacy-withheld"
+        case duplicatePaperKey = "duplicate-paper-key"
+        case invalidRecord = "invalid-record"
+    }
+    public let project: String
+    public let reason: Reason
+    public let detail: String
+}
+
+/// A paper kept from the previous manifest because it was not found again. Its entries are listed unchanged.
+public struct LibraryRetained: Equatable, Sendable {
+    public enum Reason: String, Sendable { case sourceVanished = "source-vanished", noLongerFinished = "no-longer-finished" }
+    public let paperKey: PaperKey
+    public let reason: Reason
+    public let entries: [ManifestEntry]
+}
+
+public struct LibrarySnapshot: Equatable, Sendable {
+    /// Version 2: found pairs first, then retained entries.
+    public let manifest: Manifest
+    public let pairs: [LibraryPair]
+    public let misses: [LibraryMiss]
+    public let retained: [LibraryRetained]
+    /// Local `<Subject>/<Project>` labels with neither `paper.json` nor `tutorial.tex`. Not imported.
+    public let unrecordedProjects: [String]
+    public var pairBytes: Int64 { pairs.reduce(0) { $0 + $1.bytes } }
+}
+
+/// Maps a project-name prefix to a class tag, for prefixes such as a personal name followed by "Sec 3".
+/// The real table is personal data and lives outside the repository, at `defaultURL`:
+///
+/// ```json
+/// {"schema": "emberpad.class-aliases/v1", "aliases": {"<prefix>": "<class>"}, "withhold": ["<term>"]}
+/// ```
+///
+/// Any `withhold` term, and the leading word of a personal-name-shaped prefix, must never reach the manifest: a
+/// pair whose manifest strings would still carry one is held back as a miss.
+public struct ClassAliasTable: Equatable, Sendable {
+    public static let schema = "emberpad.class-aliases/v1"
+    public static let empty = ClassAliasTable()
+    public static var defaultURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/EmberPad/class-aliases.json", isDirectory: false)
+    }
+
+    public let aliases: [String: String]
+    public let withheldTerms: [String]
+
+    private init() { aliases = [:]; withheldTerms = [] }
+
+    public init(aliases: [String: String], withheldTerms: [String] = []) throws {
+        guard aliases.allSatisfy({ Publication.isValidLabel($0.key) && Publication.isValidLabel($0.value) }),
+              withheldTerms.allSatisfy(Publication.isValidLabel),
+              Set(aliases.keys.map { $0.lowercased() }).count == aliases.count else { throw LibraryError.invalidManifest }
+        self.aliases = aliases
+        self.withheldTerms = withheldTerms
+            + aliases.keys.compactMap { ClassResolver.personalNameShape($0) }
+            .filter { term in !withheldTerms.contains { $0.caseInsensitiveCompare(term) == .orderedSame } }
+    }
+
+    /// A missing file is an empty table. A present but malformed file throws, so a broken table is noticed.
+    public static func load(from url: URL = defaultURL) throws -> ClassAliasTable {
+        guard FileManager.default.fileExists(atPath: url.path) else { return .empty }
+        guard let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any],
+              object["schema"] as? String == schema,
+              Set(object.keys).isSubset(of: ["schema", "aliases", "withhold"]),
+              let aliases = (object["aliases"] ?? [String: String]()) as? [String: String],
+              let withhold = (object["withhold"] ?? [String]()) as? [String]
+        else { throw LibraryError.invalidManifest }
+        return try ClassAliasTable(aliases: aliases, withheldTerms: withhold)
+    }
+}
+
+// MARK: - Class from the project-name prefix
+
+struct ClassResolution: Equatable {
+    /// Nil is the "All classes" bucket.
+    let classTag: String?
+    /// The project name with any personal prefix replaced by its class or removed.
+    let displayName: String
+    let withheldTerms: [String]
+    /// Applies the same prefix rewrite to another string, such as a publisher display name.
+    let rewrite: @Sendable (String) -> String
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.classTag == rhs.classTag && lhs.displayName == rhs.displayName && lhs.withheldTerms == rhs.withheldTerms
+    }
+}
+
+enum ClassResolver {
+    /// Class prefixes that already are class names, matched case-insensitively and reported in this spelling.
+    static let classCodes = ["MI PU1", "MI PU2", "MI PU3", "YIJC JC1", "YIJC JC2", "NYJC-EJC JC1", "NYJC-EJC JC2",
+                             "SEC 1", "SEC 2", "SEC 3", "SEC 4"]
+
+    static func resolve(_ name: String, aliases: ClassAliasTable) -> ClassResolution {
+        // 1. Alias table, longest matching prefix first.
+        if let alias = aliases.aliases.keys.filter({ hasWordPrefix(name, $0) }).max(by: { $0.count < $1.count }),
+           let tag = aliases.aliases[alias] {
+            let withheld = [alias] + (personalNameShape(alias).map { [$0] } ?? [])
+            let rewrite: @Sendable (String) -> String = { replacingWordPrefix($0, alias, with: tag) }
+            return ClassResolution(classTag: tag, displayName: rewrite(name), withheldTerms: withheld, rewrite: rewrite)
+        }
+        // 2. A class code.
+        if let code = classCodes.first(where: { hasWordPrefix(name, $0) }) {
+            return ClassResolution(classTag: code, displayName: name, withheldTerms: [], rewrite: { $0 })
+        }
+        // 3. A personal-name-shaped prefix with no alias: the name is dropped and the copy goes to every class.
+        if let word = personalNameShape(name) {
+            let rewrite: @Sendable (String) -> String = { replacingWordPrefix($0, word, with: nil) }
+            return ClassResolution(classTag: nil, displayName: rewrite(name), withheldTerms: [word], rewrite: rewrite)
+        }
+        return ClassResolution(classTag: nil, displayName: name, withheldTerms: [], rewrite: { $0 })
+    }
+
+    /// The leading word of `<word> Sec <1-4>` or `<word> S<1-4>`, where the word is not itself a class code.
+    static func personalNameShape(_ name: String) -> String? {
+        let words = name.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard words.count >= 2, let first = words.first, first.lowercased() != "sec" else { return nil }
+        let digits: Set<String> = ["1", "2", "3", "4"]
+        let second = words[1].lowercased()
+        let shaped = (second == "sec" && words.count >= 3 && digits.contains(words[2])) ||
+            (second.count == 2 && second.hasPrefix("s") && digits.contains(String(second.dropFirst())))
+        return shaped ? first : nil
+    }
+
+    static func hasWordPrefix(_ text: String, _ prefix: String) -> Bool {
+        guard text.count >= prefix.count, text.prefix(prefix.count).lowercased() == prefix.lowercased() else { return false }
+        return text.count == prefix.count || text.dropFirst(prefix.count).first == " "
+    }
+
+    static func replacingWordPrefix(_ text: String, _ prefix: String, with replacement: String?) -> String {
+        guard hasWordPrefix(text, prefix) else { return text }
+        let rest = text.dropFirst(prefix.count).drop(while: { $0 == " " })
+        guard let replacement else { return String(rest) }
+        return rest.isEmpty ? replacement : replacement + " " + rest
+    }
+}
+
+// MARK: - Gates applied to every pair before it reaches the manifest
+
+enum Gate {
+    /// Two projects that would show under one paper key are both held back rather than guessed between.
+    static func uniqueKeys(_ pairs: [LibraryPair], misses: inout [LibraryMiss]) -> [LibraryPair] {
+        let paths = pairs.flatMap { [$0.student.entry.source, $0.teacher.entry.source] }
+        let pathCounts = Dictionary(paths.map { ($0, 1) }, uniquingKeysWith: +)
+        let keyCounts = Dictionary(pairs.map { ($0.paperKey, 1) }, uniquingKeysWith: +)
+        return pairs.filter { pair in
+            let unique = keyCounts[pair.paperKey] == 1 &&
+                pathCounts[pair.student.entry.source] == 1 && pathCounts[pair.teacher.entry.source] == 1
+            if !unique {
+                misses.append(LibraryMiss(project: pair.project, reason: .duplicatePaperKey,
+                                          detail: "another project shows under the same paper key or path"))
+            }
+            return unique
+        }
+    }
+
+    static func privacy(_ pairs: [LibraryPair], terms: [String], misses: inout [LibraryMiss]) -> [LibraryPair] {
+        pairs.filter { pair in
+            let strings = [pair.student.entry, pair.teacher.entry].flatMap {
+                [$0.source.key, $0.title, $0.subject] + ($0.classTag.map { [$0] } ?? [])
+            } + [pair.paperKey.rawValue]
+            guard let term = firstWithheld(in: strings, terms: terms) else { return true }
+            misses.append(LibraryMiss(project: pair.project, reason: .privacyWithheld,
+                                      detail: "a manifest string would carry a withheld term (\(term.count) characters)"))
+            return false
+        }
+    }
+
+    /// Whole-word, case-insensitive search.
+    static func firstWithheld(in strings: [String], terms: [String]) -> String? {
+        terms.first { term in
+            strings.contains { string in
+                var range = string.startIndex..<string.endIndex
+                while let found = string.range(of: term, options: [.caseInsensitive], range: range) {
+                    let before = found.lowerBound == string.startIndex ? nil : string[string.index(before: found.lowerBound)]
+                    let after = found.upperBound == string.endIndex ? nil : string[found.upperBound]
+                    if !(before?.isLetter ?? false) && !(before?.isNumber ?? false) &&
+                        !(after?.isLetter ?? false) && !(after?.isNumber ?? false) { return true }
+                    range = found.upperBound..<string.endIndex
+                }
+                return false
+            }
+        }
+    }
+
+    /// A Student entry whose bytes equal any Teacher copy in the library would show answers to students, so the
+    /// whole paper it belongs to is held back.
+    static func crossRole(_ files: [ManifestEntry], retained: inout [LibraryRetained], pairs: inout [LibraryPair],
+                          misses: inout [LibraryMiss]) -> [ManifestEntry] {
+        let teacherHashes = Set(files.filter { $0.role == .teacher }.map(\.sha256))
+        let blocked = Set(files.filter { $0.role == .student && teacherHashes.contains($0.sha256) }.compactMap(\.paperKey))
+        guard !blocked.isEmpty else { return files }
+        for key in blocked.sorted() {
+            misses.append(LibraryMiss(project: pairs.first { $0.paperKey == key }?.project ?? key.rawValue, reason: .studentMatchesTeacher,
+                                      detail: "a Student copy has the same bytes as a Teacher copy"))
+        }
+        pairs.removeAll { blocked.contains($0.paperKey) }
+        retained.removeAll { blocked.contains($0.paperKey) }
+        return files.filter { !($0.paperKey.map(blocked.contains) ?? false) }
+    }
+}
+
+// MARK: - Reading one project
+
+private struct Reader {
+    enum Outcome {
+        case pair(LibraryPair)
+        case miss(LibraryMiss.Reason, String, PaperKey?)
+        case unrecorded
+    }
+
+    let root: URL
+    let aliases: ClassAliasTable
+    let fileManager = FileManager.default
+    var hashes: [String: ContentHash] = [:]
+
+    init(root: URL, aliases: ClassAliasTable) {
+        self.root = root
+        self.aliases = aliases
+    }
+
+    /// Real (non-symlink) subdirectories, sorted by name. A missing folder has none.
+    func directories(in folder: URL) -> [URL] {
+        guard isDirectory(folder),
+              let children = try? fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                                                                  options: [.skipsHiddenFiles]) else { return [] }
+        return children.filter(isDirectory).sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    mutating func examine(project: URL, subject: String) -> Outcome {
+        let naming = ClassResolver.resolve(project.lastPathComponent, aliases: aliases)
+        let key = try? PaperKey(rawValue: subject + "/" + naming.displayName)
+        if isFile(project.appendingPathComponent("paper.json")) {
+            return paper(project: project, subject: subject, naming: naming, key: key)
+        }
+        if isFile(project.appendingPathComponent("tutorial.tex")) {
+            return tutorial(project: project, subject: subject, naming: naming, key: key)
+        }
+        return .unrecorded
+    }
+
+    // R1
+    private mutating func paper(project: URL, subject: String, naming: ClassResolution, key: PaperKey?) -> Outcome {
+        guard let paper = json(project.appendingPathComponent("paper.json")) else {
+            return .miss(.invalidRecord, "paper.json is not a JSON object", key)
+        }
+        struct Candidate { let reviewedAt: String; let finishedAt: String; let build: String }
+        var candidates: [Candidate] = []
+        var seen: Set<String> = []
+        let audit = project.appendingPathComponent("audit/visual", isDirectory: true)
+        let records = (try? fileManager.contentsOfDirectory(at: audit, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+                                                            options: [.skipsHiddenFiles])) ?? []
+        for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+        where record.pathExtension == "json" && isFile(record) {
+            guard let signoff = json(record), signoff["status"] as? String == "pass",
+                  let build = signoff["build_id"] as? String, Self.isSafeComponent(build), !seen.contains(build),
+                  let student = signoff["student_pdf_sha256"] as? String, let teacher = signoff["teacher_pdf_sha256"] as? String,
+                  matches(project: project, build: build, student: student, teacher: teacher) else { continue }
+            seen.insert(build)
+            let finished = json(project.appendingPathComponent("artifacts/\(build)/build-record.json"))?["finished_at"] as? String
+            candidates.append(Candidate(reviewedAt: signoff["reviewed_at"] as? String ?? signoff["signed_at"] as? String ?? "",
+                                        finishedAt: finished ?? "", build: build))
+        }
+        guard let pick = candidates.max(by: { ($0.reviewedAt, $0.finishedAt, $0.build) < ($1.reviewedAt, $1.finishedAt, $1.build) }) else {
+            return .miss(.paperNotSignedOff, "no passing audit/visual record whose two hashes match its build's copies", key)
+        }
+        let output = paper["output"] as? [String: Any]
+        let title = (paper["paper"] as? [String: Any])?["title"] as? String
+        func displayName(_ field: String, fallback: String) -> String {
+            guard let file = output?[field] as? String, file.lowercased().hasSuffix(".pdf"), file.count > 4 else { return fallback }
+            return naming.rewrite(String(file.dropLast(4))).trimmingCharacters(in: .whitespaces)
+        }
+        let studentTitle = displayName("student_pdf", fallback: naming.rewrite(title ?? naming.displayName))
+        let teacherTitle = displayName("teacher_pdf", fallback: studentTitle + " (Teacher)")
+        return makePair(project: project, subject: subject, naming: naming, key: key, rule: .paper, build: pick.build,
+                        titles: (studentTitle, teacherTitle))
+    }
+
+    // R2
+    private mutating func tutorial(project: URL, subject: String, naming: ClassResolution, key: PaperKey?) -> Outcome {
+        let pointerURL = project.appendingPathComponent("artifacts/latest.json")
+        guard isFile(pointerURL) else { return .miss(.tutorialPointerMissing, "no artifacts/latest.json", key) }
+        guard let pointer = json(pointerURL), let build = pointer["build_id"] as? String, Self.isSafeComponent(build),
+              let recorded = Self.pointerHashes(pointer) else {
+            return .miss(.tutorialPointerUnreadable, "artifacts/latest.json names no build with hashes in a known schema", key)
+        }
+        guard matches(project: project, build: build, student: recorded.student, teacher: recorded.teacher) else {
+            return .miss(.tutorialHashMismatch, "artifacts/latest.json hashes do not match its build's copies", key)
+        }
+        if EmberLibrarySource.signoffSubjects.contains(subject),
+           !hasSignoff(project: project, build: build, student: recorded.student, teacher: recorded.teacher) {
+            return .miss(.mathTutorialUnsigned, "no evidence sign-off bound to the build and both hashes", key)
+        }
+        return makePair(project: project, subject: subject, naming: naming, key: key, rule: .tutorial, build: build,
+                        titles: (naming.displayName, naming.displayName + " (Teacher)"))
+    }
+
+    /// `{student, teacher}` (string hashes) or `{pdfs: {student: {sha256}, teacher: {sha256}}}`. Both present must agree.
+    static func pointerHashes(_ pointer: [String: Any]) -> (student: String, teacher: String)? {
+        let flat = (pointer["student"] as? String).flatMap { s in (pointer["teacher"] as? String).map { (s, $0) } }
+        let pdfs = pointer["pdfs"] as? [String: Any]
+        let nested = ((pdfs?["student"] as? [String: Any])?["sha256"] as? String).flatMap { s in
+            ((pdfs?["teacher"] as? [String: Any])?["sha256"] as? String).map { (s, $0) }
+        }
+        switch (flat, nested) {
+        case let (a?, b?): return a.0.lowercased() == b.0.lowercased() && a.1.lowercased() == b.1.lowercased() ? a : nil
+        case let (a?, nil): return a
+        case let (nil, b?): return b
+        default: return nil
+        }
+    }
+
+    /// A JSON object under `evidence/` naming the build, recording both hashes (`pdf_sha256` or `pdfs`), and carrying
+    /// a captain approval: the `ember.math-tutorial-signoff/v1` schema or a `captain_verdict`, `captain_approval` or
+    /// `captain_signoff` object.
+    private mutating func hasSignoff(project: URL, build: String, student: String, teacher: String) -> Bool {
+        let evidence = project.appendingPathComponent("evidence", isDirectory: true)
+        guard isDirectory(evidence), let walker = fileManager.enumerator(
+            at: evidence, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: [.skipsHiddenFiles])
+        else { return false }
+        for case let url as URL in walker where url.pathExtension == "json" && isFile(url) {
+            guard let record = json(url), record["build_id"] as? String == build else { continue }
+            let approved = record["schema"] as? String == "ember.math-tutorial-signoff/v1" ||
+                ["captain_verdict", "captain_approval", "captain_signoff"].contains { record[$0] is [String: Any] }
+            guard approved else { continue }
+            for field in ["pdf_sha256", "pdfs"] {
+                guard let map = record[field] as? [String: Any] else { continue }
+                func hash(_ role: String) -> String? { map[role] as? String ?? (map[role] as? [String: Any])?["sha256"] as? String }
+                if let s = hash("student"), let t = hash("teacher"), s.lowercased() == student.lowercased(),
+                   t.lowercased() == teacher.lowercased() { return true }
+            }
+        }
+        return false
+    }
+
+    private mutating func makePair(project: URL, subject: String, naming: ClassResolution, key: PaperKey?, rule: LibraryPair.Rule,
+                                   build: String, titles: (student: String, teacher: String)) -> Outcome {
+        let directory = project.appendingPathComponent("artifacts/\(build)", isDirectory: true)
+        let studentURL = directory.appendingPathComponent("student.pdf"), teacherURL = directory.appendingPathComponent("teacher.pdf")
+        do {
+            guard let key else { throw LibraryError.invalidManifest }
+            guard let studentHash = hash(studentURL), let teacherHash = hash(teacherURL) else { throw LibraryError.documentMissing }
+            guard studentHash != teacherHash else { return .miss(.identicalCopies, "the Student and Teacher copies are the same bytes", key) }
+            func copy(_ url: URL, _ hash: ContentHash, _ role: DocumentRole, _ title: String) throws -> LibraryCopy {
+                let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                let publication = try Publication(subject: subject, classTag: naming.classTag, paperKey: key, role: role, title: title)
+                let source = try SourcePath(classFolder: subject, relativePath: naming.displayName + "/" + role.rawValue + ".pdf")
+                // Whole seconds, so the manifest round-trips through its ISO 8601 encoding unchanged.
+                let modified = values.contentModificationDate.map { Date(timeIntervalSince1970: $0.timeIntervalSince1970.rounded(.down)) }
+                let entry = try ManifestEntry(source: source, sha256: hash, size: Int64(values.fileSize ?? -1),
+                                              modifiedAt: modified ?? Date(timeIntervalSince1970: .nan), publication: publication)
+                return LibraryCopy(entry: entry, fileURL: url)
+            }
+            return .pair(try LibraryPair(paperKey: key, project: subject + "/" + project.lastPathComponent, rule: rule, buildID: build,
+                                         student: copy(studentURL, studentHash, .student, titles.student),
+                                         teacher: copy(teacherURL, teacherHash, .teacher, titles.teacher),
+                                         withheldTerms: naming.withheldTerms))
+        } catch {
+            return .miss(.invalidRecord, "the selected pair cannot form a manifest entry", key)
+        }
+    }
+
+    // MARK: File access (read-only)
+
+    private mutating func matches(project: URL, build: String, student: String, teacher: String) -> Bool {
+        let directory = project.appendingPathComponent("artifacts/\(build)", isDirectory: true)
+        guard let s = hash(directory.appendingPathComponent("student.pdf")), s.rawValue == student.lowercased(),
+              let t = hash(directory.appendingPathComponent("teacher.pdf")), t.rawValue == teacher.lowercased() else { return false }
+        return true
+    }
+
+    private mutating func hash(_ url: URL) -> ContentHash? {
+        if let known = hashes[url.path] { return known }
+        guard isFile(url), let digest = try? ContentHash.digest(fileAt: url) else { return nil }
+        hashes[url.path] = digest
+        return digest
+    }
+
+    private func json(_ url: URL) -> [String: Any]? {
+        guard isFile(url), let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 64 << 20,
+              let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private func isFile(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { return false }
+        return values.isRegularFile == true && values.isSymbolicLink != true
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
+        return values.isDirectory == true && values.isSymbolicLink != true
+    }
+
+    static func isSafeComponent(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\\") &&
+            !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    }
+}
+#endif

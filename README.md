@@ -10,7 +10,7 @@ Base code for a personal offline iPad teaching app. Visual design and the teache
 | `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene |
 | `Apps/Companion` | macOS menu-bar shell: choose a local folder and generate a manifest preview, with no networking |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
-| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser and tests |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Ember Projects library reader and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
 
@@ -64,6 +64,17 @@ The complete-manifest planner also returns archive and no-download relink action
 A version-2 manifest gives every entry a publication record: subject, optional class tag, a stable paper key, role (`student` or `teacher`) and display title. Each paper key has at most one copy per role. Version-1 manifests and Inbox deliveries still load as Student copies whose subject is the class folder; a Teacher role is never inferred from a file or folder name. Format-1 `doc.json` files still load as Student copies and are upgraded to format 2 when next written. Format 2 keeps the publication record in `source` and stores `pairedDocumentID`: the single current copy of the opposite role with the same paper key, recomputed after document imports, replacements, relinks and archives.
 
 A document's identity is its path plus role, and its role never changes, so one path may hold a Student and a Teacher copy and a role change files a new copy beside the archived old one. Student copies keep the rules above. Teacher copies cannot be inked in this version: the store refuses Teacher ink, a changed Teacher copy replaces in place, and a Teacher copy at a new path follows its paper key to its existing document. No rule replaces an inked document, moves ink onto other bytes or relinks across roles.
+
+### Library source: Ember Projects (macOS)
+
+`EmberLibrarySource` builds a version-2 manifest straight from `~/Documents/Ember Projects` (passed in; tests use synthetic trees). It only reads. Only the subject folders are walked (A-Math, H2 Chemistry, H2 Econs, H2 Math, H2 Physics, Pure Chemistry, Pure Physics), and symlinks are not followed. A project is listed only as a finished Student/Teacher pair, decided by records and SHA-256 values, never by file names:
+
+- **R1, paper:** `paper.json`, plus an `audit/visual/<build>.json` with `status: pass` whose `student_pdf_sha256` and `teacher_pdf_sha256` match `artifacts/<build>/student.pdf` and `teacher.pdf`. The newest `reviewed_at` wins, then the build record's `finished_at`.
+- **R2, tutorial:** `tutorial.tex`, plus `artifacts/latest.json` naming a build whose copies match its hashes (`{student, teacher}` or `{pdfs: {student: {sha256}, teacher: {sha256}}}`). An H2 Math tutorial also needs a JSON record under `evidence/` that names the same build and both hashes and carries a captain approval (`ember.math-tutorial-signoff/v1`, or a `captain_verdict`, `captain_approval` or `captain_signoff` object).
+
+Each role is the record key its hash matched, and both copies come from one build directory. Subject is the top-level folder. Class is the project-name prefix (`MI PU1-3`, `YIJC JC1-2`, `NYJC-EJC JC1-2`, `SEC 1-4`), or a prefix from the local alias table at `~/Library/Application Support/EmberPad/class-aliases.json` (synthetic example: `EmberSyncKit/Examples/class-aliases.example.json`). The real table is personal data and never goes in the repository. Otherwise the class tag is nil, shown as **All classes**. A personal-name-shaped prefix (`<word> Sec 3`, `<word> S3`) with no alias is dropped from every manifest string. A pair whose path, title or key would still carry a withheld term is held back. So is a pair whose Student bytes equal any Teacher copy, and so are projects that would share a paper key. Build ids and project folders stay on the Mac and never go in the manifest.
+
+The snapshot also returns a miss list (projects with a record but no finished pair, with a reason) and the local file for each copy. Pass the previously delivered manifest as `previous`: a paper that is not found again is carried forward unchanged, so a vanished source means "no update" and the planner never archives it. Single-copy material and a fallback to the Drive main folder are not included yet. The fallback waits on an open captain question; `LibraryFallbackSource` is its extension point.
 
 ## Page and presentation seams
 
