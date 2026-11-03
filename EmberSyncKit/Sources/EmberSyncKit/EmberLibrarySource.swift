@@ -202,8 +202,8 @@ public struct LibrarySnapshot: Equatable, Sendable {
 /// {"schema": "emberpad.class-aliases/v1", "aliases": {"<prefix>": "<class>"}, "withhold": ["<term>"]}
 /// ```
 ///
-/// Any `withhold` term, and the leading word of a personal-name-shaped prefix, must never reach the manifest: a
-/// pair whose manifest strings would still carry one is held back as a miss.
+/// Any `withhold` term, and every word of a personal-name-shaped prefix, must never reach the manifest: a pair
+/// whose manifest strings would still carry one is held back as a miss.
 public struct ClassAliasTable: Equatable, Sendable {
     public static let schema = "emberpad.class-aliases/v1"
     public static let empty = ClassAliasTable()
