@@ -5,8 +5,9 @@ import PencilKit
 
 /// EP-03 Phase 0 device-check probe screen (Debug only, unreachable in Release).
 ///
-/// One screen answering every on-device question with a pass/fail row, plus a
-/// live readout appended to `Documents/device-checks.log` on every change.
+/// Device diagnostics and a separate debug-only scribble recorder. Diagnostic
+/// snapshots are appended to `Documents/device-checks.log` when they change;
+/// recorded scribble samples are exported separately as JSON.
 /// EP-04 adds one more section here (peer-to-peer); add it as a new `Section`
 /// below without touching the existing ones.
 struct DeviceChecksView: View {
