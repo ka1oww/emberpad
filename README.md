@@ -73,7 +73,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 
 ## Open items for the teacher
 
-- Final bundle ID, Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
+- Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
 - **Must resolve before first classroom use:** until the captain decides how Teacher answer copies are identified, opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
 - Sharing/recording method and the external-display/capture tests. Private answer pairing and whether answers can be annotated.
