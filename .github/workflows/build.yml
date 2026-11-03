@@ -1,0 +1,27 @@
+name: Build and test
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  unsigned-builds:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test shared models and persistence
+        run: swift test --package-path EmberSyncKit --scratch-path "$RUNNER_TEMP/swift-build"
+      - name: Build iPad app without signing
+        run: xcodebuild -project EmberPad.xcodeproj -scheme EmberPad -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/ios-build" CODE_SIGNING_ALLOWED=NO build
+      - name: Build Companion without signing
+        run: xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' -configuration Debug -destination 'generic/platform=macOS' -derivedDataPath "$RUNNER_TEMP/mac-build" CODE_SIGNING_ALLOWED=NO build
+      - name: Lint renewal artifacts without executing them
+        run: |
+          zsh -n resign/renew.zsh
+          zsh -n resign/config.example.zsh
+          plutil -lint resign/dev.emberpad.renew.plist Apps/EmberPad/Info.plist Apps/Companion/Info.plist
+          python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("resign/support.py").read_text())'

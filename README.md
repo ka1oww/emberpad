@@ -1,0 +1,79 @@
+# EmberPad
+
+Base code for a personal offline iPad teaching app. Visual design and the teacher's on-device decisions are still pending. This is a development scaffold, not yet a classroom-ready release.
+
+## Layout
+
+| Path | Responsibility |
+| --- | --- |
+| `EmberPad.xcodeproj` | iPad app, macOS Companion, and inert `resign` aggregate target; local package dependency |
+| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene |
+| `Apps/Companion` | macOS menu-bar shell: choose a local folder and generate a manifest preview, with no networking |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser and tests |
+| `Config/Shared.xcconfig` | One placeholder `EMBERPAD_BUNDLE_ID`, used by both native platforms |
+| `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
+
+No third-party app dependencies, extensions, entitlement files or capability-backed services. iPad deployment floor is 17.5, macOS floor is 14.0. The local build is Xcode 26.6 (17F113), iOS/macOS SDK 26.5. CI selects Xcode 26.6 on `macos-26`.
+
+## Build and test without signing
+
+```sh
+swift test --package-path EmberSyncKit
+xcodebuild -project EmberPad.xcodeproj -scheme EmberPad \
+  -configuration Debug -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath /tmp/emberpad-ios CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' \
+  -configuration Debug -destination 'generic/platform=macOS' \
+  -derivedDataPath /tmp/emberpad-mac CODE_SIGNING_ALLOWED=NO build
+zsh -n resign/renew.zsh
+plutil -lint resign/dev.emberpad.renew.plist
+```
+
+These commands do not install on a device, provision an App ID or need an Apple account. Never sign the placeholder ID. The checked-in `EmberPad.xcodeproj` and shared schemes are the source of truth; commit project changes with source changes.
+
+The GitHub workflow runs package tests, both unsigned builds, and syntax/plist checks. Ink feel, touch routing, Pencil double-tap, rendering at 1x/2x, capture traits, external-display behavior and signing cannot be established by those checks.
+
+## Offline library
+
+Import PDFs with **Import from Files**, choosing an existing or new class name. Files open through security-scoped coordinated reads and are copied into the app. Encrypted/locked or unreadable PDFs are rejected. A Finder/Files delivery can also place PDFs at `Documents/Inbox/<Class>/<file>.pdf`; a loose Inbox PDF goes to `Unfiled`. Nested paths within a class are preserved as source identity. Inbox is checked on foreground and by **File Inbox**. Retained Inbox files are idempotent receipts, and are never deleted while a sender could be writing them. Symlink deliveries are skipped. No absent-file deletion is inferred from an incremental Inbox.
+
+If separate import locations would otherwise share a class/path, EmberPad gives the later assignment an available visible filename suffix, preserving any existing suffixes. It remembers each source's assignment, so re-imports keep their identity across picker batch order, Inbox/Files arrival order and app/store reopen. A changed file at that same source path follows the version rules below.
+
+Each document version has its own `Application Support/Library/<UUID>/` folder:
+
+```text
+original.pdf            # untouched PDF bytes for this version
+doc.json                # schema version, source class/path/hash, dates, status, ink pages, pairing seam
+page-0.drawing          # zero-based PDF page, native PKDrawing.dataRepresentation()
+page-1.drawing
+```
+
+The app's `DocumentSession` owns every page drawing and updates from `canvasViewDrawingDidChange`, independently of overlays. It saves about one second after changes and flushes on editor exit and backgrounding. Save errors stay visible; corrupt saved ink never silently becomes an empty drawing. Storage uses Documents/Application Support, with no reliance on Caches. Deleting the app still deletes this data; backup is a later phase.
+
+Same path and checksum is a replay. New bytes without ink replace the current copy while retaining the prior folder in hidden `.Previous` for 30 days. New bytes with ink create an **Updated** copy and mark the annotated one **Older version**; ink never moves to new bytes. An open, uninked worksheet is pinned: changed deliveries wait until the editor closes so an old canvas cannot write onto a replacement PDF. Recheck Inbox after closing it. Previous-version pruning is an explicit store operation; the base keeps versions conservatively until that maintenance path is wired.
+
+The complete-manifest planner also returns archive and no-download relink actions for Mac deletion/rename. Ambiguous identical hashes are imported and archived conservatively rather than assigning somebody else's ink. Phase 2 will apply full manifests through a transport; the current base has no networking or cloud folder access.
+
+## Page and presentation seams
+
+`WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. A provisional vertical layout enables the spike; it is not the teacher's final navigation choice.
+
+The iOS 18+ system picker requests fountain pen, marker, partial and stroke erasers, and lasso. The Tools menu provides the exact tools on 17.5 too, where the legacy picker cannot be restricted. Drawing is Pencil-only; fingers pan/zoom. Undo/redo buttons and multi-finger double-taps route to the active canvas. The system picker owns Apple Pencil double-tap preferences. Validate its two eraser items and touch/undo behavior on the actual iPad before relying on it.
+
+The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`. Its model accepts only a worksheet page and committed drawing. It shows a neutral **Paused** view while the main scene is inactive. The base follows the current page in full-page mode; in-progress strokes, follow-zoom and recording are future work.
+
+`sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. No pairing policy is implemented and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
+
+The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or less, red below 24 hours, unknown when absent/malformed (normal for unsigned Simulator builds). This parses only a reminder, not a signature or security decision. The current display reports Inbox delivery time, not a fabricated network sync time.
+
+## Open items for the teacher
+
+- Final bundle ID, Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
+- Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
+- **Must resolve before first classroom use:** until the captain decides how Teacher answer copies are identified, opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
+- Sharing/recording method and the external-display/capture tests. Private answer pairing and whether answers can be annotated.
+- Scroll versus page navigation, visual design and tool presentation.
+- Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, recording, scribble detection, backup/export, lasso/eraser extras, and any Ember publish hook.
+- The on-device automation trial: same account and bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
+
+No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.
