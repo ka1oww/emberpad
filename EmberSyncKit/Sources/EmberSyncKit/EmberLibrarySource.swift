@@ -401,6 +401,11 @@ enum Gate {
 // MARK: - Reading one project
 
 private struct Reader {
+    // These are the G11 schema versions present in the real Ember Projects source folder.
+    private static let visualSignoffSchemas: Set<String> = [
+        "ember.visual-signoff/v1", "ember.visual-signoff/v3", "ember.visual-signoff/v4", "ember.visual-signoff/v5"
+    ]
+
     enum Outcome {
         case pair(LibraryPair)
         case miss(LibraryMiss.Reason, String, PaperKey?)
@@ -452,13 +457,14 @@ private struct Reader {
             : []
         for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
         where record.pathExtension == "json" && isFile(record) {
-            guard let signoff = json(record), signoff["status"] as? String == "pass",
+            guard let signoff = json(record), let schema = signoff["schema_version"] as? String,
+                  Self.visualSignoffSchemas.contains(schema), signoff["status"] as? String == "pass",
                   let build = signoff["build_id"] as? String, Self.isSafeComponent(build), !seen.contains(build),
                   let student = signoff["student_pdf_sha256"] as? String, let teacher = signoff["teacher_pdf_sha256"] as? String,
                   matches(project: project, build: build, student: student, teacher: teacher) else { continue }
             seen.insert(build)
             let finished = json(project.appendingPathComponent("artifacts/\(build)/build-record.json"))?["finished_at"] as? String
-            candidates.append(Candidate(reviewedAt: Self.timestamp(signoff["reviewed_at"] as? String ?? signoff["signed_at"] as? String),
+            candidates.append(Candidate(reviewedAt: Self.timestamp(signoff["reviewed_at"] as? String),
                                         finishedAt: Self.timestamp(finished), build: build))
         }
         guard let pick = candidates.max(by: { lhs, rhs in

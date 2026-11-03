@@ -56,11 +56,15 @@ struct SyntheticEmberTree {
 
     /// A G11 visual sign-off record, `audit/visual/<build>.json`.
     func g11(_ project: String, _ build: String, student: String, teacher: String, status: String = "pass",
-             reviewedAt: String = "2026-08-23") throws {
-        try write("\(project)/audit/visual/\(build).json", json: [
-            "schema_version": "ember.visual-signoff/v1", "build_id": build, "status": status, "reviewed_at": reviewedAt,
-            "reviewer": "Synthetic Reviewer", "all_pages_viewed": true, "checks": [:],
-            "student_pdf_sha256": Self.sha(student), "teacher_pdf_sha256": Self.sha(teacher)])
+             reviewedAt: String? = "2026-08-23", schemaVersion: String? = "ember.visual-signoff/v1",
+             signedAt: String? = nil) throws {
+        var record: [String: Any] = [
+            "build_id": build, "status": status, "reviewer": "Synthetic Reviewer", "all_pages_viewed": true,
+            "checks": [:], "student_pdf_sha256": Self.sha(student), "teacher_pdf_sha256": Self.sha(teacher)]
+        if let schemaVersion { record["schema_version"] = schemaVersion }
+        if let reviewedAt { record["reviewed_at"] = reviewedAt }
+        if let signedAt { record["signed_at"] = signedAt }
+        try write("\(project)/audit/visual/\(build).json", json: record)
     }
 
     func tutorial(_ project: String) throws { try write("\(project)/tutorial.tex", Data("\\documentclass{article}".utf8)) }
@@ -132,6 +136,44 @@ struct EmberLibrarySourceTests {
         #expect(pair.student.entry.size == 3)
         #expect(snapshot.manifest.version == 2 && snapshot.manifest.files.count == 2)
         #expect(try ManifestCodec.decode(ManifestCodec.encode(snapshot.manifest)) == snapshot.manifest)
+    }
+
+    @Test func paperSignoffsRequireAnExplicitlyAcceptedSchemaVersion() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let schemas = ["ember.visual-signoff/v1", "ember.visual-signoff/v3", "ember.visual-signoff/v4", "ember.visual-signoff/v5"]
+        for (index, schema) in schemas.enumerated() {
+            let project = "H2 Chemistry/Synthetic Accepted Schema Paper \(index)"
+            try tree.paper(project)
+            try tree.build(project, "b1", student: "student \(index)", teacher: "teacher \(index)")
+            try tree.g11(project, "b1", student: "student \(index)", teacher: "teacher \(index)", schemaVersion: schema)
+        }
+        for (index, schema) in ["ember.visual-signoff/v99", nil].enumerated() {
+            let project = "H2 Chemistry/Synthetic Rejected Schema Paper \(index)"
+            try tree.paper(project)
+            try tree.build(project, "b1", student: "rejected student \(index)", teacher: "rejected teacher \(index)")
+            try tree.g11(project, "b1", student: "rejected student \(index)", teacher: "rejected teacher \(index)",
+                         schemaVersion: schema)
+        }
+
+        let snapshot = try read(tree)
+        #expect(snapshot.pairs.count == schemas.count)
+        #expect(snapshot.pairs.map(\.project) == schemas.indices.map { "H2 Chemistry/Synthetic Accepted Schema Paper \($0)" })
+        #expect(snapshot.misses.count == 2)
+        #expect(snapshot.misses.allSatisfy { $0.reason == .paperNotSignedOff })
+    }
+
+    @Test func paperSignoffOrderingDoesNotUseSignedAt() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let project = "H2 Chemistry/Synthetic Review Timestamp Paper"
+        try tree.paper(project)
+        try tree.build(project, "reviewed", student: "reviewed student", teacher: "reviewed teacher")
+        try tree.build(project, "signed", student: "signed student", teacher: "signed teacher")
+        try tree.g11(project, "reviewed", student: "reviewed student", teacher: "reviewed teacher",
+                     reviewedAt: "2026-08-23")
+        try tree.g11(project, "signed", student: "signed student", teacher: "signed teacher",
+                     reviewedAt: nil, signedAt: "2099-01-01")
+
+        #expect(try read(tree).pairs.first?.buildID == "reviewed")
     }
 
     @Test func equalReviewDatesFallBackToTheBuildRecordFinishTime() throws {
