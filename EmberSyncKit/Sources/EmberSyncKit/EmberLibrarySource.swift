@@ -401,7 +401,7 @@ enum Gate {
 // MARK: - Reading one project
 
 private struct Reader {
-    // These are the G11 schema versions present in the real Ember Projects source folder.
+    // The real Ember Projects library uses these G11 versions; any other or missing schema is rejected.
     private static let visualSignoffSchemas: Set<String> = [
         "ember.visual-signoff/v1", "ember.visual-signoff/v3", "ember.visual-signoff/v4", "ember.visual-signoff/v5"
     ]
