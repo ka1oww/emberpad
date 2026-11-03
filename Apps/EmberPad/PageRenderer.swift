@@ -15,7 +15,7 @@ enum WorksheetTool: String, CaseIterable {
     var pencilTool: any PKTool {
         switch self {
         case .fountain: PKInkingTool(.fountainPen, color: .emberPenBlack, width: Theme.fountainDefaultWidth)
-        case .highlighter: PKInkingTool(.marker, color: .emberHighlighterYellow, width: Theme.highlighterDefaultWidth)
+        case .highlighter: PKInkingTool(.marker, color: Theme.highlighterDefaultColor, width: Theme.highlighterDefaultWidth)
         case .partialEraser: PKEraserTool(.fixedWidthBitmap, width: 16)
         case .strokeEraser: PKEraserTool(.vector)
         case .lasso: PKLassoTool()

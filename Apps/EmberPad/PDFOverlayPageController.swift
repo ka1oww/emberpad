@@ -21,7 +21,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if #available(iOS 18.0, *) {
             let items: [(WorksheetTool, PKToolPickerItem)] = [
                 (.fountain, PKToolPickerInkingItem(type: .fountainPen, color: .emberPenBlack, width: Theme.fountainDefaultWidth, identifier: "fountain")),
-                (.highlighter, PKToolPickerInkingItem(type: .marker, color: .emberHighlighterYellow, width: Theme.highlighterDefaultWidth, identifier: "highlighter")),
+                (.highlighter, PKToolPickerInkingItem(type: .marker, color: Theme.highlighterDefaultColor, width: Theme.highlighterDefaultWidth, identifier: "highlighter")),
                 (.partialEraser, PKToolPickerEraserItem(type: .fixedWidthBitmap, width: 16)),
                 (.strokeEraser, PKToolPickerEraserItem(type: .vector)),
                 (.lasso, PKToolPickerLassoItem())

@@ -96,6 +96,9 @@ enum Theme {
     static let highlighterYellow = ThemeToken.highlighterYellow.color
     static let highlighterGreen = ThemeToken.highlighterGreen.color
     static let highlighterPink = ThemeToken.highlighterPink.color
+    static let highlighterDefaultOpacity: CGFloat = 0.45
+    static let highlighterDefaultColor = ThemeToken.highlighterYellow.uiColor
+        .withAlphaComponent(highlighterDefaultOpacity)
 
     /// Fountain-pen colour presets: black, ink blue, Ember red.
     static let penPresets: [Color] = [
@@ -107,9 +110,9 @@ enum Theme {
 
     /// Highlighter presets, drawn at 45% alpha: yellow, green, pink.
     static let highlighterPresets: [Color] = [
-        highlighterYellow.opacity(0.45),
-        highlighterGreen.opacity(0.45),
-        highlighterPink.opacity(0.45),
+        highlighterYellow.opacity(highlighterDefaultOpacity),
+        highlighterGreen.opacity(highlighterDefaultOpacity),
+        highlighterPink.opacity(highlighterDefaultOpacity),
     ]
     static let highlighterDefaultWidth: CGFloat = 18
 

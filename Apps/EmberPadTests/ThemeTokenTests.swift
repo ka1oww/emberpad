@@ -117,7 +117,9 @@ final class ThemeTokenTests: XCTestCase {
         XCTAssertEqual(fountain.width, Theme.fountainDefaultWidth)
 
         let highlighter = try XCTUnwrap(WorksheetTool.highlighter.pencilTool as? PKInkingTool)
-        assertEqual(rgba(highlighter.color, style: .light), hex("#FACC15"), "highlighterYellow", "light")
+        var highlighterYellow = hex("#FACC15")
+        highlighterYellow[3] = Theme.highlighterDefaultOpacity
+        assertEqual(rgba(highlighter.color, style: .light), highlighterYellow, "highlighterYellow", "light")
         XCTAssertEqual(highlighter.width, Theme.highlighterDefaultWidth)
     }
 
