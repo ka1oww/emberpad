@@ -187,8 +187,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private func publishPage() {
         guard let page = session.pdf.page(at: studentPage) else { return }
         let size = canvases[studentPage]?.bounds.size ?? page.bounds(for: .cropBox).size
-        student.snapshot = StudentPageSnapshot(documentID: session.record.id, pageIndex: studentPage, page: page,
-                                                drawing: session.drawing(on: studentPage), canvasSize: size)
+        // A Teacher copy publishes only the private placeholder; the snapshot type refuses its pages.
+        student.publish(session: session, pageIndex: studentPage, canvasSize: size)
     }
 }
 
