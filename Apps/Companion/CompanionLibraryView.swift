@@ -14,6 +14,7 @@ struct CompanionLibraryContent: View {
     static let emberRed = Color(red: 178 / 255, green: 58 / 255, blue: 46 / 255)
 
     let folder: URL
+    let isSourceAvailable: Bool
     let isPreparing: Bool
     let snapshot: LibrarySnapshot?
     let scannedAt: Date?
@@ -81,13 +82,17 @@ struct CompanionLibraryContent: View {
                         .lineLimit(1).truncationMode(.middle)
                 }
             }
+            if !isSourceAvailable {
+                Label("Source folder not found", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 12)).foregroundStyle(.red)
+            }
             HStack {
                 Button("Choose master folder…", action: onChooseFolder)
                     .buttonStyle(.bordered)
                 Button(isPreparing ? "Preparing…" : "Prepare iPad library", action: onPrepare)
                     .buttonStyle(.borderedProminent)
                     .tint(Self.emberRed)
-                    .disabled(isPreparing)
+                    .disabled(!isSourceAvailable || isPreparing)
             }
             if isPreparing {
                 ProgressView().scaleEffect(0.8)

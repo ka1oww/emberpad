@@ -2,6 +2,11 @@ import SwiftUI
 import AppKit
 import EmberSyncKit
 
+private func isCompanionSourceDirectory(_ url: URL) -> Bool {
+    var isDirectory: ObjCBool = false
+    return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+}
+
 @main
 struct EmberPadCompanion: App {
     @StateObject private var model = CompanionModel()
@@ -9,6 +14,7 @@ struct EmberPadCompanion: App {
         MenuBarExtra("EmberPad", systemImage: "doc.text") {
             CompanionLibraryContent(
                 folder: model.folder,
+                isSourceAvailable: model.isSourceAvailable,
                 isPreparing: model.isPreparing,
                 snapshot: model.snapshot,
                 scannedAt: model.scannedAt,
@@ -39,6 +45,8 @@ final class CompanionModel: ObservableObject {
     @Published private(set) var isPreparing = false
     @Published private(set) var message: String?
 
+    var isSourceAvailable: Bool { isCompanionSourceDirectory(folder) }
+
     init() {
         if let path = UserDefaults.standard.string(forKey: Self.sourceFolderKey), !path.isEmpty {
             folder = URL(fileURLWithPath: path, isDirectory: true)
@@ -64,6 +72,12 @@ final class CompanionModel: ObservableObject {
 
     func prepare() {
         guard !isPreparing else { return }
+        guard isSourceAvailable else {
+            snapshot = nil
+            scannedAt = nil
+            message = "Source folder not found."
+            return
+        }
         isPreparing = true
         message = nil
         let root = folder
@@ -71,6 +85,7 @@ final class CompanionModel: ObservableObject {
             let finishedAt = Date()
             do {
                 let snapshot = try await Task.detached(priority: .userInitiated) {
+                    guard isCompanionSourceDirectory(root) else { throw CocoaError(.fileNoSuchFile) }
                     let aliases = (try? ClassAliasTable.load()) ?? .empty
                     return try EmberLibrarySource(root: root, aliases: aliases).read()
                 }.value
@@ -78,7 +93,13 @@ final class CompanionModel: ObservableObject {
                 self.scannedAt = finishedAt
                 self.deliverToOutbox(snapshot)
             } catch {
-                self.message = error.localizedDescription
+                if isCompanionSourceDirectory(root) {
+                    self.message = error.localizedDescription
+                } else {
+                    self.snapshot = nil
+                    self.scannedAt = nil
+                    self.message = "Source folder not found."
+                }
             }
             self.isPreparing = false
         }
