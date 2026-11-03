@@ -10,6 +10,6 @@
     <key>RunAtLoad</key><true/>
     <key>StartCalendarInterval</key><dict><key>Minute</key><integer>0</integer></dict>
     <key>LimitLoadToSessionType</key><string>Aqua</string>
-    <key>AssociatedBundleIdentifiers</key><array><string>__BUNDLE_ID__</string></array>
+    <key>AssociatedBundleIdentifiers</key><array><string>io.github.ka1oww.emberpad</string></array>
     <key>ProcessType</key><string>Background</string>
 </dict></plist>

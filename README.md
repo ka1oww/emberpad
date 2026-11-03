@@ -11,7 +11,7 @@ Base code for a personal offline iPad teaching app. Visual design and the teache
 | `Apps/Companion` | macOS menu-bar shell: choose a local folder and generate a manifest preview, with no networking |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
 | `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser and tests |
-| `Config/Shared.xcconfig` | One placeholder `EMBERPAD_BUNDLE_ID`, used by both native platforms |
+| `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
 
 No third-party app dependencies, extensions, entitlement files or capability-backed services. iPad deployment floor is 17.5, macOS floor is 14.0. The local build is Xcode 26.6 (17F113), iOS/macOS SDK 26.5. CI selects Xcode 26.6 on `macos-26`.
@@ -34,7 +34,7 @@ zsh -n resign/renew.zsh
 plutil -lint resign/dev.emberpad.renew.plist
 ```
 
-These commands do not install on a device, provision an App ID or need an Apple account. Never sign the placeholder ID. The checked-in `EmberPad.xcodeproj` and shared schemes are the source of truth. `Apps/EmberPad`, `Apps/Companion` and `Apps/EmberPadTests` are file-system synchronized folders, so adding or removing a `.swift` file there needs no `project.pbxproj` edit (`Info.plist` files stay referenced by path and are excluded from membership). Commit test changes with source changes.
+These commands do not install on a device, provision an App ID or need an Apple account. The bundle IDs are final: changing the iPad ID later means deleting the app and its ink. The checked-in `EmberPad.xcodeproj` and shared schemes are the source of truth. `Apps/EmberPad`, `Apps/Companion` and `Apps/EmberPadTests` are file-system synchronized folders, so adding or removing a `.swift` file there needs no `project.pbxproj` edit (`Info.plist` files stay referenced by path and are excluded from membership). Commit test changes with source changes.
 
 The GitHub workflow runs package tests, both unsigned builds, the EmberPadTests simulator suite, and syntax/plist checks. Ink feel, touch routing, Pencil double-tap, rendering at 1x/2x, capture traits, external-display behavior and signing cannot be established by those checks.
 
@@ -79,12 +79,12 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 
 ## Open items for the teacher
 
-- Final bundle ID, Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
+- Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
 - **Must resolve before first classroom use:** Teacher copies are identified by a version-2 manifest's role, but nothing yet keeps them off the student view: opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
 - Sharing/recording method and the external-display/capture tests.
 - Scroll versus page navigation, visual design and tool presentation.
 - Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, recording, scribble detection, backup/export, lasso/eraser extras, and any Ember publish hook.
-- The on-device automation trial: same account and bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
+- The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
 No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.

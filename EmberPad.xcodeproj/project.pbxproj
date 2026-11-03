@@ -179,6 +179,7 @@
 			"buildSettings" = {
 				"PRODUCT_NAME" = "EmberPad Companion";
 				"PRODUCT_MODULE_NAME" = "EmberPadCompanion";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "$(EMBERPAD_BUNDLE_ID).companion";
 				"INFOPLIST_FILE" = "Apps/Companion/Info.plist";
 				"SDKROOT" = "macosx";
 				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
@@ -195,6 +196,7 @@
 			"buildSettings" = {
 				"PRODUCT_NAME" = "EmberPad Companion";
 				"PRODUCT_MODULE_NAME" = "EmberPadCompanion";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "$(EMBERPAD_BUNDLE_ID).companion";
 				"INFOPLIST_FILE" = "Apps/Companion/Info.plist";
 				"SDKROOT" = "macosx";
 				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
