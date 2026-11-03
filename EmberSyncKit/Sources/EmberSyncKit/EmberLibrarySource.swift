@@ -616,10 +616,9 @@ private struct Reader {
               !teacherOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .miss(.invalidRecord, "paper.json is incomplete or its subject does not match the project folder", key)
         }
-        struct Candidate { let reviewedAt: Date; let finishedAt: Date; let build: String }
+        struct Candidate { let reviewedAt: Date; let finishedAt: Date?; let build: String }
         var candidates: [Candidate] = []
         var seen: Set<String> = []
-        var invalidBuildRecord = false
         let audit = project.appendingPathComponent("audit/visual", isDirectory: true)
         let records = hasRealDirectoryChain(project: project, relativePath: "audit/visual")
             ? (try? fileManager.contentsOfDirectory(at: audit, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
@@ -633,24 +632,22 @@ private struct Reader {
                   let reviewedAt = Self.timestamp(signoff["reviewed_at"] as? String),
                   let student = signoff["student_pdf_sha256"] as? String, let teacher = signoff["teacher_pdf_sha256"] as? String,
                   matches(project: project, build: build, student: student, teacher: teacher) else { continue }
-            guard let buildRecord = json(project.appendingPathComponent("artifacts/\(build)/build-record.json")),
-                  let finishedAt = Self.timestamp(buildRecord["finished_at"] as? String) else {
-                invalidBuildRecord = true
-                continue
-            }
             seen.insert(build)
+            let buildRecord = json(project.appendingPathComponent("artifacts/\(build)/build-record.json"))
+            let finishedAt = Self.timestamp(buildRecord?["finished_at"] as? String)
             candidates.append(Candidate(reviewedAt: reviewedAt, finishedAt: finishedAt, build: build))
         }
-        guard let pick = candidates.max(by: { lhs, rhs in
-            if lhs.reviewedAt != rhs.reviewedAt { return lhs.reviewedAt < rhs.reviewedAt }
-            if lhs.finishedAt != rhs.finishedAt { return lhs.finishedAt < rhs.finishedAt }
-            return lhs.build < rhs.build
-        }) else {
-            if invalidBuildRecord {
-                return .miss(.invalidRecord, "a hash-matched candidate has no valid build finish timestamp", key)
-            }
+        guard let newestReview = candidates.map(\.reviewedAt).max() else {
             return .miss(.paperNotSignedOff, "no passing audit/visual record whose two hashes match its build's copies", key)
         }
+        let newestCandidates = candidates.filter { $0.reviewedAt == newestReview }
+        guard newestCandidates.allSatisfy({ $0.finishedAt != nil }) else {
+            return .miss(.invalidRecord, "a newest hash-matched candidate has no valid build finish timestamp", key)
+        }
+        let pick = newestCandidates.max(by: { lhs, rhs in
+            if lhs.finishedAt != rhs.finishedAt { return lhs.finishedAt! < rhs.finishedAt! }
+            return lhs.build < rhs.build
+        })!
         func displayName(_ file: String, fallback: String) -> String {
             guard file.lowercased().hasSuffix(".pdf"), file.count > 4 else { return fallback }
             return naming.rewrite(String(file.dropLast(4))).trimmingCharacters(in: .whitespaces)

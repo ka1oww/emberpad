@@ -208,6 +208,42 @@ struct EmberLibrarySourceTests {
         #expect(snapshot.misses.allSatisfy { !$0.detail.contains("Synthetic Invalid Record") })
     }
 
+    @Test func invalidBuildRecordOnNewestCandidateMissesWithoutOlderFallback() throws {
+        let tree = try SyntheticEmberTree(); defer { tree.remove() }
+        let newerInvalid = "H2 Chemistry/Synthetic Newer Invalid Candidate"
+        let tiedInvalid = "H2 Chemistry/Synthetic Tied Invalid Candidate"
+        let olderInvalid = "H2 Chemistry/Synthetic Older Invalid Candidate"
+        let projects = [newerInvalid, tiedInvalid, olderInvalid]
+        for project in projects {
+            try tree.paper(project)
+            try tree.build(project, "original", student: "original student \(project)", teacher: "original teacher \(project)")
+            try tree.g11(project, "original", student: "original student \(project)", teacher: "original teacher \(project)",
+                         reviewedAt: "2026-08-20")
+        }
+        let previous = try read(tree)
+
+        try tree.build(newerInvalid, "bad-newer", student: "newer student", teacher: "newer teacher", finishedAt: "not-a-timestamp")
+        try tree.g11(newerInvalid, "bad-newer", student: "newer student", teacher: "newer teacher", reviewedAt: "2026-08-21")
+        try tree.build(tiedInvalid, "bad-tied", student: "tied student", teacher: "tied teacher", finishedAt: nil)
+        try tree.g11(tiedInvalid, "bad-tied", student: "tied student", teacher: "tied teacher", reviewedAt: "2026-08-20")
+        try tree.build(olderInvalid, "bad-older", student: "older student", teacher: "older teacher", finishedAt: "not-a-timestamp")
+        try tree.g11(olderInvalid, "bad-older", student: "older student", teacher: "older teacher", reviewedAt: "2026-08-19")
+        try tree.build(olderInvalid, "newer-valid", student: "newer valid student", teacher: "newer valid teacher")
+        try tree.g11(olderInvalid, "newer-valid", student: "newer valid student", teacher: "newer valid teacher", reviewedAt: "2026-08-21")
+
+        let snapshot = try read(tree, previous: previous.manifest)
+        #expect(snapshot.pairs.map(\.buildID) == ["newer-valid"])
+        #expect(snapshot.misses.map(\.project) == [newerInvalid, tiedInvalid])
+        #expect(snapshot.misses.allSatisfy { $0.reason == .invalidRecord })
+        #expect(snapshot.misses.allSatisfy { !$0.detail.contains("Synthetic") })
+        #expect(snapshot.retained.map(\.paperKey.rawValue) == [newerInvalid, tiedInvalid])
+        #expect(snapshot.retained.allSatisfy { $0.reason == .noLongerFinished })
+        #expect(snapshot.manifest.files.count == previous.manifest.files.count)
+        let retainedKeys = Set([newerInvalid, tiedInvalid])
+        #expect(Set(snapshot.manifest.files.filter { retainedKeys.contains($0.paperKey?.rawValue ?? "") }.map(\.sha256)) ==
+                Set(previous.manifest.files.filter { retainedKeys.contains($0.paperKey?.rawValue ?? "") }.map(\.sha256)))
+    }
+
     @Test func paperSignoffsRequireAnExplicitlyAcceptedSchemaVersion() throws {
         let tree = try SyntheticEmberTree(); defer { tree.remove() }
         let schemas = ["ember.visual-signoff/v1", "ember.visual-signoff/v3", "ember.visual-signoff/v4", "ember.visual-signoff/v5"]
