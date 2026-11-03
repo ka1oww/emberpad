@@ -79,6 +79,6 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 - Sharing/recording method and the external-display/capture tests. Private answer pairing and whether answers can be annotated.
 - Scroll versus page navigation, visual design and tool presentation.
 - Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, recording, scribble detection, backup/export, lasso/eraser extras, and any Ember publish hook.
-- The on-device automation trial: same account and bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
+- The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
 No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.

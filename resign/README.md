@@ -4,7 +4,7 @@ This folder is deliberately inert. The Xcode `resign` aggregate has no build pha
 
 ## One-time supervised setup
 
-1. The final bundle ID is approved and set: `EMBERPAD_BUNDLE_ID` in `Config/Shared.xcconfig` is `io.github.ka1oww.emberpad` for the iPad app, and the non-sandboxed Mac Companion target uses `io.github.ka1oww.emberpad.companion` so it never shares the iPad's App ID. The Mac target needs no mobile provisioning profile. Never change the iPad ID: a new ID consumes a free-account slot and loses the app's ink, so do not experiment by signing new IDs.
+1. The final iPad and Companion bundle IDs are approved and set; see the [repository README](../README.md) for the authoritative IDs and the reason the iPad ID must not change. The Mac target needs no mobile provisioning profile.
 2. Use the same Apple Account/Personal Team for the lifetime of the iPad app. Sign in to Xcode's Accounts pane, select that team for the first build, and leave the account settings unchanged thereafter. The script never changes accounts, revokes certificates or deletes shared profiles.
 3. On the iPad, enable Developer Mode and complete its restart/confirmation. Make the first cable install in Xcode and trust the developer when required. Enable **Connect via network** in Devices and Simulators. The teacher verifies the approved device identifier for `config.local.zsh`.
 4. Test fountain-pen feel and option A at 1x/2x zoom. Test AirPlay/HDMI student output, touching private answers, inactivity, main-screen capture, the capture trait, and the actual sharing/recording path. These are go/no-go checks before teaching from the app.
