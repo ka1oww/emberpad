@@ -68,7 +68,6 @@ final class CompanionModel: ObservableObject {
         snapshot = nil
         scannedAt = nil
         message = nil
-        prepare()
     }
 
     func prepare() {

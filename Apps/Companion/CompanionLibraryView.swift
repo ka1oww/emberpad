@@ -22,7 +22,7 @@ struct CompanionLibraryContent: View {
     let onChooseFolder: () -> Void
     let onPrepare: () -> Void
 
-    /// Finished-pair counts in the canonical subject order; nil renders every row as 0.
+    /// Finished-pair counts in the canonical subject order.
     static func subjectCounts(_ snapshot: LibrarySnapshot?) -> [(subject: String, pairs: Int)] {
         var counts: [String: Int] = [:]
         for pair in snapshot?.pairs ?? [] {
@@ -51,7 +51,6 @@ struct CompanionLibraryContent: View {
             Divider()
             renewalSection
         }
-        .onAppear(perform: onPrepare)
     }
 
     // MARK: 1. Header
@@ -110,7 +109,7 @@ struct CompanionLibraryContent: View {
                 HStack {
                     Text(row.subject).font(.system(size: 13))
                     Spacer()
-                    Text("\(row.pairs)").font(.system(size: 13))
+                    Text(snapshot == nil ? "—" : "\(row.pairs)").font(.system(size: 13))
                         .foregroundStyle(row.pairs > 0 ? .primary : .secondary)
                 }
             }
