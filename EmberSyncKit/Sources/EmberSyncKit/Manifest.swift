@@ -3,6 +3,7 @@ import CryptoKit
 
 public enum LibraryError: Error, LocalizedError, Sendable, Equatable {
     case invalidPath, invalidHash, invalidManifest, invalidDocument, documentMissing, pageOutOfRange, hashMismatch, documentInUse
+    case inkProtected, teacherCopyReadOnly
     public var errorDescription: String? {
         switch self {
         case .invalidPath: "The worksheet path is not a safe relative path."
@@ -13,6 +14,8 @@ public enum LibraryError: Error, LocalizedError, Sendable, Equatable {
         case .pageOutOfRange: "The drawing page is outside this document."
         case .hashMismatch: "The worksheet changed during import. Please try again."
         case .documentInUse: "Close the open worksheet before filing its updated PDF. The delivered copy is kept for the next Inbox check."
+        case .inkProtected: "This worksheet has ink, so it is kept as it is and an update is filed beside it."
+        case .teacherCopyReadOnly: "Teacher copies cannot be annotated in this version. This ink was not saved."
         }
     }
 }
@@ -137,36 +140,131 @@ enum ImportSourcePlanner {
     }
 }
 
+/// A copy's place in a Student/Teacher pair. A manifest without a publication record is Student-only.
+public enum DocumentRole: String, Codable, Sendable, CaseIterable {
+    case student, teacher
+    public var counterpart: DocumentRole { self == .student ? .teacher : .student }
+}
+
+/// Stable identity of one paper across renames and rebuilds. Its Student and Teacher copies share it.
+public struct PaperKey: Hashable, Comparable, Codable, Sendable {
+    public let rawValue: String
+
+    public init(rawValue: String) throws {
+        guard Publication.isValidLabel(rawValue) else { throw LibraryError.invalidManifest }
+        self.rawValue = rawValue
+    }
+
+    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    public init(from decoder: any Decoder) throws {
+        try self.init(rawValue: decoder.singleValueContainer().decode(String.self))
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+/// The publication record a version-2 manifest carries for each entry. Role and pairing come only from here,
+/// never from file or folder names.
+public struct Publication: Equatable, Sendable {
+    public let subject: String
+    public let classTag: String?
+    public let paperKey: PaperKey
+    public let role: DocumentRole
+    public let title: String
+
+    public init(subject: String, classTag: String? = nil, paperKey: PaperKey, role: DocumentRole, title: String) throws {
+        guard Self.isValidLabel(subject), Self.isValidLabel(title), classTag.map(Self.isValidLabel) ?? true
+        else { throw LibraryError.invalidManifest }
+        self.subject = subject
+        self.classTag = classTag
+        self.paperKey = paperKey
+        self.role = role
+        self.title = title
+    }
+
+    /// Non-empty, at most 512 UTF-8 bytes, no control characters, no leading or trailing whitespace.
+    static func isValidLabel(_ label: String) -> Bool {
+        !label.isEmpty && label.utf8.count <= 512 && label == label.trimmingCharacters(in: .whitespacesAndNewlines) &&
+        !label.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    }
+}
+
+/// Library identity of a current document: the same path may hold one Student and one Teacher copy.
+struct DocumentIdentity: Hashable {
+    let source: SourcePath
+    let role: DocumentRole
+}
+
 public struct ManifestEntry: Equatable, Codable, Sendable {
     public let source: SourcePath
     public let sha256: ContentHash
     public let size: Int64
     public let modifiedAt: Date
+    /// Nil for a version-1 entry, which is a Student copy whose subject is its class folder.
+    public let publication: Publication?
 
-    public init(source: SourcePath, sha256: ContentHash, size: Int64, modifiedAt: Date) throws {
+    public var subject: String { publication?.subject ?? source.classFolder }
+    public var classTag: String? { publication?.classTag }
+    public var paperKey: PaperKey? { publication?.paperKey }
+    public var role: DocumentRole { publication?.role ?? .student }
+    public var title: String { publication?.title ?? source.filename }
+    var identity: DocumentIdentity { DocumentIdentity(source: source, role: role) }
+
+    public init(source: SourcePath, sha256: ContentHash, size: Int64, modifiedAt: Date, publication: Publication? = nil) throws {
         guard size >= 0, modifiedAt.timeIntervalSince1970.isFinite else { throw LibraryError.invalidManifest }
         self.source = source
         self.sha256 = sha256
         self.size = size
         self.modifiedAt = modifiedAt
+        self.publication = publication
     }
 
-    enum CodingKeys: String, CodingKey { case source, sha256, size, modifiedAt }
+    enum CodingKeys: String, CodingKey { case source, sha256, size, modifiedAt, subject, classTag, paperKey, role, title }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        let publicationKeys: [CodingKeys] = [.subject, .classTag, .paperKey, .role, .title]
+        let publication = try publicationKeys.contains(where: c.contains) ? Publication(
+            subject: c.decode(String.self, forKey: .subject), classTag: c.decodeIfPresent(String.self, forKey: .classTag),
+            paperKey: c.decode(PaperKey.self, forKey: .paperKey), role: c.decode(DocumentRole.self, forKey: .role),
+            title: c.decode(String.self, forKey: .title)) : nil
         try self.init(source: c.decode(SourcePath.self, forKey: .source), sha256: c.decode(ContentHash.self, forKey: .sha256),
-                      size: c.decode(Int64.self, forKey: .size), modifiedAt: c.decode(Date.self, forKey: .modifiedAt))
+                      size: c.decode(Int64.self, forKey: .size), modifiedAt: c.decode(Date.self, forKey: .modifiedAt),
+                      publication: publication)
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(source, forKey: .source)
+        try c.encode(sha256, forKey: .sha256)
+        try c.encode(size, forKey: .size)
+        try c.encode(modifiedAt, forKey: .modifiedAt)
+        guard let publication else { return }
+        try c.encode(publication.subject, forKey: .subject)
+        try c.encodeIfPresent(publication.classTag, forKey: .classTag)
+        try c.encode(publication.paperKey, forKey: .paperKey)
+        try c.encode(publication.role, forKey: .role)
+        try c.encode(publication.title, forKey: .title)
     }
 }
 
+/// Version 1 lists Student copies by class folder. Version 2 gives every entry a publication record, and each
+/// paper key has at most one Student and one Teacher copy.
 public struct Manifest: Equatable, Codable, Sendable {
+    public static let supportedVersions = 1...2
     public let version: Int
     public let generatedAt: Date
     public let files: [ManifestEntry]
 
     public init(version: Int = 1, generatedAt: Date, files: [ManifestEntry]) throws {
-        guard version == 1, generatedAt.timeIntervalSince1970.isFinite,
+        guard Self.supportedVersions.contains(version), generatedAt.timeIntervalSince1970.isFinite,
               Set(files.map(\.source)).count == files.count else { throw LibraryError.invalidManifest }
+        if version == 1 {
+            guard files.allSatisfy({ $0.publication == nil }) else { throw LibraryError.invalidManifest }
+        } else {
+            let copies = files.compactMap { entry in entry.publication.map { "\($0.role.rawValue)\u{0}\($0.paperKey.rawValue)" } }
+            guard copies.count == files.count, Set(copies).count == copies.count else { throw LibraryError.invalidManifest }
+        }
         self.version = version
         self.generatedAt = generatedAt
         self.files = files
