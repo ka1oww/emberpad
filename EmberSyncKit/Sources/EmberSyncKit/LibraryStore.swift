@@ -77,33 +77,65 @@ public actor LibraryStore {
         return url
     }
 
-    /// An incremental delivery: absence of other paths never archives them or infers a rename.
+    /// An incremental Inbox or Files delivery: a Student copy with no publication record.
+    /// Absence of other paths never archives them or infers a rename.
     @discardableResult
     public func importPDF(data: Data, source: SourcePath, pageCount: Int, now: Date = Date()) throws -> DocumentRecord {
         guard pageCount > 0, !data.isEmpty else { throw LibraryError.invalidDocument }
         let entry = try ManifestEntry(source: source, sha256: .digest(data), size: Int64(data.count), modifiedAt: now)
-        let existing = try documents().first { $0.status == .current && $0.source.source == source }
-        if let existing, existing.source.sha256 == entry.sha256 { return existing }
-        if let existing, !existing.hasInk, documentPins[existing.id, default: 0] > 0 { throw LibraryError.documentInUse }
-        var record = DocumentRecord(source: entry, pageCount: pageCount, importedAt: now)
-        guard var existing else {
+        return try importPDF(data: data, entry: entry, pageCount: pageCount, now: now)
+    }
+
+    /// Files one delivered entry against the current document with the same path and role, using the planner's
+    /// same-path rule. It also applies `.importNew` and `.addVersion` actions. Absence of other paths is never
+    /// treated as an archive or a rename.
+    @discardableResult
+    public func importPDF(data: Data, entry: ManifestEntry, pageCount: Int, now: Date = Date()) throws -> DocumentRecord {
+        try validate(data, entry: entry, pageCount: pageCount)
+        guard let existing = try documents().first(where: { $0.status == .current && $0.identity == entry.identity }) else {
+            let record = DocumentRecord(source: entry, pageCount: pageCount, importedAt: now)
             try create(record, pdf: data)
-            return record
+            return try refreshedPairs(record.id)
         }
-        if existing.hasInk {
-            record.isUpdated = true
-            record.title = Self.updatedTitle(source.filename, date: now)
-            // If creation fails, the older folder remains readable; roll its badge back when possible.
-            let originalStatus = existing.status
-            existing.status = .olderVersion
-            try write(existing)
-            do { try create(record, pdf: data) }
-            catch { existing.status = originalStatus; try? write(existing); throw error }
-        } else {
-            record = DocumentRecord(id: existing.id, source: entry, pageCount: pageCount, importedAt: now)
-            try replace(existing, with: record, pdf: data, now: now)
+        switch DiffPlanner.action(at: existing, for: entry, retainPreviousUntil: now.addingTimeInterval(DiffPlanner.previousRetention)) {
+        case .unchanged: return existing
+        case .relink: try relink(documentID: existing.id, entry: entry); return try read(existing.id)
+        case .addVersion: return try addVersion(olderDocumentID: existing.id, data: data, entry: entry, pageCount: pageCount, now: now)
+        default: return try replaceDocument(existing.id, data: data, entry: entry, pageCount: pageCount, now: now)
         }
-        return record
+    }
+
+    /// Applies `.addVersion`: files the new bytes beside an inked current copy, which keeps its ink and bytes and
+    /// becomes the older version.
+    @discardableResult
+    public func addVersion(olderDocumentID: UUID, data: Data, entry: ManifestEntry, pageCount: Int, now: Date = Date()) throws -> DocumentRecord {
+        try validate(data, entry: entry, pageCount: pageCount)
+        var older = try read(olderDocumentID)
+        guard older.status == .current, older.identity == entry.identity else { throw LibraryError.invalidDocument }
+        let record = DocumentRecord(source: entry, pageCount: pageCount, importedAt: now,
+                                    title: Self.updatedTitle(entry, date: now), isUpdated: true)
+        // If creation fails, the older folder remains readable; roll its badge back when possible.
+        older.status = .olderVersion
+        try write(older)
+        do { try create(record, pdf: data) }
+        catch { older.status = .current; try? write(older); throw error }
+        return try refreshedPairs(record.id)
+    }
+
+    /// Applies `.replace`: swaps an uninked document's bytes in place, keeping its id and retaining the previous
+    /// folder for 30 days. An inked document is never replaced.
+    @discardableResult
+    public func replaceDocument(_ documentID: UUID, data: Data, entry: ManifestEntry, pageCount: Int, now: Date = Date()) throws -> DocumentRecord {
+        try validate(data, entry: entry, pageCount: pageCount)
+        let existing = try read(documentID)
+        guard existing.role == entry.role, existing.status != .olderVersion else { throw LibraryError.invalidDocument }
+        guard !existing.hasInk else { throw LibraryError.inkProtected }
+        guard documentPins[documentID, default: 0] == 0 else { throw LibraryError.documentInUse }
+        guard try !documents().contains(where: { $0.id != documentID && $0.status == .current && $0.identity == entry.identity })
+        else { throw LibraryError.invalidDocument }
+        let record = DocumentRecord(id: documentID, source: entry, pageCount: pageCount, importedAt: now)
+        try replace(existing, with: record, pdf: data, now: now)
+        return try refreshedPairs(documentID)
     }
 
     public func drawing(documentID: UUID, page: Int) throws -> Data? {
@@ -118,6 +150,7 @@ public actor LibraryStore {
     public func saveDrawing(_ data: Data, documentID: UUID, page: Int, hasInk: Bool) throws {
         var record = try read(documentID)
         try validate(page, in: record)
+        guard !hasInk || record.role == .student else { throw LibraryError.teacherCopyReadOnly }
         let url = drawingURL(documentID, page)
         if files.fileExists(atPath: url.path) { try Self.requireRegularFile(url) }
         // Mark ink before writing. A failed write/crash may overprotect a version, never overwrite its ink.
@@ -138,17 +171,20 @@ public actor LibraryStore {
         var record = try read(documentID)
         record.status = .archived
         try write(record)
+        try refreshPairs()
     }
 
     public func relink(documentID: UUID, entry: ManifestEntry) throws {
         var record = try read(documentID)
         guard record.source.sha256 == entry.sha256 else { throw LibraryError.hashMismatch }
-        guard try !documents().contains(where: { $0.id != documentID && $0.status == .current && $0.source.source == entry.source })
+        guard record.role == entry.role,
+              try !documents().contains(where: { $0.id != documentID && $0.status == .current && $0.identity == entry.identity })
         else { throw LibraryError.invalidDocument }
         record.source = entry
-        record.title = entry.source.filename
+        record.title = entry.title
         record.status = .current
         try write(record)
+        try refreshPairs()
     }
 
     public func previousVersions() throws -> [PreviousVersion] {
@@ -178,10 +214,30 @@ public actor LibraryStore {
         let metadata = directory.appendingPathComponent("doc.json")
         try Self.requireRegularFile(metadata)
         let doc = try ManifestCodec.decoder().decode(DocumentRecord.self, from: Data(contentsOf: metadata))
-        guard doc.formatVersion == 1, doc.id == id, doc.pageCount > 0,
+        guard doc.id == id, doc.pageCount > 0,
               doc.inkPages.allSatisfy({ (0..<doc.pageCount).contains($0) }),
               doc.inkPages.isEmpty || doc.hasInk else { throw LibraryError.invalidDocument }
         return doc
+    }
+
+    /// Stores `DiffPlanner.pairs(in:)` on every record whose link changed. Untouched records keep their format.
+    private func refreshPairs() throws {
+        let documents = try documents()
+        let pairs = DiffPlanner.pairs(in: documents)
+        for var doc in documents where doc.pairedDocumentID != pairs[doc.id] {
+            doc.pairedDocumentID = pairs[doc.id]
+            try write(doc)
+        }
+    }
+
+    private func refreshedPairs(_ id: UUID) throws -> DocumentRecord {
+        try refreshPairs()
+        return try read(id)
+    }
+
+    private func validate(_ data: Data, entry: ManifestEntry, pageCount: Int) throws {
+        guard pageCount > 0, !data.isEmpty else { throw LibraryError.invalidDocument }
+        guard Int64(data.count) == entry.size, ContentHash.digest(data) == entry.sha256 else { throw LibraryError.hashMismatch }
     }
 
     private struct SourceIdentity: Codable {
@@ -238,7 +294,7 @@ public actor LibraryStore {
         try ManifestCodec.encoder().encode(new).write(to: stage.appendingPathComponent("doc.json"), options: .atomic)
         try ManifestCodec.encoder().encode(journal).write(to: journalURL, options: .atomic)
         do {
-            let retention = PreviousVersion(id: journal.previousID, documentID: old.id, expiresAt: now.addingTimeInterval(30 * 86_400))
+            let retention = PreviousVersion(id: journal.previousID, documentID: old.id, expiresAt: now.addingTimeInterval(DiffPlanner.previousRetention))
             // Write retention before the move; recovery never leaves an untracked old version.
             try ManifestCodec.encoder().encode(retention).write(to: folder(old.id).appendingPathComponent("retention.json"), options: .atomic)
             try files.moveItem(at: folder(old.id), to: previous)
@@ -285,11 +341,14 @@ public actor LibraryStore {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard attributes[.type] as? FileAttributeType == .typeRegular else { throw LibraryError.invalidDocument }
     }
-    private static func updatedTitle(_ filename: String, date: Date) -> String {
+    private static func updatedTitle(_ entry: ManifestEntry, date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_SG")
         formatter.timeZone = TimeZone(identifier: "Asia/Singapore")
         formatter.dateFormat = "d MMM"
-        return (filename as NSString).deletingPathExtension + " (updated " + formatter.string(from: date) + ").pdf"
+        let stamp = " (updated " + formatter.string(from: date) + ")"
+        // A version-1 title is a filename; a publication title is a display name with no extension.
+        guard entry.publication == nil else { return entry.title + stamp }
+        return (entry.title as NSString).deletingPathExtension + stamp + ".pdf"
     }
 }

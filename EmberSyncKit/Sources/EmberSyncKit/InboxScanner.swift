@@ -1,8 +1,12 @@
 import Foundation
 
+/// A loose Inbox delivery carries no publication record, so it is always a Student copy whose subject is its
+/// class folder. A Teacher role is never inferred from a file or folder name.
 public struct InboxItem: Sendable {
     public let url: URL
     public let source: SourcePath
+    public var role: DocumentRole { .student }
+    public var subject: String { source.classFolder }
 }
 
 public enum InboxScanner {

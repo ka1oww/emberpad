@@ -43,7 +43,7 @@ Each document version has its own `Application Support/Library/<UUID>/` folder:
 
 ```text
 original.pdf            # untouched PDF bytes for this version
-doc.json                # schema version, source class/path/hash, dates, status, ink pages, pairing seam
+doc.json                # format 2: source class/path/hash and publication record, dates, status, ink pages, paired copy
 page-0.drawing          # zero-based PDF page, native PKDrawing.dataRepresentation()
 page-1.drawing
 ```
@@ -54,6 +54,12 @@ Same path and checksum is a replay. New bytes without ink replace the current co
 
 The complete-manifest planner also returns archive and no-download relink actions for Mac deletion/rename. Ambiguous identical hashes are imported and archived conservatively rather than assigning somebody else's ink. Phase 2 will apply full manifests through a transport; the current base has no networking or cloud folder access.
 
+### Library model v2
+
+A version-2 manifest gives every entry a publication record: subject, optional class tag, a stable paper key, role (`student` or `teacher`) and display title. Each paper key has at most one copy per role. Version-1 manifests and Inbox deliveries still load as Student copies whose subject is the class folder; a Teacher role is never inferred from a file or folder name. Format-1 `doc.json` files still load and are written back as format 2, which keeps the publication record in `source` and stores `pairedDocumentID`: the single current copy of the opposite role with the same paper key, recomputed after every library change.
+
+A document's identity is its path plus role, and its role never changes, so one path may hold a Student and a Teacher copy and a role change files a new copy beside the archived old one. Student copies keep the rules above. Teacher copies cannot be inked in this version: the store refuses Teacher ink, a changed Teacher copy replaces in place, and a Teacher copy at a new path follows its paper key to its existing document. No rule replaces an inked document, moves ink onto other bytes or relinks across roles.
+
 ## Page and presentation seams
 
 `WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. A provisional vertical layout enables the spike; it is not the teacher's final navigation choice.
@@ -62,7 +68,7 @@ The iOS 18+ system picker requests fountain pen, marker, partial and stroke eras
 
 The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`. Its model accepts only a worksheet page and committed drawing. It shows a neutral **Paused** view while the main scene is inactive. The base follows the current page in full-page mode; in-progress strokes, follow-zoom and recording are future work.
 
-`sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. No pairing policy is implemented and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
+`sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. The presentation layer does not use roles or pairs yet, and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
 
 The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or less, red below 24 hours, unknown when absent/malformed (normal for unsigned Simulator builds). This parses only a reminder, not a signature or security decision. The current display reports Inbox delivery time, not a fabricated network sync time.
 
@@ -70,8 +76,8 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 
 - Final bundle ID, Personal Team, Developer Mode, first cable install/trust and network pairing. See [renewal setup](resign/README.md). Nothing in `resign/` has been installed, loaded or run against an account/device.
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
-- **Must resolve before first classroom use:** until the captain decides how Teacher answer copies are identified, opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
-- Sharing/recording method and the external-display/capture tests. Private answer pairing and whether answers can be annotated.
+- **Must resolve before first classroom use:** Teacher copies are identified by a version-2 manifest's role, but nothing yet keeps them off the student view: opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
+- Sharing/recording method and the external-display/capture tests.
 - Scroll versus page navigation, visual design and tool presentation.
 - Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, recording, scribble detection, backup/export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
