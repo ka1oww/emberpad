@@ -4,9 +4,8 @@ import SwiftUI
 /// style (design report sections 3-4). Pages stay white paper in both themes;
 /// only the chrome tokens below change.
 ///
-/// Every colour resolves through `Assets.xcassets` (Any/Dark appearances per
-/// token, except the unthemed ink yellows). Nothing else in the app hard-codes
-/// a colour: use `Theme.*` / `Color.ember*` / `UIColor.ember*` instead.
+/// Theme tokens resolve through `Assets.xcassets` (Any/Dark appearances per
+/// themed token). Use `Theme.*` / `Color.ember*` / `UIColor.ember*` for them.
 enum ThemeToken: String, CaseIterable, Sendable {
     case canvas
     case bg
@@ -27,10 +26,20 @@ enum ThemeToken: String, CaseIterable, Sendable {
     case dangerSoft
     case privateBrand = "private"
     case privateBg
+    case penBlack
+    case penBlue
+    case penRed
     case highlighterYellow
+    case highlighterGreen
+    case highlighterPink
 
     /// Ink tokens sit on the white page, so they are not themed.
-    var isThemed: Bool { self != .highlighterYellow }
+    var isThemed: Bool {
+        switch self {
+        case .penBlack, .penBlue, .penRed, .highlighterYellow, .highlighterGreen, .highlighterPink: return false
+        default: return true
+        }
+    }
 
     var color: Color { Color(rawValue) }
 
@@ -81,21 +90,26 @@ enum Theme {
 
     // MARK: - Ink defaults (on the white page, not themed)
 
+    static let penBlack = ThemeToken.penBlack.color
+    static let penBlue = ThemeToken.penBlue.color
+    static let penRed = ThemeToken.penRed.color
     static let highlighterYellow = ThemeToken.highlighterYellow.color
+    static let highlighterGreen = ThemeToken.highlighterGreen.color
+    static let highlighterPink = ThemeToken.highlighterPink.color
 
     /// Fountain-pen colour presets: black, ink blue, Ember red.
     static let penPresets: [Color] = [
-        Color(red: 0x1B / 255, green: 0x1B / 255, blue: 0x1B / 255),
-        Color(red: 0x1E / 255, green: 0x3A / 255, blue: 0x8A / 255),
-        accent,
+        penBlack,
+        penBlue,
+        penRed,
     ]
     static let fountainDefaultWidth: CGFloat = 2
 
     /// Highlighter presets, drawn at 45% alpha: yellow, green, pink.
     static let highlighterPresets: [Color] = [
         highlighterYellow.opacity(0.45),
-        Color(red: 0x4A / 255, green: 0xDE / 255, blue: 0x80 / 255).opacity(0.45),
-        Color(red: 0xF4 / 255, green: 0x72 / 255, blue: 0xB6 / 255).opacity(0.45),
+        highlighterGreen.opacity(0.45),
+        highlighterPink.opacity(0.45),
     ]
     static let highlighterDefaultWidth: CGFloat = 18
 
@@ -150,7 +164,12 @@ extension Color {
     static let emberDangerSoft = ThemeToken.dangerSoft.color
     static let emberPrivate = ThemeToken.privateBrand.color
     static let emberPrivateBg = ThemeToken.privateBg.color
+    static let emberPenBlack = ThemeToken.penBlack.color
+    static let emberPenBlue = ThemeToken.penBlue.color
+    static let emberPenRed = ThemeToken.penRed.color
     static let emberHighlighterYellow = ThemeToken.highlighterYellow.color
+    static let emberHighlighterGreen = ThemeToken.highlighterGreen.color
+    static let emberHighlighterPink = ThemeToken.highlighterPink.color
 }
 
 extension UIColor {
@@ -173,7 +192,12 @@ extension UIColor {
     static let emberDangerSoft = ThemeToken.dangerSoft.uiColor
     static let emberPrivate = ThemeToken.privateBrand.uiColor
     static let emberPrivateBg = ThemeToken.privateBg.uiColor
+    static let emberPenBlack = ThemeToken.penBlack.uiColor
+    static let emberPenBlue = ThemeToken.penBlue.uiColor
+    static let emberPenRed = ThemeToken.penRed.uiColor
     static let emberHighlighterYellow = ThemeToken.highlighterYellow.uiColor
+    static let emberHighlighterGreen = ThemeToken.highlighterGreen.uiColor
+    static let emberHighlighterPink = ThemeToken.highlighterPink.uiColor
 }
 
 #if DEBUG

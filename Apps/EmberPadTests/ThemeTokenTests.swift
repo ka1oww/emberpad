@@ -1,5 +1,6 @@
 import SwiftUI
 import XCTest
+import PencilKit
 @testable import EmberPad
 
 /// EP-06 acceptance: every Ember House token resolves in light and dark,
@@ -27,7 +28,12 @@ final class ThemeTokenTests: XCTestCase {
         (.dangerSoft, "#FBE2DF", "#3B1714"),
         (.privateBrand, "#B23A2E", "#E5705F"),
         (.privateBg, "#FBF4F1", "#1E1A1D"),
+        (.penBlack, "#1B1B1B", nil),
+        (.penBlue, "#1E3A8B", nil),
+        (.penRed, "#B23A2E", nil),
         (.highlighterYellow, "#FACC15", nil),
+        (.highlighterGreen, "#4ADE80", nil),
+        (.highlighterPink, "#F472B6", nil),
     ]
 
     func testTableCoversEveryToken() {
@@ -91,7 +97,9 @@ final class ThemeTokenTests: XCTestCase {
             (.warnSoft, .emberWarnSoft), (.danger, .emberDanger),
             (.dangerSoft, .emberDangerSoft), (.privateBrand, .emberPrivate),
             (.privateBg, .emberPrivateBg),
+            (.penBlack, .emberPenBlack), (.penBlue, .emberPenBlue), (.penRed, .emberPenRed),
             (.highlighterYellow, .emberHighlighterYellow),
+            (.highlighterGreen, .emberHighlighterGreen), (.highlighterPink, .emberHighlighterPink),
         ]
         XCTAssertEqual(accessors.count, ThemeToken.allCases.count)
         for (token, accessor) in accessors {
@@ -101,6 +109,16 @@ final class ThemeTokenTests: XCTestCase {
                 "UIColor.ember accessor for \(token.rawValue) does not match the asset"
             )
         }
+    }
+
+    func testDefaultPencilToolsUseInkTokens() throws {
+        let fountain = try XCTUnwrap(WorksheetTool.fountain.pencilTool as? PKInkingTool)
+        assertEqual(rgba(fountain.color, style: .light), hex("#1B1B1B"), "penBlack", "light")
+        XCTAssertEqual(fountain.width, Theme.fountainDefaultWidth)
+
+        let highlighter = try XCTUnwrap(WorksheetTool.highlighter.pencilTool as? PKInkingTool)
+        assertEqual(rgba(highlighter.color, style: .light), hex("#FACC15"), "highlighterYellow", "light")
+        XCTAssertEqual(highlighter.width, Theme.highlighterDefaultWidth)
     }
 
     // MARK: - Helpers
