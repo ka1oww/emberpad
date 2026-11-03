@@ -1,6 +1,6 @@
 # EmberPad
 
-Base code for a personal offline iPad teaching app. Visual design and the teacher's on-device decisions are still pending. This is a development scaffold, not yet a classroom-ready release.
+Base code for a personal offline iPad teaching app. The Ember House colour tokens and reusable type styles are in place, but production screen styling and the teacher's on-device decisions are still pending. This is a development scaffold, not yet a classroom-ready release.
 
 ## Layout
 
@@ -80,6 +80,8 @@ The snapshot also returns a miss list (projects with a record but no finished pa
 
 `WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. A provisional vertical layout enables the spike; it is not the teacher's final navigation choice.
 
+Theme tokens are defined in `Apps/EmberPad/Theme.swift`; the app chrome uses light/dark color sets in `Apps/EmberPad/Assets.xcassets`, while ink colors stay fixed for the white worksheet page. The current fountain-pen default is black, and the marker default is translucent yellow. See the [light](docs/screenshots/theme-tokens-light.png) and [dark](docs/screenshots/theme-tokens-dark.png) token previews. Production screen styling remains future work.
+
 The iOS 18+ system picker requests fountain pen, marker, partial and stroke erasers, and lasso. The Tools menu provides the exact tools on 17.5 too, where the legacy picker cannot be restricted. Drawing is Pencil-only; fingers pan/zoom. Undo/redo buttons and multi-finger double-taps route to the active canvas. The system picker owns Apple Pencil double-tap preferences. Validate its two eraser items and touch/undo behavior on the actual iPad before relying on it.
 
 The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`. Its model accepts only a worksheet page and committed drawing. It shows a neutral **Paused** view while the main scene is inactive. The base follows the current page in full-page mode; in-progress strokes, follow-zoom and recording are future work.
@@ -96,7 +98,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
 - **Must resolve before first classroom use:** Teacher copies are identified by a version-2 manifest's role, but nothing yet keeps them off the student view: opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
 - Sharing/recording method and the external-display/capture tests.
-- Scroll versus page navigation, visual design and tool presentation.
+- Scroll versus page navigation, production screen styling and tool presentation.
 - Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, recording, scribble detection, backup/export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
