@@ -1,6 +1,6 @@
-import SwiftUI
 import AppKit
 import EmberSyncKit
+import SwiftUI
 
 private func isCompanionSourceDirectory(_ url: URL) -> Bool {
     guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }

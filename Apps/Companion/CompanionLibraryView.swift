@@ -1,5 +1,5 @@
-import SwiftUI
 import EmberSyncKit
+import SwiftUI
 
 // TODO(EP-06): the iPad theme tokens live in the EmberPad target, which the Companion
 // cannot see, so this window deliberately uses macOS system colours plus the Ember red

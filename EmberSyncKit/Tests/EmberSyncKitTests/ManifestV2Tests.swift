@@ -3,7 +3,7 @@ import Testing
 @testable import EmberSyncKit
 
 struct ManifestV2Tests {
-    /// A version-1 manifest exactly as the Companion preview writes it today (synthetic paths).
+    /// A legacy version-1 manifest fixture with synthetic paths.
     static let legacyManifestJSON = """
     {
       "files" : [
