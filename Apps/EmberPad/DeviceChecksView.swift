@@ -20,6 +20,12 @@ struct DeviceChecksView: View {
     @State private var zoom: CGFloat = 1
     @State private var testTool = DeviceChecksPDFTool.ink
     @State private var testPDFOK = false
+    @State private var scribbleDrawing = PKDrawing()
+    @State private var scribbleLabel = ScribbleLabel.keep
+    @State private var scribbleSamples: [ScribbleSample] = []
+    @State private var scribbleClearToken = 0
+    @State private var scribbleExportURL: URL?
+    @State private var scribbleError: String?
 
     private var snapshot: DeviceChecksSnapshot {
         DeviceChecksSnapshot(
@@ -67,6 +73,30 @@ struct DeviceChecksView: View {
                 Text("Write at 1x and 2x. Choose Lasso, circle ink, and tap the selection to try the system menu.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            Section("Scribble sample recorder (EP-27)") {
+                DeviceChecksScribbleCanvas(drawing: $scribbleDrawing, clearToken: scribbleClearToken)
+                    .frame(height: 260)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.4)))
+                Picker("Label", selection: $scribbleLabel) {
+                    ForEach(ScribbleLabel.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented)
+                HStack {
+                    Button("Save sample") { saveScribbleSample() }
+                        .disabled(scribbleDrawing.strokes.isEmpty)
+                    Button("Clear canvas") { scribbleClearToken += 1 }
+                    Spacer()
+                    Button("Export JSON") { exportScribbleSamples() }
+                        .disabled(scribbleSamples.isEmpty)
+                }.buttonStyle(.bordered)
+                LabeledValue(label: "Saved samples",
+                             value: "\(scribbleSamples.count) (erase \(scribbleSamples.filter { $0.label == .erase }.count), keep \(scribbleSamples.filter { $0.label == .keep }.count))")
+                if let error = scribbleError {
+                    Text("Export failed: \(error)").foregroundStyle(.red).font(.footnote)
+                } else {
+                    Text("Draw, pick erase or keep, save, then export through Files. Nothing is uploaded.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
             Section("Apple Pencil") {
                 LabeledValue(label: "Double-tap action", value: pencilLabel)
             }
@@ -94,6 +124,24 @@ struct DeviceChecksView: View {
             appendSnapshot(force: true)
         }
         .onChange(of: snapshot) { _, _ in appendSnapshot() }
+        .sheet(item: $scribbleExportURL) { url in
+            DeviceChecksExportPicker(url: url).ignoresSafeArea()
+        }
+    }
+
+    private func saveScribbleSample() {
+        guard !scribbleDrawing.strokes.isEmpty else { return }
+        scribbleSamples.append(ScribbleSample(label: scribbleLabel, drawing: scribbleDrawing))
+        scribbleClearToken += 1
+    }
+
+    private func exportScribbleSamples() {
+        do {
+            scribbleExportURL = try ScribbleSampleCodec.writeExport(ScribbleSampleSet(samples: scribbleSamples))
+            scribbleError = nil
+        } catch {
+            scribbleError = error.localizedDescription
+        }
     }
 
     private var passFailRows: [DeviceCheckResult] {
@@ -137,6 +185,59 @@ private struct LabeledValue: View {
             Text(value).monospaced()
         }.font(.footnote)
     }
+}
+
+// MARK: - Scribble sample recorder (EP-27)
+
+extension URL: @retroactive Identifiable {
+    public var id: String { absoluteString }
+}
+
+/// Plain PKCanvasView that accepts any input so samples can be drawn in the
+/// Simulator as well as with the Pencil. Bumping `clearToken` empties it.
+private struct DeviceChecksScribbleCanvas: UIViewRepresentable {
+    @Binding var drawing: PKDrawing
+    let clearToken: Int
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> PKCanvasView {
+        let canvas = PKCanvasView()
+        canvas.drawingPolicy = .anyInput
+        canvas.tool = PKInkingTool(.pen, color: .label, width: 3)
+        canvas.backgroundColor = .secondarySystemBackground
+        canvas.delegate = context.coordinator
+        return canvas
+    }
+
+    func updateUIView(_ canvas: PKCanvasView, context: Context) {
+        if context.coordinator.lastClearToken != clearToken {
+            context.coordinator.lastClearToken = clearToken
+            canvas.drawing = PKDrawing()
+            DispatchQueue.main.async { drawing = PKDrawing() }
+        }
+    }
+
+    final class Coordinator: NSObject, PKCanvasViewDelegate {
+        var parent: DeviceChecksScribbleCanvas
+        var lastClearToken: Int
+        init(_ parent: DeviceChecksScribbleCanvas) {
+            self.parent = parent
+            self.lastClearToken = parent.clearToken
+        }
+        func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+            parent.drawing = canvasView.drawing
+        }
+    }
+}
+
+/// Files export sheet for the generated JSON (copy to a chosen location).
+private struct DeviceChecksExportPicker: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+    }
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
 }
 
 // MARK: - External test pattern (shown on the external scene)
