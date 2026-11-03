@@ -147,7 +147,7 @@ final class ThemeTokenTests: XCTestCase {
     ) {
         XCTAssertEqual(actual.count, expected.count, token, file: file, line: line)
         for (index, (a, e)) in zip(actual, expected).enumerated() {
-            XCTAssertEqual(a, e, accuracy: 0.01, "\(token) \(appearance) component \(index)", file: file, line: line)
+            XCTAssertEqual(a, e, accuracy: 0.001, "\(token) \(appearance) component \(index)", file: file, line: line)
         }
     }
 }
