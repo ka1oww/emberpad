@@ -130,12 +130,8 @@ enum Theme {
     static let pageMeta = Font.caption
 
     /// Sidebar section headers: 13 semibold uppercase with +0.04em tracking, in `text2`.
-    static let sidebarSectionTracking: CGFloat = 13 * 0.04
     static func sidebarSectionHeader(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(.system(.footnote, design: .default).weight(.semibold))
-            .tracking(sidebarSectionTracking)
-            .foregroundStyle(text2)
+        SidebarSectionHeaderView(title: title)
     }
 
     // MARK: - Global appearance
@@ -144,6 +140,18 @@ enum Theme {
     /// Called once from the main scene before the window is made key.
     static func applyAppearance() {
         UIView.appearance().tintColor = ThemeToken.accent.uiColor
+    }
+}
+
+private struct SidebarSectionHeaderView: View {
+    let title: String
+    @ScaledMetric(relativeTo: .footnote) private var tracking = 13 * 0.04
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(.system(.footnote, design: .default).weight(.semibold))
+            .tracking(tracking)
+            .foregroundStyle(Theme.text2)
     }
 }
 
