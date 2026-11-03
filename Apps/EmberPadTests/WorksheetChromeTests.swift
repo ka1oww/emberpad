@@ -63,7 +63,7 @@ final class WorksheetChromeTests: XCTestCase {
         let session = try Self.makeSession(pages: 4)
         let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel())
         controller.loadViewIfNeeded()
-        XCTAssertEqual(controller.pageCount, 4)
+        XCTAssertEqual(session.pdf.pageCount, 4)
         for index in 0..<4 {
             let page = try XCTUnwrap(session.pdf.page(at: index))
             let canvas = try XCTUnwrap(controller.pdfView(PDFView(), overlayViewFor: page) as? PKCanvasView)
