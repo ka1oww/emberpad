@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- EmberPad AppIcon source (EP-19). Original art: Ember House worksheet + pen on Ember red. -->
+  <!-- Regenerate PNGs with: python3 Brand.Sources/generate-appicon.py -->
+  <!-- Full-bleed square; iOS applies the rounded mask. No stock, no GoodNotes reference. -->
+  <rect x="0" y="0" width="1024" height="1024" fill="#B23A2E"/>
+  <!-- worksheet sheet -->
+  <rect x="256" y="168" width="512" height="688" rx="56" fill="#FFFFFF"/>
+  <!-- folded corner -->
+  <path d="M608,168 H768 V328 Z" fill="#EFE9DE"/>
+  <line x1="608" y1="168" x2="768" y2="328" stroke="#D8CDBD" stroke-width="8"/>
+  <!-- title bar (Ember red) + three taupe rules -->
+  <rect x="328" y="360" width="200" height="36" rx="18" fill="#B23A2E"/>
+  <rect x="328" y="440" width="368" height="30" rx="15" fill="#9C8A78"/>
+  <rect x="328" y="520" width="368" height="30" rx="15" fill="#9C8A78"/>
+  <rect x="328" y="600" width="368" height="30" rx="15" fill="#9C8A78"/>
+  <!-- pen shaft (dark slate) lying diagonally across the sheet, top end over the red field -->
+  <polygon points="772,117 836,159 424,789 360,747" fill="#1F2937" stroke="#1F2937" stroke-width="12" stroke-linejoin="round"/>
+  <line x1="778" y1="168" x2="400" y2="740" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.85"/>
+  <!-- nib + collar -->
+  <polygon points="360,747 424,789 332,860" fill="#1F2937"/>
+  <line x1="375" y1="757" x2="409" y2="779" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
+</svg>

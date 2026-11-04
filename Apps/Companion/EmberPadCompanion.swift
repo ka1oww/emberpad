@@ -11,7 +11,7 @@ private func isCompanionSourceDirectory(_ url: URL) -> Bool {
 struct EmberPadCompanion: App {
     @StateObject private var model = CompanionModel()
     var body: some Scene {
-        MenuBarExtra("EmberPad", systemImage: "doc.text") {
+        MenuBarExtra("EmberPad", image: "MenuBarGlyph") {
             CompanionLibraryContent(
                 folder: model.folder,
                 isSourceAvailable: model.isSourceAvailable,
