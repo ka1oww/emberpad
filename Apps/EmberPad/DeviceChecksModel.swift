@@ -1,4 +1,5 @@
 #if DEBUG
+import EmberSyncKit
 import UIKit
 import PDFKit
 
@@ -7,9 +8,9 @@ import PDFKit
 /// Non-UI core of the Device checks screen: the state snapshot, the
 /// `Documents/device-checks.log` line format and writer, the synthetic test
 /// PDF generator, the Pencil tap-action label, and the shared external-test
-/// flag that tells the external scene to show the test colour. EP-04 adds one
-/// more section to the screen; extend `DeviceChecksSnapshot` and
-/// `DeviceChecksEvaluator` rather than restructuring.
+/// flag that tells the external scene to show the test colour. EP-04's
+/// peer-to-peer hello adds the last pass/fail row; extend `DeviceChecksSnapshot`
+/// and `DeviceChecksEvaluator` rather than restructuring.
 
 // MARK: - Snapshot
 
@@ -47,7 +48,9 @@ struct DeviceCheckResult: Equatable {
 }
 
 enum DeviceChecksEvaluator {
-    static func results(snapshot: DeviceChecksSnapshot, logWritable: Bool, testPDFOK: Bool, pencilReadable: Bool) -> [DeviceCheckResult] {
+    /// `peerHello` is the latest finished EP-04 hello run, nil until one completes.
+    static func results(snapshot: DeviceChecksSnapshot, logWritable: Bool, testPDFOK: Bool, pencilReadable: Bool,
+                        peerHello: PeerHelloReport? = nil) -> [DeviceCheckResult] {
         [
             DeviceCheckResult(
                 title: "External display",
@@ -80,6 +83,11 @@ enum DeviceChecksEvaluator {
                 title: "Apple Pencil tap action",
                 detail: pencilReadable ? "Preference readable" : "Preference NOT readable",
                 passed: pencilReadable
+            ),
+            DeviceCheckResult(
+                title: "Peer-to-peer hello",
+                detail: peerHello?.summary ?? "Not run yet",
+                passed: peerHello?.verified == true
             ),
         ]
     }

@@ -8,9 +8,9 @@ Base code for a personal offline iPad teaching app. The Ember House colour token
 | --- | --- |
 | `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; local package dependency |
 | `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene |
-| `Apps/Companion` | macOS menu-bar window: Ember Projects source folder, finished-pair counts per subject with a not-found list, phase-2 placeholders, with no networking |
+| `Apps/Companion` | macOS menu-bar window: Ember Projects source folder, finished-pair counts per subject with a not-found list, phase-2 placeholders; no sync networking, only the Debug-only peer-to-peer hello listener |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
-| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Ember Projects library reader, the transport-agnostic sync wire protocol and tests |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Ember Projects library reader, the transport-agnostic sync wire protocol, the Debug-only peer-to-peer hello framing and transport, and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
 
@@ -57,7 +57,7 @@ The app's `DocumentSession` owns every page drawing and updates from `canvasView
 
 Same path and checksum is a replay. New bytes without ink replace the current copy while retaining the prior folder in hidden `.Previous` for 30 days. New bytes with ink create an **Updated** copy and mark the annotated one **Older version**; ink never moves to new bytes. An open, uninked worksheet is pinned: changed deliveries wait until the editor closes so an old canvas cannot write onto a replacement PDF. Recheck Inbox after closing it. Previous-version pruning is an explicit store operation; the base keeps versions conservatively until that maintenance path is wired.
 
-The complete-manifest planner also returns archive and no-download relink actions for Mac deletion/rename. Ambiguous identical hashes are imported and archived conservatively rather than assigning somebody else's ink. Phase 2 will apply full manifests through a transport; the current base has no networking or cloud folder access.
+The complete-manifest planner also returns archive and no-download relink actions for Mac deletion/rename. Ambiguous identical hashes are imported and archived conservatively rather than assigning somebody else's ink. Phase 2 will apply full manifests through a transport; the current base has no sync networking or cloud folder access (Debug builds carry only the synthetic peer-to-peer hello below).
 
 ### Library model v2
 
@@ -99,6 +99,17 @@ The iOS 18+ system picker requests fountain pen, marker, partial and stroke eras
 The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`. Its model accepts only a worksheet page and committed drawing. It shows a neutral **Paused** view while the main scene is inactive. The base follows the current page in full-page mode; in-progress strokes, follow-zoom and external-scene recording are future work.
 
 Debug builds expose **Device checks** in the library's Debug section, with pass/fail results for the scene, log, PDF and Pencil checks. The probe appends scene and capture snapshots to `Documents/device-checks.log`, provides a runtime-generated synthetic writing-trial PDF, and can replace the external student scene with a solid-colour, role-labelled test pattern. Its scribble recorder accepts Pencil or touch input, labels each saved drawing `erase` or `keep`, and exports the collected stroke samples as versioned JSON through Files. Samples are held in recorder state and are not persisted unless exported; they are not added to the device-check log or uploaded. These controls are compiled out of Release builds.
+
+### Peer-to-peer hello (Debug only)
+
+The Device checks screen's **Peer-to-peer hello** section and the Companion window's **Peer-to-peer hello (debug)** section prove the Mac and iPad can talk with neither joined to a network. The Companion's **Start** button opens an `NWListener` advertising `_emberws._tcp` as `EmberPad Companion (debug)`. The iPad browses for it, then **Echo and time 50 MB** connects, checks a 64-byte echo and sends 50,000,000 synthetic bytes. The Companion acknowledges the byte count and SHA-256, and the screen reports decimal MB/s plus the interface used (`awdl0` is peer-to-peer Wi-Fi). Results go to the pass/fail list and `Documents/device-checks.log`. The listener, browser and every connection set `includePeerToPeer`. Keep Wi-Fi on on both devices; neither needs to join a network. Both Info.plists declare `NSLocalNetworkUsageDescription` and `NSBonjourServices`, so each app asks for Local Network access the first time; if it is denied, the screens say so. There is no pairing, key or TLS (that is EP-22): any device in range can connect to a running Debug listener, so start it only for the check. The framing, server, browser and client live in `EmberSyncKit/Sources/EmberSyncKit/PeerHello*.swift` under `#if DEBUG`. A Release build contains none of them and does not link `Network.framework`.
+
+`swift test --package-path EmberSyncKit` runs the framing tests and an in-process 50 MB loopback transfer. To time the real Companion on one Mac, launch the Debug build with `-EmberPeerHelloAutostart YES`. It logs `EmberPad peer hello listening on port N`. Then run the skipped live test:
+
+```sh
+EMBERPAD_PEER_HELLO_PORT=N swift test --package-path EmberSyncKit --filter liveCompanion   # 127.0.0.1
+EMBERPAD_PEER_HELLO_BROWSE=1 swift test --package-path EmberSyncKit --filter liveCompanion # via Bonjour
+```
 
 `sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. No pairing policy is implemented and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
 

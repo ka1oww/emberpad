@@ -10,6 +10,10 @@ private func isCompanionSourceDirectory(_ url: URL) -> Bool {
 @main
 struct EmberPadCompanion: App {
     @StateObject private var model = CompanionModel()
+#if DEBUG
+    @ObservedObject private var peerHello = CompanionPeerHelloModel.shared
+    init() { CompanionPeerHelloModel.shared.startIfRequested() }
+#endif
     var body: some Scene {
         MenuBarExtra("EmberPad", image: "MenuBarGlyph") {
             CompanionLibraryContent(
@@ -23,6 +27,10 @@ struct EmberPadCompanion: App {
                 onPrepare: { model.prepare() }
             )
             .frame(width: 340)
+#if DEBUG
+            Divider()
+            CompanionPeerHelloSection(model: peerHello).frame(width: 340)
+#endif
             Divider()
             Button("Quit EmberPad Companion") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
