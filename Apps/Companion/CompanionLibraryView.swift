@@ -165,12 +165,12 @@ struct CompanionLibraryContent: View {
     }
 
     private func readSummary(_ snapshot: LibrarySnapshot) -> String {
-        let read = snapshot.documents.count.formatted(.number.grouping(.always))
-        let skipped = snapshot.skippedLeftoverPDFs.formatted(.number.grouping(.always))
+        let read = snapshot.documents.count.formatted(IntegerFormatStyle<Int>.number.grouping(.automatic))
+        let skipped = snapshot.skippedLeftoverPDFs.formatted(IntegerFormatStyle<Int>.number.grouping(.automatic))
         if snapshot.misses.isEmpty {
             return "All \(read) documents read · \(skipped) build files skipped"
         }
-        let notRead = snapshot.misses.count.formatted(.number.grouping(.always))
+        let notRead = snapshot.misses.count.formatted(IntegerFormatStyle<Int>.number.grouping(.automatic))
         return "\(read) documents read · \(skipped) build files skipped · \(notRead) not read"
     }
 
