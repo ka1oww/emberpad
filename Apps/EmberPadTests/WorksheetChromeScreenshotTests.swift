@@ -34,6 +34,10 @@ final class WorksheetChromeScreenshotTests: XCTestCase {
                     to: FileManager.default.temporaryDirectory.appendingPathComponent("\(file).png"),
                     options: .atomic
                 )
+                let attachment = XCTAttachment(image: image)
+                attachment.name = file
+                attachment.lifetime = .keepAlways
+                add(attachment)
             }
         }
     }
