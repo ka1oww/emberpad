@@ -26,7 +26,7 @@
     <key>UILaunchScreen</key><dict>
         <key>UIColorName</key><string>bg</string>
     </dict>
-    <key>NSLocalNetworkUsageDescription</key><string>EmberPad looks for EmberPad Companion on your Mac over the local network or peer-to-peer Wi-Fi, so worksheets can sync without joining a network.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>EmberPad finds the Ember Companion on your Mac over the local network to check the connection and, in a later version, sync worksheets.</string>
     <key>NSBonjourServices</key><array><string>_emberws._tcp</string></array>
     <key>UIFileSharingEnabled</key><true/>
     <key>LSSupportsOpeningDocumentsInPlace</key><true/>

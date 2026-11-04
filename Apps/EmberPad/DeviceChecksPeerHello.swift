@@ -126,20 +126,38 @@ enum DeviceChecksPeerHelloLog {
     }()
 
     /// e.g. `2026-11-03T12:00:00Z peerHello service="EmberPad Companion (debug)" result=ok
-    /// bytes=50000000 seconds=2.000 mbps=25.0 echoMs=2.0 verified=true via=awdl0`.
+    /// bytes=50000000 seconds=2.000 mbps=25.0 echoMs=2.0 verified=true pathInterfacesAvailable=awdl0`.
     static func line(date: Date, service: String, state: DeviceChecksPeerHelloModel.RunState) -> String {
-        let prefix = "\(timestampFormatter.string(from: date)) peerHello service=\"\(service)\""
+        let prefix = "\(timestampFormatter.string(from: date)) peerHello service=\(quoted(service))"
         switch state {
         case .finished(let report):
-            let via = report.interfaces.isEmpty ? "unknown" : report.interfaces.joined(separator: ",")
-            return prefix + String(format: " result=ok bytes=%d seconds=%.3f mbps=%.1f echoMs=%.1f verified=%@ via=%@",
+            guard report.verified else { return prefix + " result=failed error=\(quoted("Transfer was not verified"))" }
+            let available = report.pathInterfaces.isEmpty ? "unknown" : report.pathInterfaces.joined(separator: ",")
+            return prefix + String(format: " result=ok bytes=%d seconds=%.3f mbps=%.1f echoMs=%.1f verified=true pathInterfacesAvailable=%@",
                                    report.bytes, report.seconds, report.megabytesPerSecond,
-                                   report.echoRoundTripSeconds * 1000, report.verified ? "true" : "false", via)
+                                   report.echoRoundTripSeconds * 1000, available)
         case .failed(let text):
-            return prefix + " result=failed error=\"\(text)\""
+            return prefix + " result=failed error=\(quoted(text))"
         case .idle, .running:
             return prefix + " result=incomplete"
         }
+    }
+
+    private static func quoted(_ value: String) -> String {
+        "\"" + value.unicodeScalars.map { scalar in
+            switch scalar.value {
+            case 0x22: return "\\\""
+            case 0x5C: return "\\\\"
+            case 0x0A: return "\\n"
+            case 0x0D: return "\\r"
+            case 0x09: return "\\t"
+            default:
+                if CharacterSet.controlCharacters.contains(scalar) || scalar.value == 0x2028 || scalar.value == 0x2029 {
+                    return String(format: "\\u{%X}", scalar.value)
+                }
+                return String(scalar)
+            }
+        }.joined() + "\""
     }
 }
 
@@ -155,7 +173,8 @@ struct DeviceChecksPeerHelloSection: View {
                 HStack {
                     VStack(alignment: .leading) {
                         Text(service.name)
-                        Text(service.interfaces.isEmpty ? "interface unknown" : service.interfaces.joined(separator: ", "))
+                        Text(service.discoveryInterfaces.isEmpty ? "discovery interfaces unknown" :
+                             "discovery interfaces: \(service.discoveryInterfaces.joined(separator: ", "))")
                             .font(.footnote).monospaced().foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -169,7 +188,9 @@ struct DeviceChecksPeerHelloSection: View {
                 Text("Log write failed: \(error)").foregroundStyle(.red).font(.footnote)
             }
             Text("Start the listener in the Companion's Debug section first. Keep Wi-Fi on on both devices; " +
-                 "neither needs to join a network. awdl0 in the result means peer-to-peer Wi-Fi was used. " +
+                 "neither needs to join a network. The result reports interfaces available on each connection's " +
+                 "NWPath as Network.framework reports them; this does not identify which carried traffic. " +
+                 "The proof is a successful on-device run while neither device is joined to a network. " +
                  "Synthetic bytes only; the result is added to the check log.")
                 .font(.footnote).foregroundStyle(.secondary)
         }

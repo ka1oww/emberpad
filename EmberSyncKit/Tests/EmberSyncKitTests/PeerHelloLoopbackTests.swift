@@ -37,7 +37,7 @@ struct PeerHelloLoopbackTests {
         #expect(report.verified)
         #expect(report.seconds > 0)
         #expect(report.megabytesPerSecond > 1)
-        #expect(report.interfaces.contains("lo0"))
+        #expect(report.pathInterfaces.contains("lo0"))
         print("EP-04 loopback client: \(report.summary)")
 
         for await event in events {
@@ -93,6 +93,19 @@ struct PeerHelloLoopbackTests {
         }
     }
 
+    @Test func clientRejectsInvalidAcknowledgementsBeforeBuildingAReport() throws {
+        #expect(throws: PeerHelloError.protocolViolation("server acknowledged 18446744073709551615 bytes; expected 50")) {
+            try PeerHelloClient.validatedAckBytes((receivedBytes: UInt64.max, verified: true), expectedBytes: 50)
+        }
+        #expect(throws: PeerHelloError.protocolViolation("server acknowledged 49 bytes; expected 50")) {
+            try PeerHelloClient.validatedAckBytes((receivedBytes: 49, verified: true), expectedBytes: 50)
+        }
+        #expect(throws: PeerHelloError.protocolViolation("server did not verify the transfer")) {
+            try PeerHelloClient.validatedAckBytes((receivedBytes: 50, verified: false), expectedBytes: 50)
+        }
+        #expect(try PeerHelloClient.validatedAckBytes((receivedBytes: 50, verified: true), expectedBytes: 50) == 50)
+    }
+
     /// Manual Mac loopback against a running Debug Companion: set
     /// `EMBERPAD_PEER_HELLO_PORT` to the port it logged, or `EMBERPAD_PEER_HELLO_BROWSE=1`
     /// to find it over Bonjour. Skipped otherwise, including in CI.
@@ -120,7 +133,7 @@ struct PeerHelloLoopbackTests {
         DispatchQueue.global().asyncAfter(deadline: .now() + 15) { sink.finish() }
         for await (state, services) in updates {
             if let first = services.first {
-                print("EP-04 live: found \(first.name) on \(first.interfaces)")
+                print("EP-04 live: found \(first.name) on discovery interfaces \(first.discoveryInterfaces)")
                 return first.endpoint
             }
             if case .failed(let text) = state { throw PeerHelloError.connection(text) }
