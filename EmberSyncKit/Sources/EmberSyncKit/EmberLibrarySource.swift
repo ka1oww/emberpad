@@ -40,11 +40,24 @@ public struct EmberLibrarySource: Sendable {
 
     public let root: URL
     public let aliases: ClassAliasTable
+    private let metadataReader: @Sendable (URL) throws -> ChildMetadata
 
     /// `root` is used as given; pass `discoverDriveRoot()` for the Drive EMBER folder. Tests pass synthetic roots.
     public init(root: URL, aliases: ClassAliasTable = .empty) {
         self.root = root
         self.aliases = aliases
+        self.metadataReader = { url in
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+            return ChildMetadata(isDirectory: values.isDirectory, isRegularFile: values.isRegularFile,
+                                 isSymbolicLink: values.isSymbolicLink)
+        }
+    }
+
+    init(root: URL, aliases: ClassAliasTable = .empty,
+         metadataReader: @escaping @Sendable (URL) throws -> ChildMetadata) {
+        self.root = root
+        self.aliases = aliases
+        self.metadataReader = metadataReader
     }
 
     /// Walks the root and returns a version-2 manifest plus the miss list. `previous` is the manifest last
@@ -52,7 +65,7 @@ public struct EmberLibrarySource: Sendable {
     /// Throws when the root is not a real directory or cannot be listed.
     public func read(previous: Manifest? = nil, generatedAt: Date = Date()) throws -> LibrarySnapshot {
         guard FileAccess.isDirectory(root) else { throw CocoaError(.fileReadNoSuchFile) }
-        var walker = Walker(root: root, aliases: aliases)
+        var walker = Walker(root: root, aliases: aliases, metadataReader: metadataReader)
         try walker.walk()
         var misses = walker.misses
         let withheld = aliases.withheldTerms + walker.withheldTerms
@@ -111,6 +124,12 @@ public struct EmberLibrarySource: Sendable {
                                retained: retained, skippedLeftoverPDFs: walker.skippedLeftoverPDFs,
                                skippedOtherFiles: walker.skippedOtherFiles)
     }
+}
+
+struct ChildMetadata: Sendable {
+    let isDirectory: Bool?
+    let isRegularFile: Bool?
+    let isSymbolicLink: Bool?
 }
 
 /// One delivered copy: the manifest entry the iPad sees, and where it was read from (Mac only).
@@ -566,11 +585,12 @@ private struct Walker {
     struct Child {
         let url: URL
         let name: String
-        let isDirectory: Bool
+        let isDirectory: Bool?
     }
 
     let root: URL
     let aliases: ClassAliasTable
+    let metadataReader: @Sendable (URL) throws -> ChildMetadata
     let fileManager = FileManager.default
     var documents: [LibraryDocument] = []
     var misses: [LibraryMiss] = []
@@ -580,21 +600,28 @@ private struct Walker {
     var skippedLeftoverPDFs = 0
     var skippedOtherFiles = 0
 
-    init(root: URL, aliases: ClassAliasTable) {
+    init(root: URL, aliases: ClassAliasTable, metadataReader: @escaping @Sendable (URL) throws -> ChildMetadata) {
         self.root = root
         self.aliases = aliases
+        self.metadataReader = metadataReader
     }
 
     mutating func walk() throws {
         let children = try list(root)
-        files(children.filter { !$0.isDirectory },
-              in: Context(subject: EmberLibrarySource.rootSubject, folders: [], localPath: "", archived: false))
-        for child in children where child.isDirectory {
+        let rootContext = Context(subject: EmberLibrarySource.rootSubject, folders: [], localPath: "", archived: false)
+        files(children.filter { $0.isDirectory == false || ($0.isDirectory == nil && Self.isPDF($0.name)) }, in: rootContext)
+        for child in children where child.isDirectory == true {
             if Self.isLeftoverFolder(child.name) { countLeftovers(in: child.url); continue }
             let archived = child.name.hasPrefix("_")
             let ownName = archived ? String(child.name.drop(while: { $0 == "_" })) : child.name
             let subject = EmberLibrarySource.subjectNames[child.name] ?? (ownName.isEmpty ? child.name : ownName)
             folder(child.url, Context(subject: subject, folders: [], localPath: child.name, archived: archived))
+        }
+        for child in children where child.isDirectory == nil && !Self.isPDF(child.name) {
+            let archived = child.name.hasPrefix("_")
+            let ownName = archived ? String(child.name.drop(while: { $0 == "_" })) : child.name
+            let subject = EmberLibrarySource.subjectNames[child.name] ?? (ownName.isEmpty ? child.name : ownName)
+            markUnreadableFolder(Context(subject: subject, folders: [], localPath: child.name, archived: archived))
         }
     }
 
@@ -607,10 +634,13 @@ private struct Walker {
             unreadSourcePrefixes.append(([context.subject] + rewritten).joined(separator: "/"))
             return
         }
-        files(children.filter { !$0.isDirectory }, in: context)
-        for child in children where child.isDirectory {
+        files(children.filter { $0.isDirectory == false || ($0.isDirectory == nil && Self.isPDF($0.name)) }, in: context)
+        for child in children where child.isDirectory == true {
             if Self.isLeftoverFolder(child.name) { countLeftovers(in: child.url); continue }
             folder(child.url, context.entering(child.name))
+        }
+        for child in children where child.isDirectory == nil && !Self.isPDF(child.name) {
+            markUnreadableFolder(context.entering(child.name))
         }
     }
 
@@ -660,6 +690,10 @@ private struct Walker {
                                                  title: (titleFolders + [fileStem]).joined(separator: " / "), archived: context.archived)
         else { return miss(.invalidName, "the name cannot form a safe manifest path or label") }
 
+        if file.isDirectory == nil {
+            return miss(.unreadable, "the entry's metadata could not be read", key)
+        }
+
         let values: URLResourceValues, hash: ContentHash
         do {
             values = try file.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
@@ -681,6 +715,17 @@ private struct Walker {
             EmberLibrarySource.buildLeftoverFolderPrefixes.contains { lower.hasPrefix($0) }
     }
 
+    private static func isPDF(_ name: String) -> Bool {
+        name.lowercased().hasSuffix(".pdf") && name.count > 4
+    }
+
+    private mutating func markUnreadableFolder(_ context: Context) {
+        misses.append(LibraryMiss(path: context.localPath, reason: .unreadable,
+                                  detail: "the folder's metadata could not be read"))
+        let rewritten = context.folders.map { ClassResolver.resolve($0, aliases: aliases).displayName }
+        unreadSourcePrefixes.append(([context.subject] + rewritten).joined(separator: "/"))
+    }
+
     /// Counts PDFs below a build-leftover folder from the listing alone; nothing is opened.
     private mutating func countLeftovers(in folder: URL) {
         guard let walker = fileManager.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
@@ -690,15 +735,22 @@ private struct Walker {
         }
     }
 
-    /// Non-hidden children that are real files or directories, sorted by name. Symlinks are not followed.
+    /// Non-hidden children, sorted by name. Symlinks are not followed; metadata failures remain as unreadable children.
     private func list(_ folder: URL) throws -> [Child] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
         return try fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
             .filter { !$0.lastPathComponent.hasPrefix(".") }
             .compactMap { url -> Child? in
-                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { return nil }
-                if values.isDirectory == true { return Child(url: url, name: url.lastPathComponent, isDirectory: true) }
-                if values.isRegularFile == true { return Child(url: url, name: url.lastPathComponent, isDirectory: false) }
+                guard let values = try? metadataReader(url) else {
+                    return Child(url: url, name: url.lastPathComponent, isDirectory: nil)
+                }
+                guard values.isSymbolicLink != true else { return nil }
+                if values.isDirectory == true {
+                    return Child(url: url, name: url.lastPathComponent, isDirectory: true)
+                }
+                if values.isRegularFile == true {
+                    return Child(url: url, name: url.lastPathComponent, isDirectory: false)
+                }
                 return nil
             }
             .sorted { $0.name < $1.name }

@@ -292,6 +292,27 @@ struct EmberLibrarySourceTests {
         #expect(second.manifest.files.count == 2)
     }
 
+    @Test func childMetadataFailuresAreMissesAndPreservePreviousFilesAndFolderPrefixes() throws {
+        let tree = try SyntheticDriveTree(); defer { tree.remove() }
+        try tree.write("EMBER CHEMISTRY/Topic/Synthetic Paper.pdf")
+        try tree.write("EMBER PHYSICS/Synthetic Root Paper.pdf")
+        let first = try read(tree)
+        let unreadableNames: Set<String> = ["Topic", "Synthetic Root Paper.pdf"]
+        let source = EmberLibrarySource(root: tree.root, metadataReader: { url in
+            guard !unreadableNames.contains(url.lastPathComponent) else { throw CocoaError(.fileReadUnknown) }
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+            return ChildMetadata(isDirectory: values.isDirectory, isRegularFile: values.isRegularFile,
+                                 isSymbolicLink: values.isSymbolicLink)
+        })
+
+        let second = try source.read(previous: first.manifest, generatedAt: fixtureDate)
+        #expect(second.misses.map(\.path) == ["EMBER CHEMISTRY/Topic", "EMBER PHYSICS/Synthetic Root Paper.pdf"])
+        #expect(second.misses.allSatisfy { $0.reason == .unreadable })
+        #expect(second.retained.count == 2)
+        #expect(second.retained.allSatisfy { $0.reason == .sourceUnreadable })
+        #expect(Set(second.manifest.files.map(\.source)) == Set(first.manifest.files.map(\.source)))
+    }
+
     @Test func aVanishedSourceKeepsItsPreviousEntriesAndPlansNoArchive() throws {
         let tree = try SyntheticDriveTree(); defer { tree.remove() }
         try tree.write("EMBER MATH/Topic/Synthetic Gone Paper.pdf")

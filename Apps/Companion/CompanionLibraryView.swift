@@ -136,10 +136,9 @@ struct CompanionLibraryContent: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Not read this time").font(.system(size: 13, weight: .semibold))
             if let snapshot {
-                if snapshot.misses.isEmpty {
-                    Text("Every PDF was read.").font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                } else {
+                Text(readSummary(snapshot)).font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                if !snapshot.misses.isEmpty {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(Array(snapshot.misses.enumerated()), id: \.offset) { _, miss in
@@ -163,6 +162,16 @@ struct CompanionLibraryContent: View {
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
+    }
+
+    private func readSummary(_ snapshot: LibrarySnapshot) -> String {
+        let read = snapshot.documents.count.formatted(.number.grouping(.always))
+        let skipped = snapshot.skippedLeftoverPDFs.formatted(.number.grouping(.always))
+        if snapshot.misses.isEmpty {
+            return "All \(read) documents read · \(skipped) build files skipped"
+        }
+        let notRead = snapshot.misses.count.formatted(.number.grouping(.always))
+        return "\(read) documents read · \(skipped) build files skipped · \(notRead) not read"
     }
 
     // MARK: 4. iPad (phase 2 placeholder)
