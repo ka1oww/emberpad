@@ -47,7 +47,9 @@ public struct WireServerSession: Sendable {
     public typealias Instant = ContinuousClock.Instant
 
     public enum Phase: Equatable, Sendable {
-        case handshaking, ready(version: UInt16), closed(WireCloseReason)
+        case handshaking
+        case ready(version: UInt16)
+        case closed(WireCloseReason)
     }
 
     private struct Transfer {
@@ -75,8 +77,9 @@ public struct WireServerSession: Sendable {
         self.limits = limits
         started = now
         chunkBytes = limits.maxChunkBytes
-        decoder = WireFrameDecoder(accepting: WireMessageType.clientToServer, maxChunkBytes: limits.maxChunkBytes,
-                                   maxManifestBytes: limits.maxManifestBytes)
+        decoder = WireFrameDecoder(
+            accepting: WireMessageType.clientToServer, maxChunkBytes: limits.maxChunkBytes,
+            maxManifestBytes: limits.maxManifestBytes)
     }
 
     public var activeTransfers: Int { transfers.count }
@@ -144,7 +147,8 @@ public struct WireServerSession: Sendable {
         case .ready:
             for id in transfers.keys.sorted() {
                 guard let transfer = transfers[id], transfer.credit == 0,
-                      now - transfer.lastActivity >= limits.stallTimeout else { continue }
+                    now - transfer.lastActivity >= limits.stallTimeout
+                else { continue }
                 transfers[id] = nil
                 out.outbound.append(.error(id, .stalled))
             }
@@ -205,14 +209,14 @@ public struct WireServerSession: Sendable {
             } else if id.rawValue > highestRequestID {
                 violate(.unknownRequest(id), &out)
             }
-            // A WINDOW for a request that already ended crossed its END in flight and is ignored.
+        // A WINDOW for a request that already ended crossed its END in flight and is ignored.
         case (.ready, .cancel(let id)):
             if transfers.removeValue(forKey: id) != nil {
                 out.outbound.append(.error(id, .cancelled))
             } else if id.rawValue > highestRequestID {
                 violate(.unknownRequest(id), &out)
             }
-            // A CANCEL for a request that already ended crossed its terminal frame in flight and is ignored.
+        // A CANCEL for a request that already ended crossed its terminal frame in flight and is ignored.
         default:
             violate(.unexpectedFrame(message.type), &out)
         }
@@ -235,8 +239,10 @@ public struct WireServerSession: Sendable {
         out.outbound.append(.manifest(id, json: json))
     }
 
-    private mutating func startTransfer(_ id: WireRequestID, hash: ContentHash, credit: UInt32, now: Instant,
-                                        _ out: inout WireServerOutput) {
+    private mutating func startTransfer(
+        _ id: WireRequestID, hash: ContentHash, credit: UInt32, now: Instant,
+        _ out: inout WireServerOutput
+    ) {
         guard UInt64(credit) <= WireProtocol.maxCreditBytes else { return violate(.creditExceeded(id), &out) }
         guard transfers.count < limits.maxConcurrentRequests else { return out.outbound.append(.error(id, .busy)) }
         let file: (any WireFile)?

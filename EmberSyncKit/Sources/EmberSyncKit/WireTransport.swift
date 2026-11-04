@@ -26,11 +26,6 @@ public struct InMemoryWireTransport: WireTransport {
         return (InMemoryWireTransport(inbound: backward, outbound: forward), InMemoryWireTransport(inbound: forward, outbound: backward))
     }
 
-    private init(inbound: WirePipe, outbound: WirePipe) {
-        self.inbound = inbound
-        self.outbound = outbound
-    }
-
     public func send(_ bytes: Data) async throws { try await outbound.write(bytes) }
     public func receive() async throws -> Data? { try await inbound.read() }
 

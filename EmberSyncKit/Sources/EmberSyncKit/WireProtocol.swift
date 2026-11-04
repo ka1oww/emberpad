@@ -45,7 +45,7 @@ public struct WireHello: Equatable, Sendable {
 
     public init(role: WireRole, versions: ClosedRange<UInt16>, maxChunkBytes: UInt32, maxManifestBytes: UInt32) throws {
         guard versions.lowerBound >= 1, WireProtocol.chunkSizeBounds.contains(maxChunkBytes),
-              WireProtocol.manifestSizeBounds.contains(maxManifestBytes)
+            WireProtocol.manifestSizeBounds.contains(maxManifestBytes)
         else { throw WireViolation.malformedPayload(.hello) }
         self.init(unchecked: role, versions: versions, maxChunkBytes: maxChunkBytes, maxManifestBytes: maxManifestBytes)
     }
@@ -77,7 +77,8 @@ public enum WireErrorCode: UInt16, Sendable {
 }
 
 public enum WireMessageType: UInt8, Sendable, CaseIterable {
-    case hello = 1, getManifest, manifest, get, data, window, end, cancel, error
+    case hello = 1
+    case getManifest, manifest, get, data, window, end, cancel, error
 
     /// Frame types a client may send; the server accepts only these.
     public static let clientToServer: Set<Self> = [.hello, .getManifest, .get, .window, .cancel, .error]
@@ -168,17 +169,21 @@ public struct WireLimits: Equatable, Sendable {
 
     public static let standard = WireLimits(unchecked: 65_536, 8_388_608, 1_048_576, 8, .seconds(10), .seconds(20))
 
-    public init(maxChunkBytes: UInt32 = 65_536, maxManifestBytes: UInt32 = 8_388_608, windowBytes: UInt32 = 1_048_576,
-                maxConcurrentRequests: Int = 8, handshakeTimeout: Duration = .seconds(10), stallTimeout: Duration = .seconds(20)) throws {
+    public init(
+        maxChunkBytes: UInt32 = 65_536, maxManifestBytes: UInt32 = 8_388_608, windowBytes: UInt32 = 1_048_576,
+        maxConcurrentRequests: Int = 8, handshakeTimeout: Duration = .seconds(10), stallTimeout: Duration = .seconds(20)
+    ) throws {
         guard WireProtocol.chunkSizeBounds.contains(maxChunkBytes), WireProtocol.manifestSizeBounds.contains(maxManifestBytes),
-              windowBytes >= 1, UInt64(windowBytes) <= WireProtocol.maxCreditBytes, (1...1_024).contains(maxConcurrentRequests),
-              handshakeTimeout > .zero, stallTimeout > .zero
+            windowBytes >= 1, UInt64(windowBytes) <= WireProtocol.maxCreditBytes, (1...1_024).contains(maxConcurrentRequests),
+            handshakeTimeout > .zero, stallTimeout > .zero
         else { throw WireSessionError.invalidLimits }
         self.init(unchecked: maxChunkBytes, maxManifestBytes, windowBytes, maxConcurrentRequests, handshakeTimeout, stallTimeout)
     }
 
-    private init(unchecked maxChunkBytes: UInt32, _ maxManifestBytes: UInt32, _ windowBytes: UInt32, _ maxConcurrentRequests: Int,
-                 _ handshakeTimeout: Duration, _ stallTimeout: Duration) {
+    private init(
+        unchecked maxChunkBytes: UInt32, _ maxManifestBytes: UInt32, _ windowBytes: UInt32, _ maxConcurrentRequests: Int,
+        _ handshakeTimeout: Duration, _ stallTimeout: Duration
+    ) {
         self.maxChunkBytes = maxChunkBytes
         self.maxManifestBytes = maxManifestBytes
         self.windowBytes = windowBytes
@@ -189,7 +194,8 @@ public struct WireLimits: Equatable, Sendable {
 
     /// The limits were validated against the same bounds `WireHello` checks.
     func hello(role: WireRole) -> WireHello {
-        WireHello(unchecked: role, versions: WireProtocol.supportedVersions, maxChunkBytes: maxChunkBytes,
-                  maxManifestBytes: maxManifestBytes)
+        WireHello(
+            unchecked: role, versions: WireProtocol.supportedVersions, maxChunkBytes: maxChunkBytes,
+            maxManifestBytes: maxManifestBytes)
     }
 }

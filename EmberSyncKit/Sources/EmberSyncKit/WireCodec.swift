@@ -64,7 +64,8 @@ public struct WireFrameDecoder: Sendable {
     public init(accepting accepted: Set<WireMessageType>, maxChunkBytes: UInt32, maxManifestBytes: UInt32) {
         self.accepted = accepted
         self.maxChunkBytes = min(max(maxChunkBytes, WireProtocol.chunkSizeBounds.lowerBound), WireProtocol.chunkSizeBounds.upperBound)
-        self.maxManifestBytes = min(max(maxManifestBytes, WireProtocol.manifestSizeBounds.lowerBound), WireProtocol.manifestSizeBounds.upperBound)
+        self.maxManifestBytes = min(
+            max(maxManifestBytes, WireProtocol.manifestSizeBounds.lowerBound), WireProtocol.manifestSizeBounds.upperBound)
     }
 
     /// Bytes held as unprocessed input or for the current incomplete frame.
@@ -219,10 +220,12 @@ public struct WireFrameDecoder: Sendable {
         switch type {
         case .hello:
             guard Array(reader.bytes(4)) == WireProtocol.magic else { throw .malformedPayload(type) }
-            let low = reader.uint16(), high = reader.uint16()
+            let low = reader.uint16()
+            let high = reader.uint16()
             guard low <= high, let role = WireRole(rawValue: reader.uint8()),
-                  let hello = try? WireHello(role: role, versions: low...high, maxChunkBytes: reader.uint32(),
-                                             maxManifestBytes: reader.uint32())
+                let hello = try? WireHello(
+                    role: role, versions: low...high, maxChunkBytes: reader.uint32(),
+                    maxManifestBytes: reader.uint32())
             else { throw .malformedPayload(type) }
             return .hello(hello)
         case .getManifest:
@@ -274,8 +277,8 @@ private struct WireReader {
     }
 }
 
-private extension Array where Element == UInt8 {
-    mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
+extension Array where Element == UInt8 {
+    fileprivate mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
         Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
     }
 }

@@ -1,5 +1,5 @@
-import Foundation
 import CryptoKit
+import Foundation
 
 public struct WireClientOutput: Sendable {
     /// Frames to send, in order.
@@ -28,7 +28,9 @@ public struct WireClientSession: Sendable {
     public typealias Instant = ContinuousClock.Instant
 
     public enum Phase: Equatable, Sendable {
-        case idle, handshaking, ready(version: UInt16), closed(WireCloseReason)
+        case idle, handshaking
+        case ready(version: UInt16)
+        case closed(WireCloseReason)
     }
 
     private struct FileTransfer {
@@ -71,8 +73,9 @@ public struct WireClientSession: Sendable {
 
     public init(limits: WireLimits = .standard) {
         self.limits = limits
-        decoder = WireFrameDecoder(accepting: WireMessageType.serverToClient, maxChunkBytes: limits.maxChunkBytes,
-                                   maxManifestBytes: limits.maxManifestBytes)
+        decoder = WireFrameDecoder(
+            accepting: WireMessageType.serverToClient, maxChunkBytes: limits.maxChunkBytes,
+            maxManifestBytes: limits.maxManifestBytes)
     }
 
     /// Requests in flight, including cancelled ones the server has not acknowledged yet.
@@ -111,12 +114,15 @@ public struct WireClientSession: Sendable {
         return (id, out)
     }
 
-    public mutating func requestFile(_ hash: ContentHash, expectedSize: UInt64,
-                                     now: Instant) throws(WireSessionError) -> (WireRequestID, WireClientOutput) {
+    public mutating func requestFile(
+        _ hash: ContentHash, expectedSize: UInt64,
+        now: Instant
+    ) throws(WireSessionError) -> (WireRequestID, WireClientOutput) {
         let id = try nextRequestID()
         let window = UInt64(limits.windowBytes)
-        requests[id] = Request(kind: .file(FileTransfer(hash: hash, expectedSize: expectedSize, window: window, granted: window)),
-                               lastProgress: now)
+        requests[id] = Request(
+            kind: .file(FileTransfer(hash: hash, expectedSize: expectedSize, window: window, granted: window)),
+            lastProgress: now)
         var out = WireClientOutput()
         out.outbound.append(.get(id, hash: hash, credit: limits.windowBytes))
         return (id, out)
@@ -132,7 +138,8 @@ public struct WireClientSession: Sendable {
     public mutating func consumed(_ id: WireRequestID, byteCount: Int, now: Instant) throws(WireSessionError) -> WireClientOutput {
         var out = WireClientOutput()
         guard case .ready = phase, var request = requests[id], request.drainingSince == nil,
-              case .file(var file) = request.kind else { return out }
+            case .file(var file) = request.kind
+        else { return out }
         guard byteCount >= 0, file.consumed + UInt64(byteCount) <= file.received else { throw .overConsumed }
         file.consumed += UInt64(byteCount)
         // Grants never exceed consumption, so `granted - window <= consumed` and `pending <= window`.
