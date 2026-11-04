@@ -52,7 +52,7 @@ final class WorksheetChromeTests: XCTestCase {
     }
 
     func testEditedInkPublishesUnsavedAndSavedTransitions() async throws {
-        let session = try Self.makeSession(pages: 1)
+        let session = try await Self.makeSession(pages: 1)
         var changeCount = 0
         let observation = session.objectWillChange.sink { changeCount += 1 }
         XCTAssertFalse(session.hasUnsavedInk)
@@ -70,8 +70,8 @@ final class WorksheetChromeTests: XCTestCase {
         withExtendedLifetime(observation) {}
     }
 
-    func testEveryCanvasUsesLightStyle() throws {
-        let session = try Self.makeSession(pages: 4)
+    func testEveryCanvasUsesLightStyle() async throws {
+        let session = try await Self.makeSession(pages: 4)
         let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel())
         controller.loadViewIfNeeded()
         XCTAssertEqual(session.pdf.pageCount, 4)
@@ -83,8 +83,8 @@ final class WorksheetChromeTests: XCTestCase {
         }
     }
 
-    func testContinuousLayoutUsesCanvasChrome() throws {
-        let session = try Self.makeSession(pages: 2)
+    func testContinuousLayoutUsesCanvasChrome() async throws {
+        let session = try await Self.makeSession(pages: 2)
         let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel())
         controller.loadViewIfNeeded()
         let pdfView = try XCTUnwrap(Self.findPDFView(in: controller.view))
@@ -103,16 +103,13 @@ final class WorksheetChromeTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private static func makeSession(pages: Int) throws -> DocumentSession {
-        let pdf = try XCTUnwrap(PDFDocument(data: pdfData(pages: pages)))
+    private static func makeSession(pages: Int) async throws -> DocumentSession {
+        let data = pdfData(pages: pages)
+        let pdf = try XCTUnwrap(PDFDocument(data: data))
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let store = try LibraryStore(root: root)
-        let entry = try ManifestEntry(
-            source: try SourcePath(classFolder: "Chem Group A", relativePath: "worksheet-fixture.pdf"),
-            sha256: ContentHash(rawValue: String(repeating: "a", count: 64)),
-            size: 100, modifiedAt: Date(), publication: nil
-        )
-        let record = DocumentRecord(source: entry, pageCount: pages, importedAt: Date())
+        let source = try SourcePath(classFolder: "Chem Group A", relativePath: "worksheet-fixture.pdf")
+        let record = try await store.importPDF(data: data, source: source, pageCount: pages)
         return DocumentSession(record: record, pdf: pdf,
                                originalURL: root.appendingPathComponent("worksheet-fixture.pdf"),
                                drawings: [:], store: store)
