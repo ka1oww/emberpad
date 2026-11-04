@@ -14,7 +14,7 @@ final class LibraryController: ObservableObject {
     private var sessions: [UUID: DocumentSession] = [:]
 
     init(store: LibraryStore, inbox: URL) { self.store = store; self.inbox = inbox }
-    var classes: [String] { Set(documents.filter { $0.status != .archived }.map { $0.source.source.classFolder }).sorted() }
+    var classes: [String] { Set(documents.filter { !$0.showsAsArchived }.map { $0.source.source.classFolder }).sorted() }
 
     func refresh() async {
         do { documents = try await store.documents() }

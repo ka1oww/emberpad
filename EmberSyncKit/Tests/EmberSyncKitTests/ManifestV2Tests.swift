@@ -54,6 +54,26 @@ struct ManifestV2Tests {
         #expect(decoded.files.map(\.title) == ["Synthetic Paper 1 (Student)", "Synthetic Paper 1 (Teacher)"])
     }
 
+    @Test func archivedMarkIsEncodedOnlyWhenSetAndShowsTheCopyUnderArchived() throws {
+        let current = try publishedEntry("paper-1", .student)
+        let teacher = try publishedEntry("paper-1", .teacher)
+        let publication = try Publication(subject: teacher.subject, paperKey: PaperKey(rawValue: "paper-1"), role: .teacher,
+                                          title: teacher.title, archived: true)
+        let archived = try ManifestEntry(source: teacher.source, sha256: teacher.sha256, size: teacher.size,
+                                         modifiedAt: teacher.modifiedAt, publication: publication)
+        let manifest = try Manifest(version: 2, generatedAt: fixtureDate, files: [current, archived])
+        let json = String(decoding: try ManifestCodec.encode(manifest), as: UTF8.self)
+        #expect(json.components(separatedBy: "\"archived\"").count == 2)
+        let decoded = try ManifestCodec.decode(Data(json.utf8))
+        #expect(decoded == manifest)
+        #expect(decoded.files.map(\.isArchived) == [false, true])
+
+        let records = decoded.files.map { DocumentRecord(source: $0, pageCount: 1, importedAt: fixtureDate) }
+        #expect(records.map(\.showsAsArchived) == [false, true])
+        #expect(DocumentRecord(source: current, pageCount: 1, importedAt: fixtureDate, status: .archived).showsAsArchived)
+        #expect(DiffPlanner.pairs(in: records).count == 2)
+    }
+
     @Test func versionTwoRequiresOneCopyPerRoleAndPaperKey() throws {
         let student = try publishedEntry("paper-1", .student)
         #expect(throws: LibraryError.invalidManifest) {

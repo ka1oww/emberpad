@@ -165,16 +165,19 @@ public struct PaperKey: Hashable, Comparable, Codable, Sendable {
     }
 }
 
-/// The publication record a version-2 manifest carries for each entry. Role and pairing come only from here,
-/// never from file or folder names.
+/// The publication record a version-2 manifest carries for each entry. On the iPad, role and pairing come only
+/// from here, never from file or folder names; the Mac library source derives them once when it builds the record.
 public struct Publication: Equatable, Sendable {
     public let subject: String
     public let classTag: String?
     public let paperKey: PaperKey
     public let role: DocumentRole
     public let title: String
+    /// An archived copy is delivered but listed only under **Archived**. Encoded only when true.
+    public let archived: Bool
 
-    public init(subject: String, classTag: String? = nil, paperKey: PaperKey, role: DocumentRole, title: String) throws {
+    public init(subject: String, classTag: String? = nil, paperKey: PaperKey, role: DocumentRole, title: String,
+                archived: Bool = false) throws {
         guard Self.isValidLabel(subject), Self.isValidLabel(title), classTag.map(Self.isValidLabel) ?? true
         else { throw LibraryError.invalidManifest }
         self.subject = subject
@@ -182,6 +185,7 @@ public struct Publication: Equatable, Sendable {
         self.paperKey = paperKey
         self.role = role
         self.title = title
+        self.archived = archived
     }
 
     /// Non-empty, at most 512 UTF-8 bytes, no control characters, no leading or trailing whitespace.
@@ -210,6 +214,7 @@ public struct ManifestEntry: Equatable, Codable, Sendable {
     public var paperKey: PaperKey? { publication?.paperKey }
     public var role: DocumentRole { publication?.role ?? .student }
     public var title: String { publication?.title ?? source.filename }
+    public var isArchived: Bool { publication?.archived ?? false }
     var identity: DocumentIdentity { DocumentIdentity(source: source, role: role) }
 
     public init(source: SourcePath, sha256: ContentHash, size: Int64, modifiedAt: Date, publication: Publication? = nil) throws {
@@ -221,14 +226,15 @@ public struct ManifestEntry: Equatable, Codable, Sendable {
         self.publication = publication
     }
 
-    enum CodingKeys: String, CodingKey { case source, sha256, size, modifiedAt, subject, classTag, paperKey, role, title }
+    enum CodingKeys: String, CodingKey { case source, sha256, size, modifiedAt, subject, classTag, paperKey, role, title, archived }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let publicationKeys: [CodingKeys] = [.subject, .classTag, .paperKey, .role, .title]
+        let publicationKeys: [CodingKeys] = [.subject, .classTag, .paperKey, .role, .title, .archived]
         let publication = try publicationKeys.contains(where: c.contains) ? Publication(
             subject: c.decode(String.self, forKey: .subject), classTag: c.decodeIfPresent(String.self, forKey: .classTag),
             paperKey: c.decode(PaperKey.self, forKey: .paperKey), role: c.decode(DocumentRole.self, forKey: .role),
-            title: c.decode(String.self, forKey: .title)) : nil
+            title: c.decode(String.self, forKey: .title),
+            archived: c.decodeIfPresent(Bool.self, forKey: .archived) ?? false) : nil
         try self.init(source: c.decode(SourcePath.self, forKey: .source), sha256: c.decode(ContentHash.self, forKey: .sha256),
                       size: c.decode(Int64.self, forKey: .size), modifiedAt: c.decode(Date.self, forKey: .modifiedAt),
                       publication: publication)
@@ -245,6 +251,7 @@ public struct ManifestEntry: Equatable, Codable, Sendable {
         try c.encode(publication.paperKey, forKey: .paperKey)
         try c.encode(publication.role, forKey: .role)
         try c.encode(publication.title, forKey: .title)
+        if publication.archived { try c.encode(true, forKey: .archived) }
     }
 }
 

@@ -27,6 +27,8 @@ public struct DocumentRecord: Identifiable, Equatable, Codable, Sendable {
     public var subject: String { source.subject }
     public var classTag: String? { source.classTag }
     public var paperKey: PaperKey? { source.paperKey }
+    /// Listed only under **Archived**: archived on this iPad, or delivered with the manifest's archived mark.
+    public var showsAsArchived: Bool { status == .archived || source.isArchived }
     var identity: DocumentIdentity { source.identity }
 
     public init(id: UUID = UUID(), source: ManifestEntry, pageCount: Int, importedAt: Date,
