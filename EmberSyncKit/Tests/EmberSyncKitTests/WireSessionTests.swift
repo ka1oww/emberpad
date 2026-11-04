@@ -100,6 +100,75 @@ struct WireSessionTests {
         #expect(pair.client.requestsInFlight == 0)
     }
 
+    @Test func coalescedManifestRequestsEmitOneResponsePerReceiveInOrder() throws {
+        let manifest = try syntheticManifest(entries: 1)
+        let limits = try WireLimits(maxConcurrentRequests: 2)
+        var pair = SessionPair(provider: TestProvider(manifestValue: manifest), serverLimits: limits)
+        let ids = (1...5).map { requestID(UInt32($0)) }
+        let json = try ManifestCodec.encode(manifest)
+        var input = WireCodec.encode(ids.map(WireMessage.getManifest))
+        var responses: [WireMessage] = []
+        while true {
+            let out = pair.server.receive(input, now: wireT0)
+            input = Data()
+            #expect(out.outbound.count <= 1)
+            responses += out.outbound
+            if !pair.server.hasPendingInput { break }
+        }
+        #expect(responses == ids.map { .manifest($0, json: json) })
+        #expect(pair.server.bufferedInputByteCount == 0)
+    }
+
+    @Test func coalescedGetsBoundBusyRepliesAndPreserveRequestOrder() throws {
+        let contents = [syntheticBytes(1), syntheticBytes(1, seed: 2)]
+        let limits = try WireLimits(maxConcurrentRequests: 2)
+        var pair = SessionPair(provider: .serving(contents), serverLimits: limits)
+        let ids = (1...5).map { requestID(UInt32($0)) }
+        let hash = ContentHash.digest(contents[0])
+        var input = WireCodec.encode(ids.map { .get($0, hash: hash, credit: 1) })
+        var responses: [WireMessage] = []
+        while true {
+            let out = pair.server.receive(input, now: wireT0)
+            input = Data()
+            #expect(out.outbound.count <= 1)
+            responses += out.outbound
+            if !pair.server.hasPendingInput { break }
+        }
+        #expect(responses == ids.dropFirst(2).map { .error($0, .busy) })
+        #expect(pair.server.activeTransfers == 2)
+        let completed = pair.server.pull(now: wireT0)
+        #expect(completed.outbound == [
+            .data(ids[0], offset: 0, bytes: contents[0]), .end(ids[0], totalBytes: 1),
+            .data(ids[1], offset: 0, bytes: contents[0]), .end(ids[1], totalBytes: 1),
+        ])
+    }
+
+    @Test func violationAfterCoalescedManifestRepliesIsStillDetected() throws {
+        let manifest = try syntheticManifest(entries: 1)
+        let json = try ManifestCodec.encode(manifest)
+        var pair = SessionPair(provider: TestProvider(manifestValue: manifest))
+        let input = WireCodec.encode([
+            .getManifest(requestID(1)), .getManifest(requestID(2)),
+        ]) + rawFrame(WireMessageType.data.rawValue, be32(13) + be32(1) + be64(0) + [1])
+        var bytes = input
+        var responses: [WireMessage] = []
+        var closed = false
+        var finalEvents: [WireServerEvent] = []
+        repeat {
+            let out = pair.server.receive(bytes, now: wireT0)
+            bytes = Data()
+            responses += out.outbound
+            finalEvents = out.events
+            closed = out.closeTransport
+        } while pair.server.hasPendingInput && !closed
+        #expect(responses.count == 3)
+        #expect(responses[0] == .manifest(requestID(1), json: json))
+        #expect(responses[1] == .manifest(requestID(2), json: json))
+        #expect(responses[2] == .error(nil, .protocolViolation))
+        #expect(finalEvents == [.closed(.violation(.unexpectedFrame(.data)))])
+        #expect(pair.server.bufferedInputByteCount == 0)
+    }
+
     @Test func manifestLargerThanTheClientAcceptsIsRefused() throws {
         let manifest = try syntheticManifest(entries: 20)
         #expect(try ManifestCodec.encode(manifest).count > 1_024)
@@ -389,7 +458,15 @@ struct WireSessionTests {
     @Test func serverRefusesAClientThatBreaksTheProtocol() throws {
         func violation(_ frames: [WireMessage]) -> WireCloseReason? {
             var pair = SessionPair(provider: .serving([syntheticBytes(100)]))
-            let out = pair.server.receive(WireCodec.encode(frames), now: wireT0)
+            var input = WireCodec.encode(frames)
+            var out = WireServerOutput()
+            repeat {
+                let next = pair.server.receive(input, now: wireT0)
+                input = Data()
+                out.outbound += next.outbound
+                out.events += next.events
+                out.closeTransport = next.closeTransport
+            } while pair.server.hasPendingInput && !out.closeTransport
             #expect(out.outbound.last == .error(nil, .protocolViolation))
             #expect(out.closeTransport)
             if case .closed(let reason) = out.events.last { return reason }
@@ -451,8 +528,16 @@ struct WireSessionTests {
             .getManifest(requestID(1)),
             .getManifest(requestID(2)),
         ])
-        let serverOutput = server.receive(serverInput, now: wireT0)
-        #expect(serverOutput.events.last == .closed(.violation(.requestIDOutOfOrder(requestID(1)))))
+        var input = serverInput
+        var serverEvents: [WireServerEvent] = []
+        var closed = false
+        repeat {
+            let out = server.receive(input, now: wireT0)
+            input = Data()
+            serverEvents += out.events
+            closed = out.closeTransport
+        } while server.hasPendingInput && !closed
+        #expect(serverEvents.last == .closed(.violation(.requestIDOutOfOrder(requestID(1)))))
         #expect(server.bufferedInputByteCount == 0)
     }
 }

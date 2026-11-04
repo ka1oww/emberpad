@@ -39,9 +39,10 @@ public enum WireServerEvent: Equatable, Sendable {
     case closed(WireCloseReason)
 }
 
-/// The Mac side of the sync protocol as a pure state machine. `receive` answers control frames at once; file bytes
-/// are produced only by `pull`, so the driver sends DATA as fast as its transport accepts it and never more than
-/// the client has granted. Every request gets exactly one terminal frame: MANIFEST, END or a request ERROR.
+/// The Mac side of the sync protocol as a pure state machine. `receive` emits at most one frame per call; after
+/// sending it, a driver should resume with `receive(Data(), now:)` while `hasPendingInput` before reading more
+/// transport bytes. File bytes are produced only by `pull`, never more than the client has granted. Every request
+/// gets exactly one terminal frame: MANIFEST, END or a request ERROR.
 public struct WireServerSession: Sendable {
     public typealias Instant = ContinuousClock.Instant
 
@@ -80,14 +81,17 @@ public struct WireServerSession: Sendable {
 
     public var activeTransfers: Int { transfers.count }
     var bufferedInputByteCount: Int { decoder.bufferedByteCount }
+    public var hasPendingInput: Bool { decoder.hasPendingInput }
     /// Some transfer has credit and bytes left, so `pull` would produce DATA.
     public var hasPendingData: Bool { transfers.values.contains { $0.credit > 0 } }
 
+    /// Emits at most one frame. Send it before resuming pending input with an empty `bytes` value; do so until
+    /// `hasPendingInput` is false before reading more from the transport.
     public mutating func receive(_ bytes: Data, now: Instant) -> WireServerOutput {
         var out = WireServerOutput()
         guard !isClosed else { return out }
         decoder.append(bytes)
-        while !isClosed {
+        while !isClosed, out.outbound.isEmpty {
             do {
                 guard let message = try decoder.next() else { break }
                 handle(message, now: now, &out)

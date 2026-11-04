@@ -9,12 +9,18 @@ func serveLoopback(_ transport: InMemoryWireTransport, provider: TestProvider, l
                    frozenAfterHello: Bool = false) async -> WireServerSession.Phase {
     var session = WireServerSession(provider: provider, limits: limits, now: .now)
     do {
-        while let bytes = try await transport.receive() {
-            let out = session.receive(bytes, now: .now)
-            if frozenAfterHello, out.events.isEmpty { continue }
-            if !out.outbound.isEmpty { try await transport.send(out.bytes) }
-            if out.closeTransport { break }
-            while session.hasPendingData { try await transport.send(session.pull(now: .now, maxFrames: 4).bytes) }
+        connection: while let bytes = try await transport.receive() {
+            var input = bytes
+            repeat {
+                let out = session.receive(input, now: .now)
+                input = Data()
+                let frozen = frozenAfterHello && out.events.isEmpty
+                if !frozen, !out.outbound.isEmpty { try await transport.send(out.bytes) }
+                if out.closeTransport { break connection }
+                if !frozen {
+                    while session.hasPendingData { try await transport.send(session.pull(now: .now, maxFrames: 4).bytes) }
+                }
+            } while session.hasPendingInput
         }
         _ = session.transportClosed()
     } catch {

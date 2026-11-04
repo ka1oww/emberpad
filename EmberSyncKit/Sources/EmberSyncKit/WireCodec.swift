@@ -76,6 +76,8 @@ public struct WireFrameDecoder: Sendable {
         }
     }
 
+    public var hasPendingInput: Bool { pendingInputIndex < pendingInputs.count }
+
     public mutating func append(_ bytes: Data) {
         guard failure == nil, !bytes.isEmpty else { return }
         pendingInputs.append(bytes)
