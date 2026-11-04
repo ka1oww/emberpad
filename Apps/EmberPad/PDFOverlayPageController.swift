@@ -13,6 +13,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private let picker: PKToolPicker
     private var pickerItems: [WorksheetTool: AnyObject] = [:]
     private var currentPage = 0
+    private var studentPage = 0
     private var menuTool: WorksheetTool?
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
@@ -64,7 +65,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         }
         pdfView.document = session.pdf
         session.drawingDidChange = { [weak self] page, _ in
-            guard let self, page == self.currentPage else { return }
+            guard let self, page == self.studentPage else { return }
             self.publishPage()
         }
         pageObserver = NotificationCenter.default.addObserver(forName: .PDFViewPageChanged, object: pdfView, queue: .main) { [weak self] _ in
@@ -152,8 +153,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     @available(iOS 18.0, *)
     func toolPickerSelectedToolItemDidChange(_ toolPicker: PKToolPicker) { menuTool = nil }
 
-    private func focus(_ canvas: PKCanvasView) {
+    func focus(_ canvas: PKCanvasView) {
         activeCanvas = canvas
+        if let page = canvases.first(where: { $0.value === canvas })?.key {
+            studentPage = page
+            publishPage()
+        }
         for candidate in canvases.values { candidate.drawingGestureRecognizer.isEnabled = candidate === canvas }
         if let menuTool { canvas.tool = menuTool.pencilTool }
         else if #available(iOS 18.0, *) {
@@ -172,15 +177,18 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         guard index != NSNotFound, index != currentPage else { return }
         currentPage = index
         if let canvas = canvases[currentPage] { focus(canvas) }
+        else {
+            studentPage = index
+            publishPage()
+        }
         onPageChange?(index)
-        publishPage()
     }
 
     private func publishPage() {
-        guard let page = session.pdf.page(at: currentPage) else { return }
-        let size = canvases[currentPage]?.bounds.size ?? page.bounds(for: .cropBox).size
-        student.snapshot = StudentPageSnapshot(documentID: session.record.id, pageIndex: currentPage, page: page,
-                                                drawing: session.drawing(on: currentPage), canvasSize: size)
+        guard let page = session.pdf.page(at: studentPage) else { return }
+        let size = canvases[studentPage]?.bounds.size ?? page.bounds(for: .cropBox).size
+        student.snapshot = StudentPageSnapshot(documentID: session.record.id, pageIndex: studentPage, page: page,
+                                                drawing: session.drawing(on: studentPage), canvasSize: size)
     }
 }
 

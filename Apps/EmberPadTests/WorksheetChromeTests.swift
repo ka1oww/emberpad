@@ -101,6 +101,37 @@ final class WorksheetChromeTests: XCTestCase {
         )
     }
 
+    func testInkOnFocusedSecondPagePublishesWithoutChangingViewportPage() async throws {
+        let session = try await Self.makeSession(pages: 2)
+        let student = StudentDisplayModel()
+        let controller = PDFOverlayPageController(session: session, student: student)
+        controller.loadViewIfNeeded()
+
+        let pdfView = try XCTUnwrap(Self.findPDFView(in: controller.view))
+        let firstPage = try XCTUnwrap(pdfView.currentPage)
+        XCTAssertEqual(session.pdf.index(for: firstPage), 0)
+
+        let secondPage = try XCTUnwrap(session.pdf.page(at: 1))
+        let canvas = try XCTUnwrap(controller.pdfView(PDFView(), overlayViewFor: secondPage) as? PKCanvasView)
+        controller.focus(canvas)
+
+        let points = (0..<2).map { index in
+            PKStrokePoint(location: CGPoint(x: Double(index) * 10, y: 5), timeOffset: Double(index) * 0.01,
+                          size: CGSize(width: 2, height: 2), opacity: 1, force: 0.5, azimuth: 1.2, altitude: 0.9)
+        }
+        let drawing = PKDrawing(strokes: [PKStroke(
+            ink: PKInk(.pen, color: .black),
+            path: PKStrokePath(controlPoints: points, creationDate: Date())
+        )])
+        canvas.drawing = drawing
+        controller.canvasViewDrawingDidChange(canvas)
+
+        let snapshot = try XCTUnwrap(student.snapshot)
+        XCTAssertEqual(snapshot.pageIndex, 1)
+        XCTAssertEqual(snapshot.drawing, drawing)
+        XCTAssertEqual(session.pdf.index(for: try XCTUnwrap(pdfView.currentPage)), 0)
+    }
+
     // MARK: - Fixtures
 
     private static func makeSession(pages: Int) async throws -> DocumentSession {
