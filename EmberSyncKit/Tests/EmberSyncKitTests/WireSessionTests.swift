@@ -431,4 +431,28 @@ struct WireSessionTests {
         let server = pair.server.receive(Data([WireMessageType.get.rawValue, 0, 0, 1, 0]), now: wireT0)
         #expect(server.events == [.closed(.violation(.frameTooLarge(.get, length: 256)))])
     }
+
+    @Test func sessionStateViolationDropsAllCoalescedInputOnBothSides() throws {
+        var client = WireClientSession()
+        _ = client.start(now: wireT0)
+        let clientInput = WireCodec.encode([
+            .hello(WireLimits.standard.hello(role: .server)),
+            .manifest(requestID(99), json: Data("{}".utf8)),
+            .data(requestID(1), offset: 0, bytes: syntheticBytes(100)),
+        ])
+        let clientOutput = client.receive(clientInput, now: wireT0)
+        #expect(clientOutput.events.last == .closed(.violation(.unknownRequest(requestID(99)))))
+        #expect(client.bufferedInputByteCount == 0)
+
+        var server = WireServerSession(provider: TestProvider(), now: wireT0)
+        let serverInput = WireCodec.encode([
+            .hello(WireLimits.standard.hello(role: .client)),
+            .getManifest(requestID(1)),
+            .getManifest(requestID(1)),
+            .getManifest(requestID(2)),
+        ])
+        let serverOutput = server.receive(serverInput, now: wireT0)
+        #expect(serverOutput.events.last == .closed(.violation(.requestIDOutOfOrder(requestID(1)))))
+        #expect(server.bufferedInputByteCount == 0)
+    }
 }

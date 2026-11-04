@@ -77,6 +77,7 @@ public struct WireClientSession: Sendable {
 
     /// Requests in flight, including cancelled ones the server has not acknowledged yet.
     public var requestsInFlight: Int { requests.count }
+    var bufferedInputByteCount: Int { decoder.bufferedByteCount }
 
     public mutating func start(now: Instant) -> WireClientOutput {
         var out = WireClientOutput()
@@ -317,6 +318,7 @@ public struct WireClientSession: Sendable {
             out.events.append(.failed(id, .connectionClosed))
         }
         requests = [:]
+        decoder.discardPendingInput()
         phase = .closed(reason)
         out.events.append(.closed(reason))
         out.closeTransport = true

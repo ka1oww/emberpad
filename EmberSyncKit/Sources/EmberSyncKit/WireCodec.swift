@@ -50,14 +50,15 @@ public enum WireCodec {
 }
 
 /// Incremental frame decoder for one direction of a connection. It rejects unknown, out-of-direction and oversized
-/// frames as soon as their headers arrive, before buffering their payload. After the first violation it stays failed.
+/// frames before copying their payload. After the first violation it stays failed.
 public struct WireFrameDecoder: Sendable {
     private let accepted: Set<WireMessageType>
     private let maxChunkBytes: UInt32
     private let maxManifestBytes: UInt32
     private var buffer: [UInt8] = []
-    private var messages: [WireMessage] = []
-    private var messageIndex = 0
+    private var pendingInputs: [Data] = []
+    private var pendingInputIndex = 0
+    private var pendingInputOffset = 0
     private var failure: WireViolation?
 
     public init(accepting accepted: Set<WireMessageType>, maxChunkBytes: UInt32, maxManifestBytes: UInt32) {
@@ -66,83 +67,132 @@ public struct WireFrameDecoder: Sendable {
         self.maxManifestBytes = min(max(maxManifestBytes, WireProtocol.manifestSizeBounds.lowerBound), WireProtocol.manifestSizeBounds.upperBound)
     }
 
-    /// Bytes held for the current incomplete frame.
-    public var bufferedByteCount: Int { buffer.count }
+    /// Bytes held as unprocessed input or for the current incomplete frame.
+    public var bufferedByteCount: Int {
+        pendingInputs.enumerated().reduce(buffer.count) { count, element in
+            let remaining = element.offset == pendingInputIndex ? element.element.count - pendingInputOffset : element.element.count
+            let (sum, overflow) = count.addingReportingOverflow(remaining)
+            return overflow ? .max : sum
+        }
+    }
 
     public mutating func append(_ bytes: Data) {
-        guard failure == nil else { return }
-        bytes.withUnsafeBytes { rawBytes in
-            let input = rawBytes.bindMemory(to: UInt8.self)
-            var offset = 0
-            while offset < input.count, failure == nil {
-                if buffer.isEmpty {
-                    let rawType = input[offset]
-                    offset += 1
-                    guard let type = WireMessageType(rawValue: rawType) else {
-                        fail(.unknownFrameType(rawType))
-                        break
-                    }
-                    guard accepted.contains(type) else {
-                        fail(.unexpectedFrame(type))
-                        break
-                    }
-                    buffer.append(rawType)
-                }
-
-                if buffer.count < WireProtocol.headerSize {
-                    let count = min(WireProtocol.headerSize - buffer.count, input.count - offset)
-                    buffer.append(contentsOf: input[offset..<(offset + count)])
-                    offset += count
-                    if buffer.count < WireProtocol.headerSize { break }
-                }
-
-                let type = WireMessageType(rawValue: buffer[0])!
-                var header = WireReader(buffer[1..<WireProtocol.headerSize])
-                let length = header.uint32()
-                let bounds = payloadBounds(type)
-                guard length <= bounds.upperBound else {
-                    fail(.frameTooLarge(type, length: length))
-                    break
-                }
-                guard length >= bounds.lowerBound else {
-                    fail(.malformedPayload(type))
-                    break
-                }
-
-                let frameLength = WireProtocol.headerSize + Int(length)
-                let count = min(frameLength - buffer.count, input.count - offset)
-                buffer.append(contentsOf: input[offset..<(offset + count)])
-                offset += count
-                if buffer.count < frameLength { break }
-
-                do {
-                    messages.append(try Self.parse(type, buffer[WireProtocol.headerSize..<frameLength]))
-                    buffer.removeAll(keepingCapacity: true)
-                } catch {
-                    fail(.malformedPayload(type))
-                }
-            }
-        }
+        guard failure == nil, !bytes.isEmpty else { return }
+        pendingInputs.append(bytes)
     }
 
     /// The next complete frame, nil when more bytes are needed.
     public mutating func next() throws(WireViolation) -> WireMessage? {
-        if messageIndex < messages.count {
-            let message = messages[messageIndex]
-            messageIndex += 1
-            if messageIndex == messages.count {
-                messages.removeAll(keepingCapacity: true)
-                messageIndex = 0
-            }
-            return message
-        }
         if let failure { throw failure }
-        return nil
+        if buffer.isEmpty {
+            guard let rawType = peekPendingByte() else { return nil }
+            guard let type = WireMessageType(rawValue: rawType) else {
+                fail(.unknownFrameType(rawType))
+                throw .unknownFrameType(rawType)
+            }
+            guard accepted.contains(type) else {
+                fail(.unexpectedFrame(type))
+                throw .unexpectedFrame(type)
+            }
+            buffer += takePendingBytes(upTo: 1)
+        }
+
+        if buffer.count < WireProtocol.headerSize {
+            buffer += takePendingBytes(upTo: WireProtocol.headerSize - buffer.count)
+            if buffer.count < WireProtocol.headerSize { return nil }
+        }
+
+        let type = WireMessageType(rawValue: buffer[0])!
+        var header = WireReader(buffer[1..<WireProtocol.headerSize])
+        let length = header.uint32()
+        let bounds = payloadBounds(type)
+        guard length <= bounds.upperBound else {
+            fail(.frameTooLarge(type, length: length))
+            throw .frameTooLarge(type, length: length)
+        }
+        guard length >= bounds.lowerBound else {
+            fail(.malformedPayload(type))
+            throw .malformedPayload(type)
+        }
+
+        let frameLength = WireProtocol.headerSize + Int(length)
+        if buffer.count == WireProtocol.headerSize, hasPendingBytes(atLeast: Int(length)) {
+            let payload = takePendingBytes(upTo: Int(length))
+            do {
+                let message = try Self.parse(type, payload[...])
+                buffer.removeAll(keepingCapacity: true)
+                return message
+            } catch {
+                fail(.malformedPayload(type))
+                throw .malformedPayload(type)
+            }
+        }
+
+        if buffer.count < frameLength {
+            buffer += takePendingBytes(upTo: frameLength - buffer.count)
+            if buffer.count < frameLength { return nil }
+        }
+
+        do {
+            let message = try Self.parse(type, buffer[WireProtocol.headerSize..<frameLength])
+            buffer.removeAll(keepingCapacity: true)
+            return message
+        } catch {
+            fail(.malformedPayload(type))
+            throw .malformedPayload(type)
+        }
+    }
+
+    mutating func discardPendingInput() {
+        buffer.removeAll(keepingCapacity: false)
+        pendingInputs.removeAll(keepingCapacity: false)
+        pendingInputIndex = 0
+        pendingInputOffset = 0
+    }
+
+    private func hasPendingBytes(atLeast count: Int) -> Bool {
+        var available = 0
+        for index in pendingInputIndex..<pendingInputs.count {
+            let remaining = pendingInputs[index].count - (index == pendingInputIndex ? pendingInputOffset : 0)
+            if remaining >= count - available { return true }
+            available += remaining
+        }
+        return false
+    }
+
+    private func peekPendingByte() -> UInt8? {
+        guard pendingInputIndex < pendingInputs.count else { return nil }
+        let input = pendingInputs[pendingInputIndex]
+        guard pendingInputOffset < input.count else { return nil }
+        return input[input.startIndex + pendingInputOffset]
+    }
+
+    private mutating func takePendingBytes(upTo limit: Int) -> [UInt8] {
+        var bytes: [UInt8] = []
+        while bytes.count < limit, pendingInputIndex < pendingInputs.count {
+            let input = pendingInputs[pendingInputIndex]
+            let count = min(limit - bytes.count, input.count - pendingInputOffset)
+            if count > 0 {
+                let start = input.startIndex + pendingInputOffset
+                bytes.append(contentsOf: input[start..<(start + count)])
+                pendingInputOffset += count
+            }
+            if pendingInputOffset == input.count {
+                pendingInputs[pendingInputIndex] = Data()
+                pendingInputIndex += 1
+                pendingInputOffset = 0
+            }
+        }
+        if pendingInputIndex == pendingInputs.count {
+            pendingInputs.removeAll(keepingCapacity: false)
+            pendingInputIndex = 0
+        }
+        return bytes
     }
 
     private mutating func fail(_ violation: WireViolation) {
         failure = violation
-        buffer.removeAll(keepingCapacity: false)
+        discardPendingInput()
     }
 
     private func payloadBounds(_ type: WireMessageType) -> ClosedRange<UInt32> {

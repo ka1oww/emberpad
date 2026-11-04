@@ -79,6 +79,7 @@ public struct WireServerSession: Sendable {
     }
 
     public var activeTransfers: Int { transfers.count }
+    var bufferedInputByteCount: Int { decoder.bufferedByteCount }
     /// Some transfer has credit and bytes left, so `pull` would produce DATA.
     public var hasPendingData: Bool { transfers.values.contains { $0.credit > 0 } }
 
@@ -261,6 +262,7 @@ public struct WireServerSession: Sendable {
 
     private mutating func close(_ reason: WireCloseReason, _ out: inout WireServerOutput) {
         transfers = [:]
+        decoder.discardPendingInput()
         phase = .closed(reason)
         out.events.append(.closed(reason))
         out.closeTransport = true

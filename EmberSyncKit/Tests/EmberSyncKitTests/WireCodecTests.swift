@@ -128,8 +128,20 @@ struct WireCodecTests {
     @Test func oversizedHeaderRejectsCoalescedPayloadBeforeRetainingIt() {
         var decoder = WireFrameDecoder(accepting: Self.allTypes, maxChunkBytes: 1_024, maxManifestBytes: 4_096)
         decoder.append(Data([WireMessageType.data.rawValue, 0, 0, 4, 13]) + syntheticBytes(2_000_000))
-        #expect(decoder.bufferedByteCount == 0)
         #expect(throws: WireViolation.frameTooLarge(.data, length: 1_037)) { try decoder.next() }
+        #expect(decoder.bufferedByteCount == 0)
+    }
+
+    @Test func coalescedFramesDecodeOneAtATimeAndFailureDropsRemainingInput() throws {
+        let first = WireMessage.window(requestID(1), increment: 100)
+        let second = WireMessage.cancel(requestID(2))
+        var decoder = WireFrameDecoder(accepting: Self.allTypes, maxChunkBytes: 1_024, maxManifestBytes: 4_096)
+        decoder.append(WireCodec.encode([first, second]) + Data([0xee]) + syntheticBytes(2_000_000))
+
+        #expect(try decoder.next() == first)
+        #expect(try decoder.next() == second)
+        #expect(throws: WireViolation.unknownFrameType(0xee)) { try decoder.next() }
+        #expect(decoder.bufferedByteCount == 0)
     }
 
     @Test func chunkAndManifestLimitsAreTheReceiversOwn() {
