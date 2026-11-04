@@ -64,6 +64,7 @@ private actor WirePipe {
     }
 
     func write(_ data: Data) async throws {
+        guard !closed else { throw WireTransportError.closed }
         guard !writing else { throw WireTransportError.concurrentSend }
         writing = true
         defer { writing = false }

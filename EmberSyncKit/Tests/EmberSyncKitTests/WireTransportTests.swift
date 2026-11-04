@@ -110,6 +110,8 @@ struct WireTransportTests {
         #expect(try await b.receive() == nil)
         await #expect(throws: WireTransportError.closed) { try await b.send(Data([4])) }
         await #expect(throws: WireTransportError.closed) { try await a.send(Data([4])) }
+        await #expect(throws: WireTransportError.closed) { try await b.send(Data()) }
+        await #expect(throws: WireTransportError.closed) { try await a.send(Data()) }
         #expect(try await a.receive() == nil)
     }
 
