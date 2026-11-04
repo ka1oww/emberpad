@@ -14,7 +14,7 @@ final class DeviceChecksPeerHelloTests: XCTestCase {
     func testLogLineForAFinishedRunCarriesThroughputAndInterface() {
         let line = DeviceChecksPeerHelloLog.line(date: date, service: "EmberPad Companion (debug)", state: .finished(report))
         XCTAssertTrue(line.hasSuffix(" peerHello service=\"EmberPad Companion (debug)\" result=ok bytes=50000000 " +
-                                     "seconds=2.000 mbps=25.0 echoMs=2.1 verified=true pathInterfacesAvailable=awdl0"), line)
+                                     "seconds=2.000 mbps=25.0 echoMs=2.1 verified=true pathInterface=awdl0"), line)
         let timestamp = line.split(separator: " ").first.map(String.init) ?? ""
         XCTAssertNotNil(ISO8601DateFormatter().date(from: timestamp), line)
     }

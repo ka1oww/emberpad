@@ -126,16 +126,16 @@ enum DeviceChecksPeerHelloLog {
     }()
 
     /// e.g. `2026-11-03T12:00:00Z peerHello service="EmberPad Companion (debug)" result=ok
-    /// bytes=50000000 seconds=2.000 mbps=25.0 echoMs=2.0 verified=true pathInterfacesAvailable=awdl0`.
+    /// bytes=50000000 seconds=2.000 mbps=25.0 echoMs=2.0 verified=true pathInterface=awdl0`.
     static func line(date: Date, service: String, state: DeviceChecksPeerHelloModel.RunState) -> String {
         let prefix = "\(timestampFormatter.string(from: date)) peerHello service=\(quoted(service))"
         switch state {
         case .finished(let report):
             guard report.verified else { return prefix + " result=failed error=\(quoted("Transfer was not verified"))" }
-            let available = report.pathInterfaces.isEmpty ? "unknown" : report.pathInterfaces.joined(separator: ",")
-            return prefix + String(format: " result=ok bytes=%d seconds=%.3f mbps=%.1f echoMs=%.1f verified=true pathInterfacesAvailable=%@",
+            let interface = report.pathInterfaces.isEmpty ? "unknown" : report.pathInterfaces.joined(separator: ",")
+            return prefix + String(format: " result=ok bytes=%d seconds=%.3f mbps=%.1f echoMs=%.1f verified=true pathInterface=%@",
                                    report.bytes, report.seconds, report.megabytesPerSecond,
-                                   report.echoRoundTripSeconds * 1000, available)
+                                   report.echoRoundTripSeconds * 1000, interface)
         case .failed(let text):
             return prefix + " result=failed error=\(quoted(text))"
         case .idle, .running:
@@ -188,8 +188,8 @@ struct DeviceChecksPeerHelloSection: View {
                 Text("Log write failed: \(error)").foregroundStyle(.red).font(.footnote)
             }
             Text("Start the listener in the Companion's Debug section first. Keep Wi-Fi on on both devices; " +
-                 "neither needs to join a network. The result reports interfaces available on each connection's " +
-                 "NWPath as Network.framework reports them; this does not identify which carried traffic. " +
+                 "neither needs to join a network. The result reports the path interface Network.framework " +
+                 "reports for each connection; this does not prove peer-to-peer Wi-Fi was used. " +
                  "The proof is a successful on-device run while neither device is joined to a network. " +
                  "Synthetic bytes only; the result is added to the check log.")
                 .font(.footnote).foregroundStyle(.secondary)

@@ -40,8 +40,11 @@ public enum PeerHello {
         return error.debugDescription
     }
 
-    static func availableInterfaceNames(_ path: NWPath?) -> [String] {
-        path?.availableInterfaces.map(\.name) ?? []
+    static func pathInterfaceNames(_ path: NWPath?) -> [String] {
+        guard let path else { return [] }
+        return path.availableInterfaces
+            .filter { path.usesInterfaceType($0.type) }
+            .map(\.name)
     }
 }
 
@@ -52,7 +55,7 @@ public struct PeerHelloReport: Equatable, Sendable {
     public let bytes: Int
     public let seconds: Double
     public let verified: Bool
-    /// Interfaces listed as available on this connection's NWPath when it became ready.
+    /// Interfaces whose types this connection's current NWPath reports as in use.
     public let pathInterfaces: [String]
 
     public init(serverProtocolID: String, echoRoundTripSeconds: Double, bytes: Int, seconds: Double,
@@ -74,10 +77,10 @@ public struct PeerHelloReport: Equatable, Sendable {
 
     /// One line for the screen and the device-check log.
     public var summary: String {
-        let available = pathInterfaces.isEmpty ? "unknown" : pathInterfaces.joined(separator: ",")
-        return String(format: "%.1f MB in %.2f s = %.1f MB/s, echo %.1f ms, %@, path interfaces available (Network.framework): %@",
+        let interface = pathInterfaces.isEmpty ? "unknown" : pathInterfaces.joined(separator: ",")
+        return String(format: "%.1f MB in %.2f s = %.1f MB/s, echo %.1f ms, %@, path interface (Network.framework): %@",
                       Double(bytes) / 1_000_000, seconds, megabytesPerSecond, echoRoundTripSeconds * 1000,
-                      verified ? "verified" : "NOT verified", available)
+                      verified ? "verified" : "NOT verified", interface)
     }
 }
 
@@ -213,7 +216,7 @@ private final class ServerSession: @unchecked Sendable {
             guard let self else { return }
             switch state {
             case .ready:
-                self.pathInterfaces = PeerHello.availableInterfaceNames(self.connection.currentPath)
+                self.pathInterfaces = PeerHello.pathInterfaceNames(self.connection.currentPath)
             case .failed, .cancelled: self.close()
             default: break
             }
@@ -438,7 +441,7 @@ public final class PeerHelloClient: @unchecked Sendable {
 
     private func connected() {
         guard phase == .connecting else { return }
-        pathInterfaces = PeerHello.availableInterfaceNames(connection?.currentPath)
+        pathInterfaces = PeerHello.pathInterfaceNames(connection?.currentPath)
         phase = .hello
         send(PeerHelloFrame(.hello, payload: Data(PeerHello.protocolID.utf8)))
         receive()
