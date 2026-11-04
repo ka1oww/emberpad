@@ -8,9 +8,9 @@ Base code for a personal offline iPad teaching app. The Ember House colour token
 | --- | --- |
 | `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; local package dependency |
 | `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink, student-display scene and the pairing-code scanner |
-| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, phase-2 placeholders, with no networking |
+| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, phase-2 placeholders; no sync networking, only the Debug-only peer-to-peer hello listener |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
-| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, pairing credentials with their Keychain store and TLS-PSK connection parameters, and tests |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, the Debug-only peer-to-peer hello framing and transport, pairing credentials with their Keychain store and TLS-PSK connection parameters, and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script with its optional Outbox delivery, format helpers, disabled example config and LaunchAgent template |
 
@@ -57,7 +57,7 @@ The app's `DocumentSession` owns every page drawing and updates from `canvasView
 
 Same path and checksum is a replay. New bytes without ink replace the current copy while retaining the prior folder in hidden `.Previous` for 30 days. New bytes with ink create an **Updated** copy and mark the annotated one **Older version**; ink never moves to new bytes. An open, uninked worksheet is pinned: changed deliveries wait until the editor closes so an old canvas cannot write onto a replacement PDF. Recheck Inbox after closing it. Previous-version pruning is an explicit store operation; the base keeps versions conservatively until that maintenance path is wired.
 
-The complete-manifest planner also returns archive and no-download relink actions for Mac deletion/rename. Ambiguous identical hashes are imported and archived conservatively rather than assigning somebody else's ink. Phase 2 will apply full manifests through a transport; the current base has no networking or cloud folder access.
+The complete-manifest planner also returns archive and no-download relink actions for Mac deletion/rename. Ambiguous identical hashes are imported and archived conservatively rather than assigning somebody else's ink. Phase 2 will apply full manifests through a transport; the current base has no sync networking or cloud folder access (Debug builds carry only the synthetic peer-to-peer hello below).
 
 ### Library model v2
 
@@ -117,6 +117,17 @@ The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`.
 Debug builds expose **Device checks** in the library's Debug section, with pass/fail results for the scene, log, PDF and Pencil checks. The probe appends scene and capture snapshots to `Documents/device-checks.log`, provides a runtime-generated synthetic writing-trial PDF, and can replace the external student scene with a solid-colour, role-labelled test pattern. Its scribble recorder accepts Pencil or touch input, labels each saved drawing `erase` or `keep`, and exports the collected stroke samples as versioned JSON through Files. Samples are held in recorder state and are not persisted unless exported; they are not added to the device-check log or uploaded. These controls are compiled out of Release builds.
 
 The student view's page snapshot can only be built through `StudentSafeDocument`, whose failable initializer accepts only a Student-role record, from a session that supplies that record's own page and drawing. A Teacher copy opened as the main page therefore shows **Teacher copy · private** on the student view, never its pages. `sceneCaptureState` hides private content when the main scene is captured without an external scene, and whenever inactive: a Teacher copy's pages and the private-answer pane then leave the view hierarchy and draw no pixels, rather than being blurred or covered. Pairing is not used by the presentation layer yet, and no private-answer URL is assigned. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
+
+### Peer-to-peer hello (Debug only)
+
+The Device checks screen's **Peer-to-peer hello** section and the Companion window's **Peer-to-peer hello (debug)** section prove the Mac and iPad can talk with neither joined to a network. The Companion's **Start** button opens an `NWListener` advertising `_emberws._tcp` as `EmberPad Companion (debug)`. The iPad browses for it, then **Echo and time 50 MB** connects, checks a 64-byte echo and sends 50,000,000 synthetic bytes. The Companion acknowledges the byte count and SHA-256, and the screen reports decimal MB/s plus the interface used (`awdl0` is peer-to-peer Wi-Fi). Results go to the pass/fail list and `Documents/device-checks.log`. The listener, browser and every connection set `includePeerToPeer`. Keep Wi-Fi on on both devices; neither needs to join a network. Both Info.plists declare `NSLocalNetworkUsageDescription` and `NSBonjourServices`, so each app asks for Local Network access the first time; if it is denied, the screens say so. There is no pairing, key or TLS (that is EP-22): any device in range can connect to a running Debug listener, so start it only for the check. The framing, server, browser and client live in `EmberSyncKit/Sources/EmberSyncKit/PeerHello*.swift` under `#if DEBUG`. A Release build contains none of them and does not link `Network.framework`.
+
+`swift test --package-path EmberSyncKit` runs the framing tests and an in-process 50 MB loopback transfer. To time the real Companion on one Mac, launch the Debug build with `-EmberPeerHelloAutostart YES`. It logs `EmberPad peer hello listening on port N`. Then run the skipped live test:
+
+```sh
+EMBERPAD_PEER_HELLO_PORT=N swift test --package-path EmberSyncKit --filter liveCompanion   # 127.0.0.1
+EMBERPAD_PEER_HELLO_BROWSE=1 swift test --package-path EmberSyncKit --filter liveCompanion # via Bonjour
+```
 
 The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or less, red below 24 hours, unknown when absent/malformed (normal for unsigned Simulator builds). This parses only a reminder, not a signature or security decision. The current display reports Inbox delivery time, not a fabricated network sync time.
 
