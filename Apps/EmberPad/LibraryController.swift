@@ -26,7 +26,6 @@ final class LibraryController: ObservableObject {
         case importFiles([URL], String)
         case archive(UUID)
         case unarchive(UUID)
-        case move(UUID, String)
         case flush
 
         var kind: Kind {
@@ -36,12 +35,11 @@ final class LibraryController: ObservableObject {
             case .importFiles: return .importFiles
             case .archive: return .archive
             case .unarchive: return .unarchive
-            case .move: return .move
             case .flush: return .flush
             }
         }
 
-        enum Kind: Equatable { case inbox, refresh, importFiles, archive, unarchive, move, flush }
+        enum Kind: Equatable { case inbox, refresh, importFiles, archive, unarchive, flush }
     }
 
     init(store: LibraryStore, inbox: URL) { self.store = store; self.inbox = inbox }
@@ -139,24 +137,6 @@ final class LibraryController: ObservableObject {
         await refresh(preservingFailureFor: operation)
     }
 
-    /// Long-press Move to class: files the same bytes under a new class folder via relink.
-    /// For v1 copies the subject follows the class folder; v2 publication metadata is preserved.
-    func moveDocument(_ id: UUID, toClassFolder classFolder: String) async {
-        let operation = FailedOperation.move(id, classFolder)
-        do {
-            let record = try await store.document(id)
-            guard record.role == .student else { throw LibraryError.invalidDocument }
-            let trimmed = classFolder.trimmingCharacters(in: .whitespacesAndNewlines)
-            let target = try SourcePath(classFolder: trimmed, relativePath: record.source.source.relativePath)
-            let entry = try ManifestEntry(source: target, sha256: record.source.sha256,
-                                          size: record.source.size, modifiedAt: record.source.modifiedAt,
-                                          publication: record.source.publication)
-            try await store.relink(documentID: id, entry: entry, status: record.status)
-            clearError(for: operation)
-        } catch { setError(error.localizedDescription, for: operation) }
-        await refresh(preservingFailureFor: operation)
-    }
-
     func refresh() async {
         await refresh(preservingFailureFor: nil)
     }
@@ -178,7 +158,6 @@ final class LibraryController: ObservableObject {
         case .importFiles(let urls, let className): await importFiles(urls, className: className)
         case .archive(let id): await archiveDocument(id)
         case .unarchive(let id): await unarchiveDocument(id)
-        case .move(let id, let className): await moveDocument(id, toClassFolder: className)
         case .flush, .none: await retryFlush()
         }
     }

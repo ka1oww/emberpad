@@ -4,35 +4,6 @@ import EmberSyncKit
 
 @MainActor
 final class LibraryControllerStatusTests: XCTestCase {
-    func testMovePreservesOlderAndArchivedStatuses() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
-        let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
-
-        let olderEntry = try entry(classFolder: "Synthetic Class", path: "older.pdf", key: "older-paper", bytes: "old")
-        let older = try await store.importPDF(data: Data("old".utf8), entry: olderEntry, pageCount: 1)
-        try await store.saveDrawing(Data("ink".utf8), documentID: older.id, page: 0, hasInk: true)
-        _ = try await store.importPDF(data: Data("new".utf8),
-                                     entry: entry(classFolder: "Synthetic Class", path: "older.pdf", key: "older-paper", bytes: "new"),
-                                     pageCount: 1)
-        let archived = try await store.importPDF(data: Data("archived".utf8),
-                                                 entry: entry(classFolder: "Synthetic Class", path: "archived.pdf", key: "archived-paper", bytes: "archived"),
-                                                 pageCount: 1)
-        try await store.archive(documentID: archived.id)
-        let library = LibraryController(store: store, inbox: inbox)
-
-        await library.moveDocument(older.id, toClassFolder: "Moved Older")
-        await library.moveDocument(archived.id, toClassFolder: "Moved Archived")
-
-        let movedOlder = try await store.document(older.id)
-        let movedArchived = try await store.document(archived.id)
-        XCTAssertEqual(movedOlder.status, .olderVersion)
-        XCTAssertEqual(movedOlder.source.source.classFolder, "Moved Older")
-        XCTAssertEqual(movedArchived.status, .archived)
-        XCTAssertEqual(movedArchived.source.source.classFolder, "Moved Archived")
-    }
-
     func testUnarchiveChoosesOlderWhenCurrentCopyExistsInClass() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

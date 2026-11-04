@@ -19,8 +19,6 @@ struct LibraryView: View {
     private let signingExpiryDate: Date?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var showImport = false
-    @State private var movingDocument: DocumentRecord?
-    @State private var moveClassName = ""
 
     init(library: LibraryController, presentation: PresentationState) {
         self.init(library: library, presentation: presentation, signingExpiryDate: Self.embeddedSigningExpiryDate)
@@ -246,8 +244,7 @@ struct LibraryView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 22)], spacing: 26) {
                         ForEach(library.visibleCards) { record in
                             LibraryCardCell(record: record, library: library, presentation: presentation,
-                                            thumbnails: thumbnails,
-                                            movingDocument: $movingDocument, moveClassName: $moveClassName)
+                                            thumbnails: thumbnails)
                         }
                     }
                     .padding(.horizontal, 24)
@@ -277,9 +274,6 @@ struct LibraryView: View {
             }
         }
         .refreshable { await library.fileInbox() }
-        .sheet(item: $movingDocument) { record in
-            MoveToClassSheet(library: library, record: record, className: $moveClassName)
-        }
         .task { await library.refresh() }
     }
 
@@ -386,8 +380,6 @@ private struct LibraryCardCell: View {
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
     @ObservedObject var thumbnails: ThumbnailCache
-    @Binding var movingDocument: DocumentRecord?
-    @Binding var moveClassName: String
 
     var body: some View {
         // Subscribes the card to thumbnail arrivals for this document version.
@@ -399,10 +391,6 @@ private struct LibraryCardCell: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("Move to class…", systemImage: "folder") {
-                moveClassName = record.source.source.classFolder
-                movingDocument = record
-            }
             if library.showingArchived {
                 Button("Unarchive", systemImage: "arrow.uturn.backward") {
                     Task { await library.unarchiveDocument(record.id) }
@@ -418,46 +406,6 @@ private struct LibraryCardCell: View {
         .task {
             await thumbnails.thumbnail(for: record)
         }
-    }
-}
-
-private struct MoveToClassSheet: View {
-    @ObservedObject var library: LibraryController
-    let record: DocumentRecord
-    @Binding var className: String
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Move to class") {
-                    TextField("Class folder", text: $className)
-                    if !library.classes.isEmpty {
-                        Menu("Use existing class") {
-                            ForEach(library.classes, id: \.self) { name in
-                                Button(name) { className = name }
-                            }
-                        }
-                    }
-                }
-                Section {
-                    Button("Move") {
-                        Task {
-                            await library.moveDocument(record.id, toClassFolder: className)
-                            if library.errorMessage == nil { dismiss() }
-                        }
-                    }
-                    .disabled(className.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    if let error = library.errorMessage {
-                        Text(error).foregroundStyle(Theme.danger)
-                    }
-                }
-                .tint(Theme.tint)
-            }
-            .navigationTitle("Move worksheet")
-            .toolbar { Button("Close") { dismiss() } }
-        }
-        .tint(Theme.tint)
     }
 }
 
