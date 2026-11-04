@@ -110,7 +110,7 @@ struct PeerHelloFramingTests {
         let report = PeerHelloReport(serverProtocolID: PeerHello.protocolID, echoRoundTripSeconds: 0.002,
                                      bytes: 50_000_000, seconds: 2, verified: true, pathInterfaces: ["awdl0"])
         #expect(report.megabytesPerSecond == 25)
-        #expect(report.summary == "50.0 MB in 2.00 s = 25.0 MB/s, echo 2.0 ms, verified, path interfaces available (Network.framework): awdl0")
+        #expect(report.summary == "50.0 MB in 2.00 s = 25.0 MB/s, echo 2.0 ms, verified, path interface (Network.framework): awdl0")
         #expect(PeerHelloReport.megabytesPerSecond(bytes: 1, seconds: 0) == 0)
     }
 }

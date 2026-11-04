@@ -38,6 +38,7 @@ struct PeerHelloLoopbackTests {
         #expect(report.seconds > 0)
         #expect(report.megabytesPerSecond > 1)
         #expect(report.pathInterfaces.contains("lo0"))
+        #expect(report.summary.contains("path interface (Network.framework): lo0"))
         print("EP-04 loopback client: \(report.summary)")
 
         for await event in events {

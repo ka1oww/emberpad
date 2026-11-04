@@ -97,9 +97,9 @@ final class CompanionPeerHelloModel: ObservableObject {
             connections = count
         case .transferReceived(let bytes, let seconds, let verified, let pathInterfaces):
             let rate = PeerHelloReport.megabytesPerSecond(bytes: bytes, seconds: seconds)
-            let available = pathInterfaces.isEmpty ? "unknown" : pathInterfaces.joined(separator: ",")
-            lastTransfer = String(format: "%.1f MB, %.1f MB/s, %@, path interfaces available (Network.framework): %@",
-                                  Double(bytes) / 1_000_000, rate, verified ? "verified" : "NOT verified", available)
+            let interface = pathInterfaces.isEmpty ? "unknown" : pathInterfaces.joined(separator: ",")
+            lastTransfer = String(format: "%.1f MB, %.1f MB/s, %@, path interface (Network.framework): %@",
+                                  Double(bytes) / 1_000_000, rate, verified ? "verified" : "NOT verified", interface)
             NSLog("EmberPad peer hello received %@", lastTransfer ?? "")
         }
     }
