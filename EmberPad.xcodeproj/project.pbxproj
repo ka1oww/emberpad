@@ -188,6 +188,7 @@
 				"SUPPORTED_PLATFORMS" = "macosx";
 				"ENABLE_APP_SANDBOX" = "NO";
 				"ENABLE_HARDENED_RUNTIME" = "NO";
+				"ONLY_ACTIVE_ARCH" = "YES";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
 			};
 			"name" = "Debug";
