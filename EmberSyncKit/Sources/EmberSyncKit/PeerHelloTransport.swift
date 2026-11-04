@@ -7,8 +7,9 @@ import Network
 //
 // The Companion runs `PeerHelloServer` (an `NWListener` advertising `_emberws._tcp`);
 // the iPad's Device checks screen runs `PeerHelloBrowser` and `PeerHelloClient`. Both
-// sides set `includePeerToPeer`, which is what lets the Mac and iPad find each other
-// over peer-to-peer Wi-Fi (AWDL) with neither joined to a network. There is no
+// sides set `includePeerToPeer`, enabling peer-to-peer discovery and connections
+// when available. A successful on-device run with neither joined to a network proves
+// that case. There is no
 // pairing, key or TLS here (EP-22), and only synthetic bytes move. Compiled out of
 // Release builds; the apps' Info.plists declare the service and the Local Network
 // usage string so the system prompt can appear.
@@ -21,8 +22,7 @@ public enum PeerHello {
     /// Largest transfer a server accepts, so a bad `bulkBegin` cannot pin it forever.
     public static let maxTransferBytes: UInt64 = 1 << 30
 
-    /// Plain TCP with peer-to-peer enabled. The listener, the browser and every
-    /// connection must all opt in, or AWDL is never used and the no-network case fails.
+    /// Plain TCP with peer-to-peer enabled for the listener, browser and connections.
     public static func parameters() -> NWParameters {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
@@ -40,7 +40,7 @@ public enum PeerHello {
         return error.debugDescription
     }
 
-    static func interfaceNames(_ path: NWPath?) -> [String] {
+    static func availableInterfaceNames(_ path: NWPath?) -> [String] {
         path?.availableInterfaces.map(\.name) ?? []
     }
 }
@@ -52,17 +52,17 @@ public struct PeerHelloReport: Equatable, Sendable {
     public let bytes: Int
     public let seconds: Double
     public let verified: Bool
-    /// Interfaces the connection's path used, e.g. `awdl0` for peer-to-peer Wi-Fi.
-    public let interfaces: [String]
+    /// Interfaces listed as available on this connection's NWPath when it became ready.
+    public let pathInterfaces: [String]
 
     public init(serverProtocolID: String, echoRoundTripSeconds: Double, bytes: Int, seconds: Double,
-                verified: Bool, interfaces: [String]) {
+                verified: Bool, pathInterfaces: [String]) {
         self.serverProtocolID = serverProtocolID
         self.echoRoundTripSeconds = echoRoundTripSeconds
         self.bytes = bytes
         self.seconds = seconds
         self.verified = verified
-        self.interfaces = interfaces
+        self.pathInterfaces = pathInterfaces
     }
 
     /// Decimal megabytes (10^6 bytes) per second.
@@ -74,10 +74,10 @@ public struct PeerHelloReport: Equatable, Sendable {
 
     /// One line for the screen and the device-check log.
     public var summary: String {
-        let via = interfaces.isEmpty ? "unknown" : interfaces.joined(separator: ",")
-        return String(format: "%.1f MB in %.2f s = %.1f MB/s, echo %.1f ms, %@, via %@",
+        let available = pathInterfaces.isEmpty ? "unknown" : pathInterfaces.joined(separator: ",")
+        return String(format: "%.1f MB in %.2f s = %.1f MB/s, echo %.1f ms, %@, path interfaces available (Network.framework): %@",
                       Double(bytes) / 1_000_000, seconds, megabytesPerSecond, echoRoundTripSeconds * 1000,
-                      verified ? "verified" : "NOT verified", via)
+                      verified ? "verified" : "NOT verified", available)
     }
 }
 
@@ -111,7 +111,7 @@ public enum PeerHelloServerEvent: Equatable, Sendable {
     case stopped
     case connections(Int)
     /// A transfer finished on the server side (`seconds` is first byte to last byte).
-    case transferReceived(bytes: Int, seconds: Double, verified: Bool, interfaces: [String])
+    case transferReceived(bytes: Int, seconds: Double, verified: Bool, pathInterfaces: [String])
 }
 
 /// Accepts hello connections, echoes, and counts and verifies the timed transfer.
@@ -198,6 +198,7 @@ private final class ServerSession: @unchecked Sendable {
     private var received: UInt64 = 0
     private var hasher = SHA256()
     private var firstByteAt: Double?
+    private var pathInterfaces: [String] = []
 
     init(connection: NWConnection, queue: DispatchQueue, onEvent: @escaping @Sendable (PeerHelloServerEvent) -> Void,
          onClose: @escaping (ObjectIdentifier) -> Void) {
@@ -209,8 +210,11 @@ private final class ServerSession: @unchecked Sendable {
 
     func start() {
         connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
             switch state {
-            case .failed, .cancelled: self?.close()
+            case .ready:
+                self.pathInterfaces = PeerHello.availableInterfaceNames(self.connection.currentPath)
+            case .failed, .cancelled: self.close()
             default: break
             }
         }
@@ -276,7 +280,7 @@ private final class ServerSession: @unchecked Sendable {
             send(PeerHelloPayload.bulkAck(receivedBytes: received, verified: verified))
             let seconds = firstByteAt.map { monotonicSeconds() - $0 } ?? 0
             onEvent(.transferReceived(bytes: Int(received), seconds: seconds, verified: verified,
-                                      interfaces: PeerHello.interfaceNames(connection.currentPath)))
+                                      pathInterfaces: pathInterfaces))
             self.expected = nil
         case .echoReply, .bulkAck:
             throw PeerHelloError.protocolViolation("client sent a server frame")
@@ -289,8 +293,8 @@ private final class ServerSession: @unchecked Sendable {
 public struct PeerHelloService: Hashable, Sendable, Identifiable {
     public let name: String
     public let endpoint: NWEndpoint
-    /// Interfaces the service was seen on, e.g. `awdl0` when found over peer-to-peer.
-    public let interfaces: [String]
+    /// Interfaces listed by the browse result during service discovery.
+    public let discoveryInterfaces: [String]
     public var id: String { "\(name)|\(endpoint.debugDescription)" }
 }
 
@@ -343,7 +347,8 @@ public final class PeerHelloBrowser: @unchecked Sendable {
     static func services(from results: Set<NWBrowser.Result>) -> [PeerHelloService] {
         results.compactMap { result -> PeerHelloService? in
             guard case .service(let name, _, _, _) = result.endpoint else { return nil }
-            return PeerHelloService(name: name, endpoint: result.endpoint, interfaces: result.interfaces.map(\.name).sorted())
+            return PeerHelloService(name: name, endpoint: result.endpoint,
+                                    discoveryInterfaces: result.interfaces.map(\.name).sorted())
         }.sorted { $0.id < $1.id }
     }
 }
@@ -370,6 +375,7 @@ public final class PeerHelloClient: @unchecked Sendable {
     private var started = false
     private var decoder = PeerHelloFrameDecoder()
     private var serverProtocolID = ""
+    private var pathInterfaces: [String] = []
     private let echoPayload = PeerHelloSyntheticBytes.chunk(position: 7, count: PeerHelloClient.echoBytes)
     private var echoSentAt = 0.0
     private var echoRoundTrip = 0.0
@@ -432,6 +438,7 @@ public final class PeerHelloClient: @unchecked Sendable {
 
     private func connected() {
         guard phase == .connecting else { return }
+        pathInterfaces = PeerHello.availableInterfaceNames(connection?.currentPath)
         phase = .hello
         send(PeerHelloFrame(.hello, payload: Data(PeerHello.protocolID.utf8)))
         receive()
@@ -491,14 +498,24 @@ public final class PeerHelloClient: @unchecked Sendable {
         case (.awaitingAck, .bulkAck):
             let seconds = monotonicSeconds() - transferStartedAt
             let ack = try PeerHelloPayload.ack(frame)
+            let bytes = try Self.validatedAckBytes(ack, expectedBytes: transferBytes)
             let report = PeerHelloReport(
-                serverProtocolID: serverProtocolID, echoRoundTripSeconds: echoRoundTrip, bytes: Int(ack.receivedBytes),
-                seconds: seconds, verified: ack.verified && ack.receivedBytes == UInt64(transferBytes),
-                interfaces: PeerHello.interfaceNames(connection?.currentPath))
+                serverProtocolID: serverProtocolID, echoRoundTripSeconds: echoRoundTrip, bytes: bytes,
+                seconds: seconds, verified: true, pathInterfaces: pathInterfaces)
             finish(.success(report))
         default:
             throw PeerHelloError.protocolViolation("unexpected \(frame.type) frame")
         }
+    }
+
+    static func validatedAckBytes(_ ack: (receivedBytes: UInt64, verified: Bool), expectedBytes: Int) throws -> Int {
+        guard ack.receivedBytes == UInt64(expectedBytes) else {
+            throw PeerHelloError.protocolViolation("server acknowledged \(ack.receivedBytes) bytes; expected \(expectedBytes)")
+        }
+        guard ack.verified else {
+            throw PeerHelloError.protocolViolation("server did not verify the transfer")
+        }
+        return expectedBytes
     }
 
     /// Keeps up to `maxChunksInFlight` chunks queued, then sends the digest.
