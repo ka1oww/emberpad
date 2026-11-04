@@ -228,10 +228,6 @@ struct EditorScreen: View {
                     Button {} label: {
                         HStack { Text("Export flattened PDF"); Spacer(); PhaseTag(text: "Phase 4") }
                     }.disabled(true)
-                    Section("Document") {
-                        Text(session?.record.title ?? "Worksheet")
-                        Text("\(session?.pdf.pageCount ?? 0) pages")
-                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
