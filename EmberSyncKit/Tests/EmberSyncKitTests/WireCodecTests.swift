@@ -125,6 +125,13 @@ struct WireCodecTests {
         #expect(throws: WireViolation.frameTooLarge(.data, length: UInt32.max)) { try decoder.next() }
     }
 
+    @Test func oversizedHeaderRejectsCoalescedPayloadBeforeRetainingIt() {
+        var decoder = WireFrameDecoder(accepting: Self.allTypes, maxChunkBytes: 1_024, maxManifestBytes: 4_096)
+        decoder.append(Data([WireMessageType.data.rawValue, 0, 0, 4, 13]) + syntheticBytes(2_000_000))
+        #expect(decoder.bufferedByteCount == 0)
+        #expect(throws: WireViolation.frameTooLarge(.data, length: 1_037)) { try decoder.next() }
+    }
+
     @Test func chunkAndManifestLimitsAreTheReceiversOwn() {
         let chunk = WireCodec.encode(.data(requestID(1), offset: 0, bytes: syntheticBytes(1_025)))
         #expect(Self.violation(chunk, chunk: 1_024) == .frameTooLarge(.data, length: 12 + 1_025))
@@ -132,6 +139,23 @@ struct WireCodecTests {
         let manifest = WireCodec.encode(.manifest(requestID(1), json: syntheticBytes(4_097)))
         #expect(Self.violation(manifest, manifest: 4_096) == .frameTooLarge(.manifest, length: 4 + 4_097))
         #expect(Self.violation(manifest, manifest: 4_097) == nil)
+    }
+
+    @Test func decoderLimitsAreClampedToProtocolBounds() throws {
+        var lowLimits = WireFrameDecoder(accepting: Self.allTypes, maxChunkBytes: 0, maxManifestBytes: 0)
+        lowLimits.append(WireCodec.encode(.data(requestID(1), offset: 0, bytes: syntheticBytes(1_025))))
+        #expect(throws: WireViolation.frameTooLarge(.data, length: 12 + 1_025)) { try lowLimits.next() }
+        lowLimits = WireFrameDecoder(accepting: Self.allTypes, maxChunkBytes: 0, maxManifestBytes: 0)
+        lowLimits.append(WireCodec.encode(.manifest(requestID(1), json: syntheticBytes(1_025))))
+        #expect(throws: WireViolation.frameTooLarge(.manifest, length: 4 + 1_025)) { try lowLimits.next() }
+
+        var highLimits = WireFrameDecoder(accepting: Self.allTypes, maxChunkBytes: .max, maxManifestBytes: .max)
+        let data = WireMessage.data(requestID(2), offset: 0, bytes: Data([0x7f]))
+        let manifest = WireMessage.manifest(requestID(3), json: Data([0x7b]))
+        highLimits.append(WireCodec.encode([data, manifest]))
+        #expect(try highLimits.next() == data)
+        #expect(try highLimits.next() == manifest)
+        #expect(try highLimits.next() == nil)
     }
 
     @Test func fixedSizeFramesRejectAnyOtherLength() {

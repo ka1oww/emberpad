@@ -50,64 +50,99 @@ public enum WireCodec {
 }
 
 /// Incremental frame decoder for one direction of a connection. It rejects unknown, out-of-direction and oversized
-/// frames from the 5-byte header alone, before buffering their payload, so it never holds more than one bounded
-/// partial frame beyond the bytes most recently appended. After the first violation it stays failed.
+/// frames as soon as their headers arrive, before buffering their payload. After the first violation it stays failed.
 public struct WireFrameDecoder: Sendable {
     private let accepted: Set<WireMessageType>
     private let maxChunkBytes: UInt32
     private let maxManifestBytes: UInt32
     private var buffer: [UInt8] = []
-    private var readIndex = 0
+    private var messages: [WireMessage] = []
+    private var messageIndex = 0
     private var failure: WireViolation?
 
     public init(accepting accepted: Set<WireMessageType>, maxChunkBytes: UInt32, maxManifestBytes: UInt32) {
         self.accepted = accepted
-        self.maxChunkBytes = maxChunkBytes
-        self.maxManifestBytes = maxManifestBytes
+        self.maxChunkBytes = min(max(maxChunkBytes, WireProtocol.chunkSizeBounds.lowerBound), WireProtocol.chunkSizeBounds.upperBound)
+        self.maxManifestBytes = min(max(maxManifestBytes, WireProtocol.manifestSizeBounds.lowerBound), WireProtocol.manifestSizeBounds.upperBound)
     }
 
-    /// Bytes held but not yet returned as frames.
-    public var bufferedByteCount: Int { buffer.count - readIndex }
+    /// Bytes held for the current incomplete frame.
+    public var bufferedByteCount: Int { buffer.count }
 
     public mutating func append(_ bytes: Data) {
         guard failure == nil else { return }
-        if readIndex > 0 {
-            buffer.removeFirst(readIndex)
-            readIndex = 0
+        bytes.withUnsafeBytes { rawBytes in
+            let input = rawBytes.bindMemory(to: UInt8.self)
+            var offset = 0
+            while offset < input.count, failure == nil {
+                if buffer.isEmpty {
+                    let rawType = input[offset]
+                    offset += 1
+                    guard let type = WireMessageType(rawValue: rawType) else {
+                        fail(.unknownFrameType(rawType))
+                        break
+                    }
+                    guard accepted.contains(type) else {
+                        fail(.unexpectedFrame(type))
+                        break
+                    }
+                    buffer.append(rawType)
+                }
+
+                if buffer.count < WireProtocol.headerSize {
+                    let count = min(WireProtocol.headerSize - buffer.count, input.count - offset)
+                    buffer.append(contentsOf: input[offset..<(offset + count)])
+                    offset += count
+                    if buffer.count < WireProtocol.headerSize { break }
+                }
+
+                let type = WireMessageType(rawValue: buffer[0])!
+                var header = WireReader(buffer[1..<WireProtocol.headerSize])
+                let length = header.uint32()
+                let bounds = payloadBounds(type)
+                guard length <= bounds.upperBound else {
+                    fail(.frameTooLarge(type, length: length))
+                    break
+                }
+                guard length >= bounds.lowerBound else {
+                    fail(.malformedPayload(type))
+                    break
+                }
+
+                let frameLength = WireProtocol.headerSize + Int(length)
+                let count = min(frameLength - buffer.count, input.count - offset)
+                buffer.append(contentsOf: input[offset..<(offset + count)])
+                offset += count
+                if buffer.count < frameLength { break }
+
+                do {
+                    messages.append(try Self.parse(type, buffer[WireProtocol.headerSize..<frameLength]))
+                    buffer.removeAll(keepingCapacity: true)
+                } catch {
+                    fail(.malformedPayload(type))
+                }
+            }
         }
-        buffer += bytes
     }
 
     /// The next complete frame, nil when more bytes are needed.
     public mutating func next() throws(WireViolation) -> WireMessage? {
-        if let failure { throw failure }
-        do {
-            return try decodeNext()
-        } catch {
-            failure = error
-            buffer = []
-            readIndex = 0
-            throw error
+        if messageIndex < messages.count {
+            let message = messages[messageIndex]
+            messageIndex += 1
+            if messageIndex == messages.count {
+                messages.removeAll(keepingCapacity: true)
+                messageIndex = 0
+            }
+            return message
         }
+        if let failure { throw failure }
+        return nil
     }
 
-    private mutating func decodeNext() throws(WireViolation) -> WireMessage? {
-        let available = buffer.count - readIndex
-        guard available >= 1 else { return nil }
-        let rawType = buffer[readIndex]
-        guard let type = WireMessageType(rawValue: rawType) else { throw .unknownFrameType(rawType) }
-        guard accepted.contains(type) else { throw .unexpectedFrame(type) }
-        guard available >= WireProtocol.headerSize else { return nil }
-        var header = WireReader(buffer[(readIndex + 1)..<(readIndex + WireProtocol.headerSize)])
-        let length = header.uint32()
-        let bounds = payloadBounds(type)
-        guard length <= bounds.upperBound else { throw .frameTooLarge(type, length: length) }
-        guard length >= bounds.lowerBound else { throw .malformedPayload(type) }
-        let end = readIndex + WireProtocol.headerSize + Int(length)
-        guard buffer.count >= end else { return nil }
-        let payload = buffer[(readIndex + WireProtocol.headerSize)..<end]
-        readIndex = end
-        return try Self.parse(type, payload)
+    private mutating func fail(_ violation: WireViolation) {
+        failure = violation
+        buffer.removeAll(keepingCapacity: false)
     }
 
     private func payloadBounds(_ type: WireMessageType) -> ClosedRange<UInt32> {
