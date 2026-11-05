@@ -50,7 +50,7 @@ struct LibraryView: View {
             }
         }
         .tint(Theme.tint)
-        .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
+        .sheet(isPresented: $showImport) { ImportWorksheetView(library: library, isPresented: $showImport) }
         .task { await library.refresh() }
         .onAppear { updateColumnVisibility(for: horizontalSizeClass) }
         .onChange(of: horizontalSizeClass) { _, sizeClass in updateColumnVisibility(for: sizeClass) }
@@ -400,9 +400,9 @@ private struct LibraryCardCell: View {
     }
 }
 
-private struct ImportWorksheetView: View {
+struct ImportWorksheetView: View {
     @ObservedObject var library: LibraryController
-    @Environment(\.dismiss) private var dismiss
+    @Binding var isPresented: Bool
     @State private var className = "Unfiled"
     @State private var showPicker = false
 
@@ -419,15 +419,20 @@ private struct ImportWorksheetView: View {
                 if let error = library.errorMessage { Text(error).foregroundStyle(Theme.danger) }
             }
             .navigationTitle("Import worksheets")
-            .toolbar { Button("Close") { dismiss() } }
+            .toolbar { Button("Close") { isPresented = false } }
             .fileImporter(isPresented: $showPicker, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
                 switch result {
-                case .success(let urls): Task { await library.importFiles(urls, className: className); if library.errorMessage == nil { dismiss() } }
+                case .success(let urls): Task { await importFiles(urls) }
                 case .failure(let error): library.showError(error.localizedDescription)
                 }
             }
         }
         .tint(Theme.tint)
+    }
+
+    func importFiles(_ urls: [URL]) async {
+        await library.importFiles(urls, className: className)
+        isPresented = false
     }
 }
 

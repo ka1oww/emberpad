@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import UIKit
 import EmberSyncKit
 @testable import EmberPad
@@ -147,5 +148,28 @@ final class LibraryControllerRetryTests: XCTestCase {
 
         XCTAssertNil(library.errorMessage)
         XCTAssertEqual(library.documents.count, 2)
+    }
+
+    func testFailedFilesImportDismissesSheetAndLeavesRetryableLibraryError() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let invalidPDF = root.appendingPathComponent("invalid.pdf")
+        try Data("not a PDF".utf8).write(to: invalidPDF)
+        let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
+        let library = LibraryController(store: store, inbox: inbox)
+        var isPresented = true
+        let sheet = ImportWorksheetView(
+            library: library,
+            isPresented: Binding(get: { isPresented }, set: { isPresented = $0 })
+        )
+
+        await sheet.importFiles([invalidPDF])
+
+        XCTAssertFalse(isPresented)
+        XCTAssertNotNil(library.errorMessage)
+        XCTAssertTrue(library.canRetryError)
     }
 }
