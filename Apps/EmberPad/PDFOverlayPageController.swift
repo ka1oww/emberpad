@@ -59,7 +59,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         pdfView.pageBreakMargins = UIEdgeInsets(top: 8, left: 24, bottom: 8, right: 24)
         pdfView.pageShadowsEnabled = true
         pdfView.backgroundColor = .emberCanvas
-        pdfView.focusCanvas = { [weak self] canvas in
+        pdfView.onCanvasFocus = { [weak self] canvas in
             guard let self, self.activeCanvas !== canvas else { return }
             self.focus(canvas)
         }
@@ -193,14 +193,21 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 }
 
 /// Select only the touched page's drawing recognizer using public APIs.
-private final class PageHitTestPDFView: PDFView {
+final class PageHitTestPDFView: PDFView {
     var visibleCanvases: [PKCanvasView] = []
-    var focusCanvas: ((PKCanvasView) -> Void)?
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        if event?.type == .touches,
-           let canvas = visibleCanvases.first(where: { $0.bounds.contains($0.convert(point, from: self)) }) {
-            focusCanvas?(canvas)
+    var onCanvasFocus: ((PKCanvasView) -> Void)?
+
+    @discardableResult
+    func focusCanvas(at point: CGPoint) -> PKCanvasView? {
+        guard let canvas = visibleCanvases.first(where: { $0.bounds.contains($0.convert(point, from: self)) }) else {
+            return nil
         }
+        onCanvasFocus?(canvas)
+        return canvas
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if event?.type == .touches { focusCanvas(at: point) }
         return super.hitTest(point, with: event)
     }
 }

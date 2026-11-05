@@ -105,15 +105,25 @@ final class WorksheetChromeTests: XCTestCase {
         let session = try await Self.makeSession(pages: 2)
         let student = StudentDisplayModel()
         let controller = PDFOverlayPageController(session: session, student: student)
+        controller.view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
         controller.loadViewIfNeeded()
+        controller.view.layoutIfNeeded()
 
-        let pdfView = try XCTUnwrap(Self.findPDFView(in: controller.view))
+        let pdfView = try XCTUnwrap(Self.findPDFView(in: controller.view) as? PageHitTestPDFView)
+        pdfView.autoScales = false
+        pdfView.scaleFactor = 0.4
+        pdfView.layoutIfNeeded()
         let firstPage = try XCTUnwrap(pdfView.currentPage)
         XCTAssertEqual(session.pdf.index(for: firstPage), 0)
 
         let secondPage = try XCTUnwrap(session.pdf.page(at: 1))
-        let canvas = try XCTUnwrap(controller.pdfView(PDFView(), overlayViewFor: secondPage) as? PKCanvasView)
-        controller.focus(canvas)
+        let firstPageRect = pdfView.convert(firstPage.bounds(for: .cropBox), from: firstPage)
+        let secondPageRect = pdfView.convert(secondPage.bounds(for: .cropBox), from: secondPage)
+        XCTAssertFalse(pdfView.bounds.intersection(firstPageRect).isEmpty)
+        let visibleSecondPage = pdfView.bounds.intersection(secondPageRect)
+        XCTAssertFalse(visibleSecondPage.isEmpty)
+        let touchPoint = CGPoint(x: visibleSecondPage.midX, y: visibleSecondPage.midY)
+        let canvas = try XCTUnwrap(pdfView.focusCanvas(at: touchPoint))
 
         let points = (0..<2).map { index in
             PKStrokePoint(location: CGPoint(x: Double(index) * 10, y: 5), timeOffset: Double(index) * 0.01,
