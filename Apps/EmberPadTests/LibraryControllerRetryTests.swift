@@ -61,4 +61,66 @@ final class LibraryControllerRetryTests: XCTestCase {
         XCTAssertNil(library.errorMessage)
         XCTAssertEqual(library.documents.count, 1)
     }
+
+    func testSuccessfulArchiveOfAnotherDocumentKeepsFailedArchiveRetryTarget() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
+        let libraryRoot = root.appendingPathComponent("Library", isDirectory: true)
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try LibraryStore(root: libraryRoot)
+        let source = try SourcePath(classFolder: "Synthetic Class", relativePath: "worksheet.pdf")
+        let record = try await store.importPDF(data: Data("synthetic".utf8), source: source, pageCount: 1)
+        let library = LibraryController(store: store, inbox: inbox)
+        let failedID = UUID()
+
+        await library.archiveDocument(failedID)
+        XCTAssertNotNil(library.errorMessage)
+        await library.archiveDocument(record.id)
+
+        XCTAssertNotNil(library.errorMessage)
+        XCTAssertTrue(library.canRetryError)
+        await library.retryFailedOperation()
+        XCTAssertNotNil(library.errorMessage)
+        let archived = try await store.document(record.id)
+        XCTAssertEqual(archived.status, .archived)
+
+        await library.unarchiveDocument(failedID)
+        XCTAssertNotNil(library.errorMessage)
+        await library.unarchiveDocument(record.id)
+
+        XCTAssertNotNil(library.errorMessage)
+        await library.retryFailedOperation()
+        XCTAssertNotNil(library.errorMessage)
+        let restored = try await store.document(record.id)
+        XCTAssertEqual(restored.status, .current)
+    }
+
+    func testSuccessfulImportOfAnotherBatchKeepsFailedImportRetryTarget() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
+        let libraryRoot = root.appendingPathComponent("Library", isDirectory: true)
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let failedFile = root.appendingPathComponent("failed.pdf")
+        let successfulFile = root.appendingPathComponent("successful.pdf")
+        try Data("not a PDF".utf8).write(to: failedFile)
+        try DeviceChecksTestPDF.data().write(to: successfulFile)
+        let store = try LibraryStore(root: libraryRoot)
+        let library = LibraryController(store: store, inbox: inbox)
+
+        await library.importFiles([failedFile], className: "Synthetic Class")
+        XCTAssertNotNil(library.errorMessage)
+        await library.importFiles([successfulFile], className: "Synthetic Class")
+
+        XCTAssertNotNil(library.errorMessage)
+        XCTAssertTrue(library.canRetryError)
+        try DeviceChecksTestPDF.data().write(to: failedFile, options: .atomic)
+        await library.retryFailedOperation()
+
+        XCTAssertNil(library.errorMessage)
+        XCTAssertEqual(library.documents.count, 2)
+    }
 }

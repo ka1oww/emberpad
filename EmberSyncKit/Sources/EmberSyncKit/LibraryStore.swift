@@ -176,12 +176,13 @@ public actor LibraryStore {
 
     public func unarchive(documentID: UUID) throws {
         var record = try read(documentID)
-        guard record.status == .archived else { throw LibraryError.invalidDocument }
-        let hasCurrentCollision = try documents().contains {
-            $0.id != documentID && $0.status == .current && $0.identity == record.identity
+        if record.status == .archived {
+            let hasCurrentCollision = try documents().contains {
+                $0.id != documentID && $0.status == .current && $0.identity == record.identity
+            }
+            record.status = hasCurrentCollision ? .olderVersion : .current
+            try write(record)
         }
-        record.status = hasCurrentCollision ? .olderVersion : .current
-        try write(record)
         try refreshPairs()
     }
 

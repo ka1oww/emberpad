@@ -22,26 +22,13 @@ final class LibraryController: ObservableObject {
     private var sessions: [UUID: DocumentSession] = [:]
     private var failedOperation: FailedOperation?
 
-    private enum FailedOperation {
+    private enum FailedOperation: Equatable {
         case inbox
         case refresh
         case importFiles([URL], String)
         case archive(UUID)
         case unarchive(UUID)
         case flush
-
-        var kind: Kind {
-            switch self {
-            case .inbox: return .inbox
-            case .refresh: return .refresh
-            case .importFiles: return .importFiles
-            case .archive: return .archive
-            case .unarchive: return .unarchive
-            case .flush: return .flush
-            }
-        }
-
-        enum Kind: Equatable { case inbox, refresh, importFiles, archive, unarchive, flush }
     }
 
     init(store: LibraryStore, inbox: URL) { self.store = store; self.inbox = inbox }
@@ -160,7 +147,7 @@ final class LibraryController: ObservableObject {
             documents = try await store.documents()
             clearError(for: .refresh)
         } catch {
-            if let operation, failedOperation?.kind == operation.kind { return }
+            if let operation, failedOperation == operation { return }
             setError(error.localizedDescription, for: .refresh)
         }
     }
@@ -194,7 +181,7 @@ final class LibraryController: ObservableObject {
     }
 
     private func clearError(for operation: FailedOperation) {
-        guard failedOperation?.kind == operation.kind else { return }
+        guard failedOperation == operation else { return }
         errorMessage = nil
         failedOperation = nil
     }

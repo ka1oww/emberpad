@@ -19,9 +19,11 @@ final class LibraryControllerStatusTests: XCTestCase {
         let library = LibraryController(store: store, inbox: inbox)
 
         await library.unarchiveDocument(archived.id)
+        await library.unarchiveDocument(archived.id)
 
         let restored = try await store.document(archived.id)
         XCTAssertEqual(restored.status, .olderVersion)
+        XCTAssertNil(library.errorMessage)
     }
 
     func testUnarchiveRestoresCurrentWhenClassHasNoCurrentCopy() async throws {
