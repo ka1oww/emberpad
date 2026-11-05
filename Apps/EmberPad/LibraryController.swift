@@ -125,7 +125,7 @@ final class LibraryController: ObservableObject {
             try await store.archive(documentID: id)
             clearError(for: operation)
         } catch { setError(error.localizedDescription, for: operation) }
-        await refresh(preservingFailureFor: operation)
+        await refresh()
     }
 
     /// Long-press Unarchive from the Archived grid.
@@ -135,20 +135,15 @@ final class LibraryController: ObservableObject {
             try await store.unarchive(documentID: id)
             clearError(for: operation)
         } catch { setError(error.localizedDescription, for: operation) }
-        await refresh(preservingFailureFor: operation)
+        await refresh()
     }
 
     func refresh() async {
-        await refresh(preservingFailureFor: nil)
-    }
-
-    private func refresh(preservingFailureFor operation: FailedOperation?) async {
         do {
             documents = try await store.documents()
             clearError(for: .refresh)
         } catch {
-            if let operation, failedOperation == operation { return }
-            setError(error.localizedDescription, for: .refresh)
+            if failedOperation == nil { setError(error.localizedDescription, for: .refresh) }
         }
     }
 
@@ -264,7 +259,7 @@ final class LibraryController: ObservableObject {
             }
             clearError(for: operation)
         } catch { setError(error.localizedDescription, for: operation) }
-        await refresh(preservingFailureFor: operation)
+        await refresh()
     }
 
     func fileInbox() async {
@@ -292,7 +287,7 @@ final class LibraryController: ObservableObject {
         if let inboxError {
             setError(inboxError, for: operation)
         } else { clearError(for: operation) }
-        await refresh(preservingFailureFor: operation)
+        await refresh()
     }
 
     private func importData(_ data: Data, source: SourcePath) async throws {

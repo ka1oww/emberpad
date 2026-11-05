@@ -62,6 +62,31 @@ final class LibraryControllerRetryTests: XCTestCase {
         XCTAssertEqual(library.documents.count, 1)
     }
 
+    func testRefreshFailurePreservesExistingRetryTarget() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
+        let libraryRoot = root.appendingPathComponent("Library", isDirectory: true)
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try LibraryStore(root: libraryRoot)
+        let library = LibraryController(store: store, inbox: inbox)
+        await library.archiveDocument(UUID())
+        XCTAssertTrue(library.canRetryError)
+
+        try FileManager.default.removeItem(at: libraryRoot)
+        try Data("not a directory".utf8).write(to: libraryRoot)
+        await library.refresh()
+        XCTAssertTrue(library.canRetryError)
+
+        try FileManager.default.removeItem(at: libraryRoot)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        await library.retryFailedOperation()
+
+        XCTAssertNotNil(library.errorMessage)
+        XCTAssertTrue(library.canRetryError)
+    }
+
     func testSuccessfulArchiveOfAnotherDocumentKeepsFailedArchiveRetryTarget() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
