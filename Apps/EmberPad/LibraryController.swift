@@ -60,8 +60,11 @@ final class LibraryController: ObservableObject {
     /// Non-archived Student copies grouped for the SUBJECTS sidebar section, sorted by name.
     var subjectsWithCounts: [(name: String, count: Int)] { Self.subjectsWithCounts(in: documents) }
 
-    /// Archived Student copies for the LIBRARY section. Teacher copies never appear here.
-    var archivedStudentDocuments: [DocumentRecord] { Self.archivedCards(in: documents, sortNewestFirst: sortNewestFirst) }
+    /// Archived Student-copy count for the LIBRARY section.
+    var archivedCount: Int {
+        Self.filteredCards(in: documents, subject: nil, classTag: nil,
+                           archived: true, sortNewestFirst: sortNewestFirst).count
+    }
 
     /// Distinct class tags among non-archived Student copies, optionally scoped to one subject.
     /// Documents with a `nil` class tag appear under the "All classes" chip only.
@@ -102,10 +105,6 @@ final class LibraryController: ObservableObject {
     /// Pure helper: every card-eligible document (Student role only, any status).
     static func studentCards(in documents: [DocumentRecord]) -> [DocumentRecord] {
         documents.filter { $0.role == .student }
-    }
-
-    static func archivedCards(in documents: [DocumentRecord], sortNewestFirst: Bool) -> [DocumentRecord] {
-        sortCards(studentCards(in: documents).filter { $0.status == .archived }, sortNewestFirst: sortNewestFirst)
     }
 
     static func sortCards(_ docs: [DocumentRecord], sortNewestFirst: Bool) -> [DocumentRecord] {

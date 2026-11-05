@@ -80,7 +80,6 @@ final class LibraryGroupingTests: XCTestCase {
         let box = LibraryController.filteredCards(in: [current, archived], subject: nil,
                                                   classTag: nil, archived: true, sortNewestFirst: true)
         XCTAssertEqual(box.map(\.id), [archived.id])
-        XCTAssertEqual(LibraryController.archivedCards(in: [current, archived], sortNewestFirst: true).map(\.id), [archived.id])
     }
 
     func testSortNewestFirstThenOldest() throws {

@@ -74,7 +74,7 @@ struct LibraryView: View {
 
     private var sidebar: some View {
         let rows = library.subjectsWithCounts
-        let archivedCount = library.archivedStudentDocuments.count
+        let archivedCount = library.archivedCount
         let totalCount = rows.reduce(0) { $0 + $1.count }
         return List(selection: sidebarSelectionBinding) {
             Text("EmberPad")
