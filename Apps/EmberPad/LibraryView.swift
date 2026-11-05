@@ -59,15 +59,6 @@ struct LibraryView: View {
             else if new == .allSubjects { library.selectedSubject = nil }
             library.selectedClassTag = nil
         }
-        .onChange(of: library.selectedSubject) { _, subject in
-            if let subject, !library.subjectsWithCounts.contains(where: { $0.name == subject }) {
-                library.selectedSubject = nil
-                library.sidebarSelection = .allSubjects
-            }
-            if let tag = library.selectedClassTag, !library.availableClassTags.contains(tag) {
-                library.selectedClassTag = nil
-            }
-        }
     }
 
     // MARK: - Sidebar

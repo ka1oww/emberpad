@@ -13,7 +13,9 @@ enum LibrarySidebarSelection: Hashable {
 final class LibraryController: ObservableObject {
     let store: LibraryStore
     let inbox: URL
-    @Published private(set) var documents: [DocumentRecord] = []
+    @Published private(set) var documents: [DocumentRecord] = [] {
+        didSet { reconcileSelection() }
+    }
     @Published var errorMessage: String?
     @Published private(set) var isImporting = false
     @Published private(set) var lastInboxImport: Date?
@@ -48,7 +50,9 @@ final class LibraryController: ObservableObject {
     // MARK: - EP-10 library selection (subject sidebar + class filter)
 
     /// Selected subject in the sidebar. `nil` shows every subject.
-    @Published var selectedSubject: String?
+    @Published var selectedSubject: String? {
+        didSet { reconcileSelection() }
+    }
     /// Selected class tag chip. `nil` shows all classes within the subject.
     @Published var selectedClassTag: String?
     @Published var sidebarSelection: LibrarySidebarSelection = .allSubjects
@@ -75,6 +79,17 @@ final class LibraryController: ObservableObject {
         Self.filteredCards(in: documents, subject: showingArchived ? nil : selectedSubject,
                            classTag: showingArchived ? nil : selectedClassTag,
                            archived: showingArchived, sortNewestFirst: sortNewestFirst)
+    }
+
+    private func reconcileSelection() {
+        if let subject = selectedSubject,
+           !subjectsWithCounts.contains(where: { $0.name == subject }) {
+            selectedSubject = nil
+            if sidebarSelection == .subject(subject) { sidebarSelection = .allSubjects }
+        }
+        if let classTag = selectedClassTag, !availableClassTags.contains(classTag) {
+            selectedClassTag = nil
+        }
     }
 
     /// Pure grouping helper: subjects with counts over non-archived Student copies.

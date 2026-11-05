@@ -100,4 +100,47 @@ final class LibraryGroupingTests: XCTestCase {
         XCTAssertTrue(key.hasPrefix(teacher.id.uuidString))
         XCTAssertTrue(key.contains(teacher.source.sha256.rawValue))
     }
+
+    func testArchivingLastSubjectDocumentClearsStaleSubjectAndClassFilter() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
+        let archived = try await store.importPDF(data: Data("chemistry.pdf".utf8),
+                                                  entry: entry(subject: "H2 Chemistry", classTag: "MI PU3", path: "chemistry.pdf"),
+                                                  pageCount: 1)
+        let remaining = try await store.importPDF(data: Data("math.pdf".utf8),
+                                                   entry: entry(subject: "H2 Math", classTag: nil, path: "math.pdf"),
+                                                   pageCount: 1)
+        let library = LibraryController(store: store, inbox: root.appendingPathComponent("Inbox", isDirectory: true))
+        await library.refresh()
+        library.sidebarSelection = .subject("H2 Chemistry")
+        library.selectedSubject = "H2 Chemistry"
+        library.selectedClassTag = "MI PU3"
+
+        await library.archiveDocument(archived.id)
+
+        XCTAssertNil(library.selectedSubject)
+        XCTAssertNil(library.selectedClassTag)
+        XCTAssertEqual(library.sidebarSelection, .allSubjects)
+        XCTAssertEqual(library.visibleCards.map(\.id), [remaining.id])
+    }
+
+    func testOlderVersionAccessibilityLabelOmitsUpdatedState() throws {
+        let record = try makeRecord(subject: "H2 Chemistry", classTag: nil, role: .student,
+                                    status: .olderVersion, isUpdated: true)
+
+        let label = WorksheetCard(record: record, thumbnail: nil).accessibilityLabel
+
+        XCTAssertTrue(label.contains("Older version"))
+        XCTAssertFalse(label.contains("Updated"))
+    }
+
+    private func entry(subject: String, classTag: String?, path: String) throws -> ManifestEntry {
+        let source = try SourcePath(classFolder: "Synthetic Class", relativePath: path)
+        let data = Data(path.utf8)
+        let publication = try Publication(subject: subject, classTag: classTag,
+                                          paperKey: PaperKey(rawValue: path), role: .student, title: path)
+        return try ManifestEntry(source: source, sha256: .digest(data), size: Int64(data.count),
+                                 modifiedAt: Date(), publication: publication)
+    }
 }

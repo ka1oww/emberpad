@@ -99,10 +99,13 @@ struct WorksheetCard: View {
             }
     }
 
-    private var accessibilityLabel: String {
+    var accessibilityLabel: String {
         var parts = [record.title, metaLine]
-        if record.isUpdated { parts.append("Updated") }
-        if record.status == .olderVersion { parts.append("Older version") }
+        if record.status == .olderVersion {
+            parts.append("Older version")
+        } else if record.isUpdated {
+            parts.append("Updated")
+        }
         if hasTeacherCopy { parts.append("Teacher copy paired") }
         if record.hasInk { parts.append("Has ink") }
         return parts.joined(separator: ", ")
