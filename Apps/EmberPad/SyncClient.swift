@@ -51,6 +51,36 @@ final class SyncClient: ObservableObject {
     static let lastSyncedKey = "EmberPad.sync.lastSynced"
     static let lastBackedUpKey = "EmberPad.sync.lastBackedUp"
 
+    /// The footer's last-synced line (EP-25): when the whole Mac library last arrived, inside the paired
+    /// Mac's short id; until the first complete sync, that the pairing exists and nothing has arrived yet.
+    nonisolated static func lastSyncedCopy(synced: Date?, shortID: String) -> String {
+        guard let synced else { return "Paired with your Mac (\(shortID)). Not synced yet." }
+        return "Last synced \(synced.formatted(date: .abbreviated, time: .shortened)) with your Mac (\(shortID))."
+    }
+
+    /// Plain, short error copy for the sidebar footer and pairing sheet (EP-25): Mac not found, a pairing
+    /// that no longer matches the Mac, or a transfer that did not finish. The sync stack's own errors already
+    /// carry readable copy and pass through verbatim; anything else (for example a storage error) keeps the
+    /// system's own description. No networking behaviour changes.
+    nonisolated static func notice(for error: Error) -> String? {
+        switch error {
+        case LibrarySyncConnectError.macNotFound:
+            return LibrarySyncConnectError.macNotFound.errorDescription
+        case is LibrarySyncConnectError:
+            return "EmberPad could not look for your Mac. Check that Local Network access is on for EmberPad in Settings."
+        case NetworkWireTransportError.connectFailed:
+            return "The Mac refused this pairing. If the Companion forgot this iPad, pair again with a new code."
+        case NetworkWireTransportError.connectTimedOut:
+            return "The Mac did not answer in time. Keep the iPad near the Mac, then try Sync now."
+        case is LibrarySyncError, is NetworkWireTransportError:
+            return (error as? LocalizedError)?.errorDescription ?? "The transfer from the Mac failed. Try Sync now again."
+        case is PairingError:
+            return (error as? LocalizedError)?.errorDescription ?? "The pairing could not be used. Pair again with a new code."
+        default:
+            return error.localizedDescription
+        }
+    }
+
     init(library: LibraryController, folder: LibrarySyncFolder, credential: @escaping () throws -> PairingCredential?,
          connect: @escaping Connector = { try await LibrarySyncConnector.connect($0) }, defaults: UserDefaults = .standard,
          backupLedger: URL? = nil) {
@@ -100,7 +130,7 @@ final class SyncClient: ObservableObject {
             guard let paired = try self.credential() else { return }
             credential = paired
         } catch {
-            notice = error.localizedDescription
+            notice = Self.notice(for: error)
             return
         }
         phase = .connecting
@@ -130,7 +160,7 @@ final class SyncClient: ObservableObject {
         } catch is CancellationError {
             // Left the foreground; the next foreground syncs again.
         } catch {
-            if runID == id { notice = error.localizedDescription }
+            if runID == id { notice = Self.notice(for: error) }
         }
     }
 
