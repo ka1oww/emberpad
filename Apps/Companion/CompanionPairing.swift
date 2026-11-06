@@ -14,7 +14,8 @@ enum CompanionPairingStatus: Equatable {
 /// The Mac side of EP-22. Pair iPad creates one pairing (a fresh secret and service id from the secure random
 /// source), saves it only in this Mac's Keychain and shows it once as a QR code in a window that is excluded
 /// from screenshots and screen sharing. Forget iPad deletes it, so the old secret stops working for every future
-/// connection; pairing again creates a new one. The listener (EP-23) loads the credential from `keychain`.
+/// connection; pairing again creates a new one. The sync server (EP-23,
+/// `CompanionSyncModel`) is handed the credential through `onCredentialChange`.
 @MainActor
 final class CompanionPairingModel: ObservableObject {
     @Published private(set) var status: CompanionPairingStatus = .notPaired
@@ -22,6 +23,11 @@ final class CompanionPairingModel: ObservableObject {
 
     let keychain: any PairingSecretStore
     private let codeWindow = PairingCodeWindowController()
+    /// Called with the pairing whenever it is loaded, created or forgotten, so the sync server serves the current
+    /// key (or stops). The credential goes only to the server, never into published state.
+    var onCredentialChange: ((PairingCredential?) -> Void)? {
+        didSet { onCredentialChange?(try? keychain.load()) }
+    }
 
     init(keychain: any PairingSecretStore = PairingKeychain()) {
         self.keychain = keychain
@@ -30,10 +36,13 @@ final class CompanionPairingModel: ObservableObject {
 
     func reload() {
         do {
-            status = Self.status(for: try keychain.load())
+            let credential = try keychain.load()
+            status = Self.status(for: credential)
+            onCredentialChange?(credential)
         } catch {
             status = .notPaired
             message = error.localizedDescription
+            onCredentialChange?(nil)
         }
     }
 
@@ -49,6 +58,7 @@ final class CompanionPairingModel: ObservableObject {
             }
             status = Self.status(for: credential)
             message = nil
+            onCredentialChange?(credential)
             codeWindow.show(credential)
         } catch {
             message = error.localizedDescription
@@ -60,6 +70,7 @@ final class CompanionPairingModel: ObservableObject {
         codeWindow.close()
         do {
             try keychain.delete()
+            onCredentialChange?(nil)
             status = .notPaired
             message = "Forgotten. Also choose Forget Mac on the iPad, then pair again."
         } catch {

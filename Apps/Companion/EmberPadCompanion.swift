@@ -9,8 +9,22 @@ private func isCompanionSourceDirectory(_ url: URL) -> Bool {
 
 @main
 struct EmberPadCompanion: App {
-    @StateObject private var model = CompanionModel()
-    @StateObject private var pairing = CompanionPairingModel()
+    @StateObject private var model: CompanionModel
+    @StateObject private var pairing: CompanionPairingModel
+    @StateObject private var sync: CompanionSyncModel
+    @StateObject private var loginItem = CompanionLoginItemModel()
+
+    init() {
+        let model = CompanionModel()
+        let pairing = CompanionPairingModel()
+        let sync = CompanionSyncModel()
+        pairing.onCredentialChange = { [weak sync] in sync?.serve($0) }
+        model.onPrepared = { [weak sync] in sync?.refreshOutbox() }
+        _model = StateObject(wrappedValue: model)
+        _pairing = StateObject(wrappedValue: pairing)
+        _sync = StateObject(wrappedValue: sync)
+    }
+
     var body: some Scene {
         MenuBarExtra("EmberPad", image: "MenuBarGlyph") {
             CompanionLibraryContent(
@@ -25,8 +39,15 @@ struct EmberPadCompanion: App {
                 pairing: pairing.status,
                 pairingMessage: pairing.message,
                 onPair: { pairing.pairIPad() },
-                onForgetPairing: { pairing.forget() }
+                onForgetPairing: { pairing.forget() },
+                syncLine: sync.statusLine,
+                lastSyncedAt: sync.status?.lastSyncedAt,
+                loginItem: loginItem.state,
+                loginItemMessage: loginItem.message,
+                onSetOpenAtLogin: { loginItem.setEnabled($0) },
+                onOpenLoginItems: { loginItem.openLoginItemsSettings() }
             )
+            .onAppear { loginItem.reload() }
             .frame(width: 340)
             Divider()
             Button("Quit EmberPad Companion") { NSApplication.shared.terminate(nil) }
@@ -41,8 +62,9 @@ struct EmberPadCompanion: App {
 /// snapshot the window shows. Preparing never writes inside the source folder. The
 /// Outbox is replaced atomically, and its previous manifest is the carry-forward
 /// record, so a PDF that is missing from Drive this time is not archived on the
-/// iPad. The nightly copy (`resign/renew.zsh`) takes the Outbox to the iPad. The
-/// read and the write run off the main thread.
+/// iPad. The paired iPad fetches the Outbox from the sync server (`CompanionSyncModel`);
+/// the nightly copy (`resign/renew.zsh`) can also take it. The read and the write run
+/// off the main thread.
 @MainActor
 final class CompanionModel: ObservableObject {
     /// A folder chosen with **Choose EMBER folder…**. A new key, so a folder chosen for the
@@ -55,6 +77,8 @@ final class CompanionModel: ObservableObject {
     @Published private(set) var scannedAt: Date?
     @Published private(set) var isPreparing = false
     @Published private(set) var message: String?
+    /// Called after a Prepare wrote the Outbox, so the sync status line recounts what it serves.
+    var onPrepared: (() -> Void)?
 
     var isSourceAvailable: Bool { folder.map(isCompanionSourceDirectory) ?? false }
 
@@ -112,6 +136,7 @@ final class CompanionModel: ObservableObject {
                 self.snapshot = snapshot
                 self.scannedAt = Date()
                 self.message = Self.outboxMessage(summary)
+                self.onPrepared?()
             } catch {
                 if isCompanionSourceDirectory(root) {
                     self.message = error.localizedDescription
@@ -126,7 +151,7 @@ final class CompanionModel: ObservableObject {
 
     static func outboxMessage(_ summary: OutboxSummary) -> String {
         let size = ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file)
-        var text = "Outbox ready: \(summary.entries) copies, \(summary.files) PDFs, \(size). The nightly copy takes it to the iPad."
+        var text = "Outbox ready: \(summary.entries) copies, \(summary.files) PDFs, \(size). The paired iPad picks it up when it syncs."
         if summary.entriesWithoutBytes > 0 {
             text += " \(summary.entriesWithoutBytes) kept from earlier have no PDF here; the iPad keeps its own copy."
         }
