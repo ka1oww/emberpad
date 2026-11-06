@@ -215,6 +215,9 @@ final class LibraryController: ObservableObject {
         return session
     }
 
+    /// The open editor session for `id`, if any. Export reads its in-memory ink.
+    func liveSession(for id: UUID) -> DocumentSession? { sessions[id] }
+
     func close(_ id: UUID) async throws {
         do {
             try await sessions[id]?.flush()
