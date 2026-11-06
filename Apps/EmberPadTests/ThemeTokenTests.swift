@@ -112,15 +112,18 @@ final class ThemeTokenTests: XCTestCase {
     }
 
     func testDefaultPencilToolsUseInkTokens() throws {
-        let fountain = try XCTUnwrap(WorksheetTool.fountain.pencilTool as? PKInkingTool)
+        let defaults = ToolSettings()
+        let fountain = try XCTUnwrap(defaults.pencilTool(for: .pen) as? PKInkingTool)
+        XCTAssertEqual(fountain.inkType, .fountainPen)
         assertEqual(rgba(fountain.color, style: .light), hex("#1B1B1B"), "penBlack", "light")
-        XCTAssertEqual(fountain.width, Theme.fountainDefaultWidth)
+        XCTAssertEqual(fountain.width, Theme.penWidths[Theme.penDefaultWidthIndex])
 
-        let highlighter = try XCTUnwrap(WorksheetTool.highlighter.pencilTool as? PKInkingTool)
+        let highlighter = try XCTUnwrap(defaults.pencilTool(for: .highlighter) as? PKInkingTool)
+        XCTAssertEqual(highlighter.inkType, .marker)
         var highlighterYellow = hex("#FACC15")
         highlighterYellow[3] = Theme.highlighterDefaultOpacity
         assertEqual(rgba(highlighter.color, style: .light), highlighterYellow, "highlighterYellow", "light")
-        XCTAssertEqual(highlighter.width, Theme.highlighterDefaultWidth)
+        XCTAssertEqual(highlighter.width, 18)
     }
 
     // MARK: - Helpers

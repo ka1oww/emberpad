@@ -10,27 +10,15 @@ protocol WorksheetPageRenderer: AnyObject {
     var onPageChange: ((Int) -> Void)? { get set }
     func undo()
     func redo()
-    func select(_ tool: WorksheetTool)
-}
-
-enum WorksheetTool: String, CaseIterable {
-    case fountain = "Fountain", highlighter = "Highlighter", partialEraser = "Partial eraser", strokeEraser = "Stroke eraser", lasso = "Lasso"
-    var pencilTool: any PKTool {
-        switch self {
-        case .fountain: PKInkingTool(.fountainPen, color: .emberPenBlack, width: Theme.fountainDefaultWidth)
-        case .highlighter: PKInkingTool(.marker, color: Theme.highlighterDefaultColor, width: Theme.highlighterDefaultWidth)
-        case .partialEraser: PKEraserTool(.fixedWidthBitmap, width: 16)
-        case .strokeEraser: PKEraserTool(.vector)
-        case .lasso: PKLassoTool()
-        }
-    }
+    /// Sets the PencilKit tool on every page canvas, called through `ToolState.onToolChange`.
+    func apply(_ tool: any PKTool)
 }
 
 /// This is the replacement point for report option B. Ink and persistence belong to DocumentSession.
 @MainActor
 enum PageRendererFactory {
-    static func make(session: DocumentSession, student: StudentDisplayModel) -> any WorksheetPageRenderer {
-        PDFOverlayPageController(session: session, student: student)
+    static func make(session: DocumentSession, student: StudentDisplayModel, tools: ToolState) -> any WorksheetPageRenderer {
+        PDFOverlayPageController(session: session, student: student, tools: tools)
     }
 }
 
@@ -116,7 +104,8 @@ struct WorksheetSharingRows: View {
     }
 }
 
-private struct PhaseTag: View {
+/// A small capsule naming the phase a disabled control arrives in.
+struct PhaseTag: View {
     let text: String
     var body: some View {
         Text(text)
@@ -156,6 +145,7 @@ struct EditorScreen: View {
     @State private var renderer: (any WorksheetPageRenderer)?
     @State private var errorMessage: String?
     @StateObject private var chrome = PageChromeState()
+    @State private var tools = ToolState()
     @State private var teacherCardOpen = true
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -171,6 +161,7 @@ struct EditorScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            ToolbarStrip(tools: tools)
             if presentation.captureActive && presentation.externalSceneCount == 0 {
                 CaptureLeakBanner()
             }
@@ -195,6 +186,7 @@ struct EditorScreen: View {
                     PagePill(current: chrome.currentPage, total: session.pdf.pageCount)
                 }
             }
+            .overlay(alignment: .top) { ToolToastOverlay(toast: tools.toast) }
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -221,10 +213,6 @@ struct EditorScreen: View {
                 .accessibilityLabel(teacherCardOpen ? "Hide Teacher copy" : "Show Teacher copy")
                 Button("Undo", systemImage: "arrow.uturn.backward") { renderer?.undo() }
                 Button("Redo", systemImage: "arrow.uturn.forward") { renderer?.redo() }
-                // Kept until EP-12 replaces it with the GoodNotes-style toolbar strip.
-                Menu("Tools", systemImage: "pencil.tip") {
-                    ForEach(WorksheetTool.allCases, id: \.self) { tool in Button(tool.rawValue) { renderer?.select(tool) } }
-                }
                 Menu {
                     WorksheetSharingRows()
                     Button {} label: {
@@ -244,13 +232,15 @@ struct EditorScreen: View {
                 let opened = try await library.open(documentID)
                 presentation.student.opened(opened.record)
                 session = opened
-                let made = PageRendererFactory.make(session: opened, student: presentation.student)
+                let made = PageRendererFactory.make(session: opened, student: presentation.student, tools: tools)
                 made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
                 renderer = made
             } catch { errorMessage = error.localizedDescription }
         }
         .onDisappear {
             chrome.cancel()
+            tools.cancelToast()
+            tools.settingsTool = nil
             presentation.student.clear()
             session?.drawingDidChange = nil
             Task { do { try await library.close(documentID) } catch { library.errorMessage = error.localizedDescription } }

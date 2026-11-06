@@ -72,7 +72,7 @@ final class WorksheetChromeTests: XCTestCase {
 
     func testEveryCanvasUsesLightStyle() async throws {
         let session = try await Self.makeSession(pages: 4)
-        let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel())
+        let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel(), tools: Self.isolatedTools())
         controller.loadViewIfNeeded()
         XCTAssertEqual(session.pdf.pageCount, 4)
         for index in 0..<4 {
@@ -85,7 +85,7 @@ final class WorksheetChromeTests: XCTestCase {
 
     func testContinuousLayoutUsesCanvasChrome() async throws {
         let session = try await Self.makeSession(pages: 2)
-        let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel())
+        let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel(), tools: Self.isolatedTools())
         controller.loadViewIfNeeded()
         let pdfView = try XCTUnwrap(Self.findPDFView(in: controller.view))
         XCTAssertEqual(pdfView.displayMode, .singlePageContinuous)
@@ -104,7 +104,7 @@ final class WorksheetChromeTests: XCTestCase {
     func testInkOnFocusedSecondPagePublishesWithoutChangingViewportPage() async throws {
         let session = try await Self.makeSession(pages: 2)
         let student = StudentDisplayModel()
-        let controller = PDFOverlayPageController(session: session, student: student)
+        let controller = PDFOverlayPageController(session: session, student: student, tools: Self.isolatedTools())
         controller.view.frame = CGRect(x: 0, y: 0, width: 600, height: 500)
         controller.loadViewIfNeeded()
         controller.view.layoutIfNeeded()
@@ -143,6 +143,11 @@ final class WorksheetChromeTests: XCTestCase {
     }
 
     // MARK: - Fixtures
+
+    /// Tool choices from a throwaway defaults suite, so tests never touch the app's.
+    private static func isolatedTools() -> ToolState {
+        ToolState(defaults: UserDefaults(suiteName: "EmberPadTests.WorksheetChrome.\(UUID().uuidString)")!)
+    }
 
     private static func makeSession(pages: Int) async throws -> DocumentSession {
         let data = pdfData(pages: pages)

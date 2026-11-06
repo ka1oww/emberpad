@@ -3,39 +3,24 @@ import PDFKit
 import PencilKit
 
 @MainActor
-final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @preconcurrency PDFPageOverlayViewProvider, PKCanvasViewDelegate, PKToolPickerObserver {
+final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @preconcurrency PDFPageOverlayViewProvider, PKCanvasViewDelegate, UIPencilInteractionDelegate {
     let session: DocumentSession
     let student: StudentDisplayModel
+    let tools: ToolState
     private let pdfView = PageHitTestPDFView()
     private var canvases: [Int: PKCanvasView] = [:]
     private weak var activeCanvas: PKCanvasView?
     private var pageObserver: NSObjectProtocol?
-    private let picker: PKToolPicker
-    private var pickerItems: [WorksheetTool: AnyObject] = [:]
     private var currentPage = 0
     private var studentPage = 0
-    private var menuTool: WorksheetTool?
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
 
-    init(session: DocumentSession, student: StudentDisplayModel) {
-        self.session = session; self.student = student
-        if #available(iOS 18.0, *) {
-            let items: [(WorksheetTool, PKToolPickerItem)] = [
-                (.fountain, PKToolPickerInkingItem(type: .fountainPen, color: .emberPenBlack, width: Theme.fountainDefaultWidth, identifier: "fountain")),
-                (.highlighter, PKToolPickerInkingItem(type: .marker, color: Theme.highlighterDefaultColor, width: Theme.highlighterDefaultWidth, identifier: "highlighter")),
-                (.partialEraser, PKToolPickerEraserItem(type: .fixedWidthBitmap, width: 16)),
-                (.strokeEraser, PKToolPickerEraserItem(type: .vector)),
-                (.lasso, PKToolPickerLassoItem())
-            ]
-            picker = PKToolPicker(toolItems: items.map(\.1))
-            pickerItems = Dictionary(uniqueKeysWithValues: items.map { ($0.0, $0.1 as AnyObject) })
-        } else {
-            // iPadOS 17.5 has no custom-item initializer. The Tools menu supplies the exact tool set.
-            picker = PKToolPicker()
-        }
+    init(session: DocumentSession, student: StudentDisplayModel, tools: ToolState) {
+        self.session = session; self.student = student; self.tools = tools
         super.init(nibName: nil, bundle: nil)
-        picker.addObserver(self)
+        // The toolbar strip is the only tool source on both 17.5 and 18 (no PKToolPicker).
+        tools.onToolChange = { [weak self] tool in self?.apply(tool) }
     }
     required init?(coder: NSCoder) { nil }
 
@@ -76,6 +61,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let redoTap = UITapGestureRecognizer(target: self, action: #selector(redoGesture))
         redoTap.numberOfTapsRequired = 2; redoTap.numberOfTouchesRequired = 3
         pdfView.addGestureRecognizer(undoTap); pdfView.addGestureRecognizer(redoTap)
+        // Without a PKToolPicker nothing else answers the Pencil, so EmberPad follows
+        // the iPad's double-tap and squeeze preferences itself (design 5.4).
+        let pencil = UIPencilInteraction()
+        pencil.delegate = self
+        view.addInteraction(pencil)
         publishPage()
         onPageChange?(currentPage)
     }
@@ -84,11 +74,6 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         super.viewDidAppear(animated)
         if let canvas = canvases[currentPage] { focus(canvas) }
         publishPage()
-    }
-
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        if let activeCanvas { picker.setVisible(false, forFirstResponder: activeCanvas) }
     }
 
     deinit { if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) } }
@@ -111,9 +96,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.drawingPolicy = .pencilOnly
         canvas.maximumSupportedContentVersion = .latest
         canvas.drawing = session.drawing(on: index)
-        canvas.tool = WorksheetTool.fountain.pencilTool
+        canvas.tool = tools.pencilTool
         canvas.delegate = self
-        picker.addObserver(canvas)
         canvases[index] = canvas
         pdfView.visibleCanvases = Array(canvases.values)
         return canvas
@@ -126,7 +110,6 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
         guard let canvas = overlayView as? PKCanvasView else { return }
         // Saving already happened through the model delegate; this callback only releases views.
-        picker.removeObserver(canvas)
         let index = session.pdf.index(for: page)
         if canvases[index] === canvas { canvases.removeValue(forKey: index) }
         self.pdfView.visibleCanvases = Array(canvases.values)
@@ -142,16 +125,21 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     @objc private func undoGesture() { undo() }
     @objc private func redoGesture() { redo() }
 
-    func select(_ tool: WorksheetTool) {
-        if #available(iOS 18.0, *), let item = pickerItems[tool] as? PKToolPickerItem { picker.selectedToolItem = item }
-        else { picker.selectedTool = tool.pencilTool }
-        for canvas in canvases.values { canvas.tool = tool.pencilTool }
-        menuTool = tool
+    /// The single tool path: every live canvas gets the tool; new canvases take
+    /// `tools.pencilTool` when they are created.
+    func apply(_ tool: any PKTool) {
+        for canvas in canvases.values { canvas.tool = tool }
     }
 
-    func toolPickerSelectedToolDidChange(_ toolPicker: PKToolPicker) { menuTool = nil }
-    @available(iOS 18.0, *)
-    func toolPickerSelectedToolItemDidChange(_ toolPicker: PKToolPicker) { menuTool = nil }
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        tools.handlePencil(UIPencilInteraction.preferredTapAction, gesture: .doubleTap)
+    }
+
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        // Act once, when the squeeze completes.
+        guard squeeze.phase == .ended else { return }
+        tools.handlePencil(UIPencilInteraction.preferredSqueezeAction, gesture: .squeeze)
+    }
 
     func focus(_ canvas: PKCanvasView) {
         activeCanvas = canvas
@@ -160,14 +148,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             publishPage()
         }
         for candidate in canvases.values { candidate.drawingGestureRecognizer.isEnabled = candidate === canvas }
-        if let menuTool { canvas.tool = menuTool.pencilTool }
-        else if #available(iOS 18.0, *) {
-            // The picker owns double-tap/system-preference handling; no second Pencil interaction is installed.
-            if let ink = picker.selectedToolItem as? PKToolPickerInkingItem { canvas.tool = ink.inkingTool }
-            else if let eraser = picker.selectedToolItem as? PKToolPickerEraserItem { canvas.tool = eraser.eraserTool }
-            else { canvas.tool = PKLassoTool() }
-        } else { canvas.tool = picker.selectedTool }
-        picker.setVisible(true, forFirstResponder: canvas)
+        canvas.tool = tools.pencilTool
+        // First responder keeps undo and the system lasso's edit menu on the touched page.
         canvas.becomeFirstResponder()
     }
 
