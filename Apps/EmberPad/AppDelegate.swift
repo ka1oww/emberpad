@@ -7,6 +7,7 @@ final class AppEnvironment {
     static let shared: Result<AppEnvironment, Error> = Result { try AppEnvironment() }
     let library: LibraryController
     let presentation = PresentationState()
+    let pairing = PairingController()
     private init() throws {
         let files = FileManager.default
         let support = try files.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
@@ -65,7 +66,8 @@ private final class CaptureGuardHostingController: UIHostingController<LibraryVi
     private let environment: AppEnvironment
     init(environment: AppEnvironment) {
         self.environment = environment
-        super.init(rootView: LibraryView(library: environment.library, presentation: environment.presentation))
+        super.init(rootView: LibraryView(library: environment.library, presentation: environment.presentation,
+                                         pairing: environment.pairing))
     }
     @MainActor required dynamic init?(coder aDecoder: NSCoder) { nil }
     override func viewDidLoad() {

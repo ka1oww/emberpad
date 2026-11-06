@@ -10,6 +10,7 @@ private func isCompanionSourceDirectory(_ url: URL) -> Bool {
 @main
 struct EmberPadCompanion: App {
     @StateObject private var model = CompanionModel()
+    @StateObject private var pairing = CompanionPairingModel()
     var body: some Scene {
         MenuBarExtra("EmberPad", image: "MenuBarGlyph") {
             CompanionLibraryContent(
@@ -20,7 +21,11 @@ struct EmberPadCompanion: App {
                 scannedAt: model.scannedAt,
                 message: model.message,
                 onChooseFolder: { model.chooseFolder() },
-                onPrepare: { model.prepare() }
+                onPrepare: { model.prepare() },
+                pairing: pairing.status,
+                pairingMessage: pairing.message,
+                onPair: { pairing.pairIPad() },
+                onForgetPairing: { pairing.forget() }
             )
             .frame(width: 340)
             Divider()

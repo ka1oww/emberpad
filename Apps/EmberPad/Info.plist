@@ -26,6 +26,7 @@
     <key>UILaunchScreen</key><dict>
         <key>UIColorName</key><string>bg</string>
     </dict>
+    <key>NSCameraUsageDescription</key><string>EmberPad uses the camera only to scan the pairing code that EmberPad Companion shows on your Mac.</string>
     <key>UIFileSharingEnabled</key><true/>
     <key>LSSupportsOpeningDocumentsInPlace</key><true/>
     <key>UISupportedInterfaceOrientations</key><array>

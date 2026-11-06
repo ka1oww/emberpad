@@ -7,10 +7,10 @@ Base code for a personal offline iPad teaching app. The Ember House colour token
 | Path | Responsibility |
 | --- | --- |
 | `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; local package dependency |
-| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene |
-| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, phase-2 placeholders, with no networking |
+| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink, student-display scene and the pairing-code scanner |
+| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, phase-2 placeholders, with no networking |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
-| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol and tests |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, pairing credentials with their Keychain store and TLS-PSK connection parameters, and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
 
@@ -88,6 +88,14 @@ A frame is a 1-byte type, a 4-byte big-endian payload length and the payload. Th
 
 Flow control is per transfer credit: the server sends only bytes the client has granted, chunked to the smaller of both peers' limits and round-robin across transfers. The client grants WINDOW increments only as the app reports bytes written, so a slow writer holds at most one window. The client checks every chunk's offset and credit, hashes the bytes as they arrive and reports a completed file only when the size and SHA-256 both match. CANCEL fails a request at once and discards its late bytes until the server acknowledges. A transfer with credit outstanding and no progress stalls on the client; one the client leaves without credit is dropped by the server. Unknown, out-of-direction and oversized frames are rejected from their headers before their payloads are buffered; malformed payloads are rejected when decoded. These violations close the session with a protocol-violation ERROR. Every length is bounded: chunks to 1 MiB, manifests to 32 MiB and credit to 16 MiB per transfer; concurrent requests are limited by `WireLimits`.
 
+### Pairing
+
+`PairingCredential`, `PairingKeychain` and `PairingTLS` in EmberSyncKit pair one Mac with one iPad. In the Companion's iPad section, **Pair iPad…** creates a pairing if there is none: a 256-bit secret and a 128-bit service id from `SecRandomCopyBytes`. The Mac saves it in its Keychain and shows it as a QR code (`EMBERPAD-PAIR:1:<service id>:<base64url secret>`, not a URL). The code opens in its own window with `sharingType = .none`, which keeps it out of screenshots and screen sharing where macOS honours that setting. The window closes after five minutes or on **Done**. On the iPad, touch and hold **File Inbox** and choose **Pair with Mac…**, then scan the code with the camera. That needs only `NSCameraUsageDescription`, no entitlement. The camera preview is replaced while the screen is captured or a student display is connected. The scanner refuses any code not in the exact current format, and a refused code changes nothing.
+
+Each side keeps the pairing only as one generic-password Keychain item (this-device-only on iPad, never synchronised). It is never stored in UserDefaults or files. Descriptions and reflection print `<redacted>` in place of the secret, and the app UI shows only the service id's first six characters and the date. **Forget iPad** on the Mac and **Forget Mac…** on the iPad each delete their own item. Once the Mac forgets, the old secret is useless: any new pairing has a fresh secret and service id. Pairing again overwrites the item.
+
+`PairingTLS.parameters(for:)` is the only source of connection parameters for sync, and the Mac listener and iPad client use the same parameters. They set up TCP inside TLS 1.2 with a single PSK cipher suite (`TLS_PSK_WITH_AES_128_GCM_SHA256`) and peer-to-peer Wi-Fi on. The key is HKDF-SHA256 of the secret, bound to the service id; the PSK identity names the pairing, never the secret. The Bonjour type is `_embersync._tcp` and the instance name is the service id. Loopback tests over real sockets show the paired peer connects and negotiates that suite. A wrong key, a peer from another pairing, plain TCP, certificate TLS and a server with the wrong key all fail the handshake, and nothing they send reaches the server's reader. The Keychain store is tested against the real macOS Keychain under throwaway service names. The iPad app tests use an in-memory store, because the unsigned Simulator host has no Keychain entitlement. Nothing listens or browses yet: the Companion server is EP-23 and the iPad client is EP-24, so the Mac cannot tell whether the code was scanned.
+
 ## Page and presentation seams
 
 `WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. The worksheet scrolls continuously (vertical, 16 pt page gaps with shadows on the canvas token); every ink canvas is forced to the light style so black ink never inverts in dark mode.
@@ -112,7 +120,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
 - **Must resolve before first classroom use:** Teacher copies are identified by a version-2 manifest's role, but nothing yet keeps them off the student view: opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
 - External-display sharing/recording method and capture tests.
-- Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
+- Joint planning before phase 2+: Bonjour sync over the TLS-PSK pairing, iCloud/Drive, live ink, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
 No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.

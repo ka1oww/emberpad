@@ -7,7 +7,7 @@ import SwiftUI
 // here if one ever moves somewhere both targets can import. Do not create a second set.
 
 /// The menu-bar window content from design 5.7: header, the Drive EMBER source folder,
-/// subjects with document counts, the list of PDFs not read this time, the Prepare button, the phase-2 iPad placeholder and the
+/// subjects with document counts, the list of PDFs not read this time, the Prepare button, the iPad pairing section and the
 /// renewal line. Values in, actions out, so the window can render a synthetic snapshot
 /// (screenshots) as well as the live model without touching the real library.
 struct CompanionLibraryContent: View {
@@ -22,6 +22,10 @@ struct CompanionLibraryContent: View {
     let message: String?
     let onChooseFolder: () -> Void
     let onPrepare: () -> Void
+    var pairing: CompanionPairingStatus = .notPaired
+    var pairingMessage: String?
+    var onPair: () -> Void = {}
+    var onForgetPairing: () -> Void = {}
 
     /// Document counts per subject: the fixed Drive EMBER subjects first, then any other subject found.
     static func subjectCounts(_ snapshot: LibrarySnapshot?) -> [(subject: String, documents: Int)] {
@@ -174,7 +178,13 @@ struct CompanionLibraryContent: View {
         return "\(read) documents read · \(skipped) build files skipped · \(notRead) not read"
     }
 
-    // MARK: 4. iPad (phase 2 placeholder)
+    // MARK: 4. iPad (pairing is live; sync arrives with EP-23)
+
+    private static let pairedFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM, HH:mm"
+        return formatter
+    }()
 
     private var iPadSection: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -182,12 +192,28 @@ struct CompanionLibraryContent: View {
                 Text("iPad").font(.system(size: 13, weight: .semibold))
                 phaseTag("PHASE 2")
             }
-            HStack(spacing: 6) {
-                Circle().fill(.secondary).frame(width: 8, height: 8)
-                Text("Not paired. Device sync arrives in phase 2.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            switch pairing {
+            case .notPaired:
+                HStack(spacing: 6) {
+                    Circle().fill(.secondary).frame(width: 8, height: 8)
+                    Text("Not paired. Sync arrives in a later build.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                Button("Pair iPad…", action: onPair).buttonStyle(.bordered)
+            case .paired(let createdAt, let shortID):
+                HStack(spacing: 6) {
+                    Circle().fill(.green).frame(width: 8, height: 8)
+                    Text("Paired (\(shortID)) · \(Self.pairedFormatter.string(from: createdAt))")
+                        .font(.system(size: 12))
+                }
+                HStack {
+                    Button("Show pairing code…", action: onPair).buttonStyle(.bordered)
+                    Button("Forget iPad", role: .destructive, action: onForgetPairing).buttonStyle(.bordered)
+                }
             }
-            Button("Pair iPad…") {}.disabled(true).buttonStyle(.bordered)
+            if let pairingMessage {
+                Text(pairingMessage).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
     }
