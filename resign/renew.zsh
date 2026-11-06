@@ -5,9 +5,47 @@ umask 077
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 
 script_dir=${0:A:h}
+# `renew.zsh --delivery-dry-run <absolute local folder>` runs only the optional delivery, copying the Outbox into
+# that folder instead of the iPad's Documents/Inbox. It contacts no device, builds nothing and needs no enablement.
+dry_run_target=
+if [[ ${1:-} == --delivery-dry-run ]]; then
+    dry_run_target=${2:-}
+    [[ "$dry_run_target" == /* && -d "$dry_run_target" && ! -L "$dry_run_target" ]] \
+        || { print -u2 'Dry run needs an absolute local folder to copy into.'; exit 64; }
+elif (( $# )); then
+    print -u2 'Usage: renew.zsh [--delivery-dry-run <absolute local folder>]'; exit 64
+fi
 config_file=${EMBERPAD_RESIGN_CONFIG:-$script_dir/config.local.zsh}
 [[ -f "$config_file" ]] || { print -u2 'EmberPad renewal is unconfigured. See resign/README.md.'; exit 64; }
 source "$config_file"
+[[ -z ${EMBERPAD_LIBRARY_DIR:-} ]] \
+    || { print -u2 'EMBERPAD_LIBRARY_DIR was replaced by EMBERPAD_OUTBOX_DIR (the Companion Outbox). See resign/README.md.'; exit 64; }
+python_bin=${EMBERPAD_PYTHON:-/opt/homebrew/bin/python3}
+[[ -x "$python_bin" ]] || { print -u2 'Set EMBERPAD_PYTHON to Python 3.'; exit 64; }
+helper="$script_dir/support.py"
+
+# Clones the Outbox (APFS copy-on-write) so a Companion swap mid-copy cannot mix two Outboxes, then checks the
+# clone against its own manifest. Prints the check's "<entries> <present> <absent>" line.
+stage_outbox() {
+    local destination=$1
+    [[ "$EMBERPAD_OUTBOX_DIR" == /* && -d "$EMBERPAD_OUTBOX_DIR" && ! -L "$EMBERPAD_OUTBOX_DIR" ]] || return 64
+    [[ -d "$EMBERPAD_OUTBOX_DIR/EmberLibrary" && ! -L "$EMBERPAD_OUTBOX_DIR/EmberLibrary" ]] || return 64
+    mkdir -p "$destination"
+    /bin/cp -cR "$EMBERPAD_OUTBOX_DIR/EmberLibrary" "$destination/" || return 1
+    "$python_bin" "$helper" outbox-check "$destination" || return 1
+}
+
+if [[ -n "$dry_run_target" ]]; then
+    [[ -n ${EMBERPAD_OUTBOX_DIR:-} ]] || { print -u2 'Set EMBERPAD_OUTBOX_DIR to the Companion Outbox.'; exit 64; }
+    dry_work=$(mktemp -d "${TMPDIR:-/tmp}/emberpad-delivery-dry-run.XXXXXX")
+    trap 'rm -rf -- "$dry_work"' EXIT
+    counts=$(stage_outbox "$dry_work/outbox") || { print -u2 'Outbox is missing or damaged; prepare the iPad library in the Companion.'; exit 1; }
+    # Same shape as the device copy below: the clone's contents merge into the destination folder.
+    /usr/bin/ditto "$dry_work/outbox/" "$dry_run_target/"
+    print -r -- "dry run: Outbox (entries present absent: $counts) copied into $dry_run_target/EmberLibrary; no device contacted."
+    exit 0
+fi
+
 [[ ${EMBERPAD_RESIGN_ENABLED:-NO} == YES ]] || { print -u2 'EmberPad renewal is disabled.'; exit 64; }
 : "${EMBERPAD_PROJECT:?Set the absolute path to EmberPad.xcodeproj}"
 : "${EMBERPAD_DEVICE_ID:?Set the approved iPad identifier}"
@@ -15,12 +53,9 @@ source "$config_file"
 [[ -d "$EMBERPAD_PROJECT" && "$EMBERPAD_PROJECT" == /* ]] || exit 64
 [[ "$EMBERPAD_TEAM_ID" =~ '^[A-Z0-9]{10}$' ]] || { print -u2 'Invalid Personal Team ID'; exit 64; }
 
-python_bin=${EMBERPAD_PYTHON:-/opt/homebrew/bin/python3}
-[[ -x "$python_bin" ]] || { print -u2 'Set EMBERPAD_PYTHON to Python 3.'; exit 64; }
 support_dir=${EMBERPAD_RENEWAL_DIR:-$HOME/Library/Application Support/EmberPad Renewal}
 mkdir -p "$support_dir"
 exec >> "$support_dir/renewal.log" 2>&1
-helper="$script_dir/support.py"
 state_file="$support_dir/install-state.json"
 lock_dir="$support_dir/job.lock"
 if ! mkdir "$lock_dir" 2>/dev/null; then
@@ -58,7 +93,7 @@ fi
 
 bundle_id=$("$python_bin" "$helper" bundle-id "${EMBERPAD_PROJECT:h}/Config/Shared.xcconfig")
 renewal_due=$("$python_bin" "$helper" due "$state_file")
-if [[ "$renewal_due" == not-due && -z ${EMBERPAD_LIBRARY_DIR:-} ]]; then
+if [[ "$renewal_due" == not-due && -z ${EMBERPAD_OUTBOX_DIR:-} ]]; then
     print -r -- "$(date -u +%FT%TZ) not due; at least four days remain."
     exit 0
 fi
@@ -119,12 +154,24 @@ if [[ "$renewal_due" == due ]]; then
     print -r -- "$(date -u +%FT%TZ) installed; expiry=$fresh_expiry"
 fi
 
-# Optional phase-1 delivery. Never launch the app; it files Inbox PDFs on its next foreground.
-if [[ -n ${EMBERPAD_LIBRARY_DIR:-} ]]; then
-    [[ -d "$EMBERPAD_LIBRARY_DIR" && "$EMBERPAD_LIBRARY_DIR" == /* ]] || { failed 'Master folder must be an absolute local directory.'; exit 64; }
-    xcrun devicectl device copy to --device "$EMBERPAD_DEVICE_ID" --timeout 180 \
+# Optional phase-1 delivery, off unless EMBERPAD_OUTBOX_DIR is set. Never launch the app; it applies the library
+# delivery on its next foreground, only for PDFs that arrived intact, and archives nothing until all of it arrived.
+# An unchanged Outbox is copied again at most once a day.
+if [[ -n ${EMBERPAD_OUTBOX_DIR:-} ]]; then
+    counts=$(stage_outbox "$work_dir/outbox") || { failed 'Outbox is missing or damaged; prepare the iPad library in the Companion.'; exit 1; }
+    digest=$(/usr/bin/shasum -a 256 "$work_dir/outbox/EmberLibrary/manifest.json") || { failed 'Could not hash the Outbox manifest.'; exit 1; }
+    digest=${digest%% *}
+    marker="$support_dir/delivered-manifest"
+    last=()
+    [[ -f "$marker" ]] && last=( $(<"$marker") )
+    if [[ ${last[1]:-} == "$digest" ]] && (( $(date +%s) - ${last[2]:-0} < 86400 )); then
+        print -r -- "$(date -u +%FT%TZ) Outbox unchanged since its last delivery; not copied."
+        exit 0
+    fi
+    xcrun devicectl device copy to --device "$EMBERPAD_DEVICE_ID" --timeout 600 \
         --domain-type appDataContainer --domain-identifier "$bundle_id" \
-        --source "$EMBERPAD_LIBRARY_DIR/" --destination Documents/Inbox --json-output "$work_dir/delivery.json" \
-        || { failed 'Worksheet delivery failed; retry on the next hourly tick.'; exit 1; }
-    print -r -- "$(date -u +%FT%TZ) Inbox delivery completed."
+        --source "$work_dir/outbox/" --destination Documents/Inbox --json-output "$work_dir/delivery.json" \
+        || { failed 'Library delivery failed; the iPad keeps what arrived and retries on the next hourly tick.'; exit 1; }
+    print -r -- "$digest $(date +%s)" > "$marker"
+    print -r -- "$(date -u +%FT%TZ) Library delivery completed (entries present absent: $counts)."
 fi

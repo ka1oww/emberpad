@@ -89,6 +89,7 @@ final class LibraryController: ObservableObject {
         defer { isImporting = false }
         do {
             try await flush()
+            await applyLibraryDelivery()
             let items = try InboxScanner.items(in: inbox)
             for item in items {
                 do {
@@ -104,6 +105,38 @@ final class LibraryController: ObservableObject {
             }
         } catch { errorMessage = error.localizedDescription }
         await refresh()
+    }
+
+    /// Applies the Mac's library delivery (`Inbox/EmberLibrary`) through the manifest planner. A delivery that is
+    /// still arriving files only the PDFs that arrived intact and archives nothing; the next check finishes it.
+    private func applyLibraryDelivery() async {
+        do {
+            guard let delivery = try InboxScanner.libraryDelivery(in: inbox) else { return }
+            let report = try await LibraryDeliveryApplier.apply(delivery, to: store, read: { try await CoordinatedPDFReader.read($0) },
+                                                                pageCount: { data in
+                guard let pdf = PDFDocument(data: data), !pdf.isLocked, pdf.pageCount > 0 else { return nil }
+                return pdf.pageCount
+            })
+            lastInboxImport = Date()
+            await dropReplacedSessions()
+            if !report.missing.isEmpty {
+                errorMessage = "The Mac library is still arriving: \(report.missing.count) worksheet(s) not here yet. " +
+                    "Nothing was archived; they will be filed on the next Inbox check."
+            } else if let reason = report.refused.values.sorted().first {
+                errorMessage = "\(report.refused.count) worksheet(s) from the Mac library could not be filed yet. " +
+                    "Nothing was archived. " + reason
+            }
+        } catch {
+            errorMessage = "The Mac library delivery could not be read yet. Nothing was changed. " + error.localizedDescription
+        }
+    }
+
+    /// Keeps annotated editors alive; only sessions whose document bytes changed are dropped from the cache.
+    private func dropReplacedSessions() async {
+        for (id, session) in sessions {
+            guard let record = try? await store.document(id) else { continue }
+            if record.source.sha256 != session.record.source.sha256 { sessions.removeValue(forKey: id) }
+        }
     }
 
     private func importData(_ data: Data, source: SourcePath) async throws {

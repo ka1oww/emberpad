@@ -4,5 +4,5 @@ EMBERPAD_PROJECT='/absolute/permanent/checkout/EmberPad.xcodeproj'
 EMBERPAD_DEVICE_ID='APPROVED_IPAD_IDENTIFIER'
 EMBERPAD_TEAM_ID='PERSONAL_TEAM_ID'
 EMBERPAD_PYTHON='/opt/homebrew/bin/python3'
-# Optional, strictly local master folder, outside iCloud/CloudStorage:
-# EMBERPAD_LIBRARY_DIR='/absolute/Ember iPad Library'
+# Optional library delivery, off unless set: the Companion Outbox, as an absolute path.
+# EMBERPAD_OUTBOX_DIR='/Users/YOU/Library/Application Support/EmberPad/Outbox'

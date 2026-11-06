@@ -31,10 +31,13 @@ struct EmberPadCompanion: App {
     }
 }
 
-/// Reads the Drive EMBER folder through EP-07's `EmberLibrarySource` and
-/// publishes the snapshot the window shows. It only reads: preparing never writes
-/// inside the source folder, and delivery to the iPad is EP-16's job (see
-/// `deliverToOutbox`). The read runs off the main thread.
+/// Reads the Drive EMBER folder through `EmberLibrarySource`, writes the iPad
+/// Outbox (`~/Library/Application Support/EmberPad/Outbox`) and publishes the
+/// snapshot the window shows. Preparing never writes inside the source folder. The
+/// Outbox is replaced atomically, and its previous manifest is the carry-forward
+/// record, so a PDF that is missing from Drive this time is not archived on the
+/// iPad. The nightly copy (`resign/renew.zsh`) takes the Outbox to the iPad. The
+/// read and the write run off the main thread.
 @MainActor
 final class CompanionModel: ObservableObject {
     /// A folder chosen with **Choose EMBER folder…**. A new key, so a folder chosen for the
@@ -87,10 +90,13 @@ final class CompanionModel: ObservableObject {
         Task {
             defer { self.isPreparing = false }
             do {
-                let snapshot = try await Task.detached(priority: .userInitiated) {
+                let (snapshot, summary) = try await Task.detached(priority: .userInitiated) {
                     guard isCompanionSourceDirectory(root) else { throw CocoaError(.fileNoSuchFile) }
                     let aliases = try ClassAliasTable.load()
-                    return try EmberLibrarySource(root: root, aliases: aliases).read()
+                    let outbox = LibraryOutbox()
+                    let snapshot = try EmberLibrarySource(root: root, aliases: aliases).read(previous: outbox.previousManifest())
+                    guard isCompanionSourceDirectory(root) else { throw CocoaError(.fileNoSuchFile) }
+                    return (snapshot, try outbox.write(snapshot))
                 }.value
                 guard isCompanionSourceDirectory(root) else {
                     self.snapshot = nil
@@ -100,7 +106,7 @@ final class CompanionModel: ObservableObject {
                 }
                 self.snapshot = snapshot
                 self.scannedAt = Date()
-                self.deliverToOutbox(snapshot)
+                self.message = Self.outboxMessage(summary)
             } catch {
                 if isCompanionSourceDirectory(root) {
                     self.message = error.localizedDescription
@@ -113,8 +119,12 @@ final class CompanionModel: ObservableObject {
         }
     }
 
-    /// EP-16 hook: the prepared snapshot reaches the iPad Outbox from here.
-    /// TODO(EP-16): write the Outbox and hand it to sync/pairing in this hook. This
-    /// package only runs the EP-07 read above and refreshes the counts in the window.
-    func deliverToOutbox(_ snapshot: LibrarySnapshot) {}
+    static func outboxMessage(_ summary: OutboxSummary) -> String {
+        let size = ByteCountFormatter.string(fromByteCount: summary.bytes, countStyle: .file)
+        var text = "Outbox ready: \(summary.entries) copies, \(summary.files) PDFs, \(size). The nightly copy takes it to the iPad."
+        if summary.entriesWithoutBytes > 0 {
+            text += " \(summary.entriesWithoutBytes) kept from earlier have no PDF here; the iPad keeps its own copy."
+        }
+        return text
+    }
 }
