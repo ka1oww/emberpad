@@ -156,11 +156,11 @@ struct LibraryView: View {
             } else {
                 Text("Inbox not checked yet")
             }
-            if let paired = pairing.paired {
-                SyncStatusRow(sync: sync, paired: paired)
-            } else {
-                Text("Automatic Mac sync starts once you pair with your Mac.")
-            }
+            SyncFooterContent(
+                status: SyncFooterStatus(paired: pairing.paired, phase: sync.phase,
+                                         lastSynced: sync.lastSynced, notice: sync.notice),
+                onSync: pairing.paired == nil ? nil : { sync.sync() },
+                onPair: { showPairing = true })
             SigningFooterLine(expiry: signingExpiryDate)
         }
         .font(Theme.meta)
@@ -368,45 +368,110 @@ struct LibraryView: View {
     }
 }
 
-/// The minimal EP-24 sync hook: what sync is doing, when it last finished, and **Sync now**. The full sync and
-/// pairing screen is EP-25.
-private struct SyncStatusRow: View {
+/// The library sidebar footer from design 5.6: **Sync now** and the sync status pinned to the bottom above a
+/// hairline, in the footer's quiet footnote style. The paired iPad scans the Mac's code from the File Inbox
+/// menu or from the not-paired row's button, both opening `PairingScannerSheet` (EP-22).
+struct SyncFooter: View {
     @ObservedObject var sync: SyncClient
-    let paired: PairingController.Paired
+    let paired: PairingController.Paired?
+    var onPair: () -> Void = {}
+
+    var body: some View {
+        Group {
+            if paired != nil {
+                SyncFooterContent(status: status, onSync: { sync.sync() }, onPair: onPair)
+            } else {
+                SyncFooterContent(status: status, onSync: nil, onPair: onPair)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Theme.surface2)
+        .overlay(alignment: .top) { Divider().opacity(0.6) }
+    }
+
+    private var status: SyncFooterStatus {
+        SyncFooterStatus(paired: paired, phase: sync.phase, lastSynced: sync.lastSynced, notice: sync.notice)
+    }
+}
+
+/// The footer's rows, worked out from values so it renders from synthetic fixtures too (screenshot tests)
+/// as well as the live client. Sync now always matches the paired state: shown only when a pairing exists.
+struct SyncFooterContent: View {
+    let status: SyncFooterStatus
+    var onSync: (() -> Void)?
+    var onPair: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                status
+            HStack(spacing: 10) {
+                Label(status.phaseText ?? "Mac sync", systemImage: status.phaseSymbol)
+                    .font(Theme.meta)
+                    .foregroundStyle(Theme.text2)
                 Spacer()
-                Button("Sync now") { sync.sync() }
-                    .disabled(sync.isSyncing)
-            }
-            if case .downloading(let progress) = sync.phase, progress.filesTotal > 0 {
-                ProgressView(value: progress.fraction)
-            }
-            Group {
-                if let last = sync.lastSynced {
-                    Text("Last synced \(last.formatted(date: .abbreviated, time: .shortened)) with your Mac (\(paired.shortID)).")
+                if let onSync {
+                    Button("Sync now", action: onSync)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(Theme.accent)
                 } else {
-                    Text("Paired with your Mac (\(paired.shortID)). Not synced yet.")
+                    Button("Pair with Mac…", action: onPair)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(Theme.accent)
                 }
             }
-            .font(.footnote).foregroundStyle(.secondary)
-            if let notice = sync.notice, !sync.isSyncing {
-                Text(notice).font(.footnote).foregroundStyle(.red)
+            .accessibilityElement(children: .combine)
+            if let fraction = status.stepFraction {
+                ProgressView(value: fraction)
+                    .tint(Theme.accent)
+                    .accessibilityLabel("Sync progress")
+            }
+            if let last = status.lastSyncedLine {
+                Text(last).font(Theme.meta).foregroundStyle(Theme.text2)
+            }
+            if let notice = status.notice {
+                Text(notice).font(Theme.meta).foregroundStyle(Theme.danger)
             }
         }
     }
+}
 
-    @ViewBuilder private var status: some View {
-        switch sync.phase {
-        case .idle: Label("Mac sync", systemImage: "arrow.triangle.2.circlepath")
-        case .connecting: Label("Looking for your Mac…", systemImage: "wifi")
+/// Everything the sync footer shows, worked out from values so it renders from synthetic fixtures too
+/// (screenshot tests) as well as the live client.
+struct SyncFooterStatus {
+    let paired: PairingController.Paired?
+    /// The symbol and short line for what sync is doing right now, or nil while idle and unpaired.
+    let phaseText: String?
+    let phaseSymbol: String
+    let stepFraction: Double?
+    /// The last completed sync, or the paired-but-never-synced line.
+    let lastSyncedLine: String?
+    /// Plain short error copy for what the last sync could not do: Mac not found, a pairing that no longer
+    /// matches, or a transfer that did not finish.
+    let notice: String?
+
+    init(paired: PairingController.Paired?, phase: SyncClient.Phase, lastSynced: Date?, notice: String?) {
+        self.paired = paired
+        self.notice = notice
+        lastSyncedLine = paired.map { SyncClient.lastSyncedCopy(synced: lastSynced, shortID: $0.shortID) }
+        switch phase {
+        case .idle:
+            phaseText = paired == nil ? nil : "Mac sync"
+            phaseSymbol = "arrow.triangle.2.circlepath"
+            stepFraction = nil
+        case .connecting:
+            phaseText = "Looking for your Mac…"
+            phaseSymbol = "wifi"
+            stepFraction = nil
         case .downloading(let progress):
-            Label(progress.filesTotal == 0 ? "Checking the library…" : "Receiving \(min(progress.filesDone + 1, progress.filesTotal)) of \(progress.filesTotal)",
-                  systemImage: "arrow.down.circle")
-        case .filing: Label("Filing worksheets…", systemImage: "tray.and.arrow.down")
+            phaseText = progress.filesTotal == 0 ? "Checking the library…" : "Receiving \(min(progress.filesDone + 1, progress.filesTotal)) of \(progress.filesTotal)"
+            phaseSymbol = "arrow.down.circle"
+            stepFraction = progress.filesTotal == 0 ? nil : progress.fraction
+        case .filing:
+            phaseText = "Filing worksheets…"
+            phaseSymbol = "tray.and.arrow.down"
+            stepFraction = nil
         }
     }
 }
