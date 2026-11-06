@@ -156,7 +156,10 @@ struct EditorScreen: View {
     @State private var renderer: (any WorksheetPageRenderer)?
     @State private var errorMessage: String?
     @StateObject private var chrome = PageChromeState()
-    @State private var teacherCardOpen = true
+    // The card's open state and corner survive scene restoration (design 6.3); one corner per orientation.
+    @SceneStorage("cardOpen") private var teacherCardOpen = true
+    @SceneStorage("cardCorner.landscape") private var landscapeCorner = TeacherCopyCardCorner.topLeading
+    @SceneStorage("cardCorner.portrait") private var portraitCorner = TeacherCopyCardCorner.topLeading
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
@@ -175,24 +178,28 @@ struct EditorScreen: View {
                 CaptureLeakBanner()
             }
             if let session { InkSaveBanner(session: session) }
-            ZStack(alignment: .bottom) {
+            ZStack(alignment: .topLeading) {
                 if let renderer, let session {
-                    HStack(spacing: 0) {
-                        if presentation.policy.rendersOnMainScreen(session.record) { PageRendererHost(renderer: renderer) }
-                        else {
-                            // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
-                            PrivatePlaceholder(text: "Teacher copy · private. Hidden during capture or while inactive.")
-                        }
-                        // Pairing and answer annotation policy await the teacher. This stays unset in the base.
-                        if teacherCardOpen, let url = presentation.privateAnswerURL {
-                            PrivateAnswerPane(url: url, hidden: presentation.policy.hidePrivateContent)
-                                .frame(maxWidth: 320)
-                        }
+                    if presentation.policy.rendersOnMainScreen(session.record) { PageRendererHost(renderer: renderer) }
+                    else {
+                        // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
+                        PrivatePlaceholder(text: "Teacher copy · private. Hidden during capture or while inactive.")
                     }
                 } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
                 else { ProgressView("Opening worksheet") }
                 if chrome.pagePillVisible, let session, session.pdf.pageCount > 0 {
                     PagePill(current: chrome.currentPage, total: session.pdf.pageCount)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
+                // iPad main scene only: the external scene never draws this, and it has no answer URL.
+                if let session {
+                    TeacherCopyCardOverlay(content: .resolve(policy: presentation.policy,
+                                                             mainSceneActive: presentation.mainSceneActive,
+                                                             privateAnswerURL: presentation.privateAnswerURL),
+                                           documentTitle: session.record.title,
+                                           isOpen: $teacherCardOpen,
+                                           landscapeCorner: $landscapeCorner,
+                                           portraitCorner: $portraitCorner)
                 }
             }
         }
@@ -210,7 +217,7 @@ struct EditorScreen: View {
                 }
                 .accessibilityLabel("Sharing: \(pillState.accessibilityText)")
                 Button {
-                    teacherCardOpen.toggle()
+                    withAnimation { teacherCardOpen.toggle() }
                 } label: {
                     Image(systemName: "book")
                         .imageScale(.medium)
@@ -322,26 +329,9 @@ private struct PagePill: View {
     }
 }
 
-private struct PrivateAnswerPane: View {
-    let url: URL
-    let hidden: Bool
-    var body: some View {
-        // Hidden removes the PDF view instead of blurring or covering it, so no answer pixels are drawn.
-        if hidden { PrivatePlaceholder(text: "Private answers hidden during capture or while inactive.") }
-        else { ReadOnlyPDF(url: url).accessibilityLabel("Private teacher answers") }
-    }
-}
-
 private struct PrivatePlaceholder: View {
     let text: String
     var body: some View {
         Text(text).padding().frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(uiColor: .systemBackground))
     }
-}
-
-private struct ReadOnlyPDF: UIViewRepresentable {
-    let url: URL
-    func makeUIView(context: Context) -> PDFView { let view = PDFView(); view.autoScales = true; view.document = PDFDocument(url: url); return view }
-    func updateUIView(_ uiView: PDFView, context: Context) {}
-    static func dismantleUIView(_ uiView: PDFView, coordinator: ()) { uiView.document = nil }
 }
