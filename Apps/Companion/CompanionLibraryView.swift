@@ -7,8 +7,8 @@ import SwiftUI
 // here if one ever moves somewhere both targets can import. Do not create a second set.
 
 /// The menu-bar window content from design 5.7: header, the Drive EMBER source folder,
-/// subjects with document counts, the list of PDFs not read this time, the Prepare button, the iPad pairing section and the
-/// renewal line. Values in, actions out, so the window can render a synthetic snapshot
+/// subjects with document counts, the list of PDFs not read this time, the Prepare button, the iPad pairing and sync
+/// section and the renewal line. The header's status line is the sync server's (EP-23). Values in, actions out, so the window can render a synthetic snapshot
 /// (screenshots) as well as the live model without touching the real library.
 struct CompanionLibraryContent: View {
     static let emberRed = Color(red: 178 / 255, green: 58 / 255, blue: 46 / 255)
@@ -26,6 +26,12 @@ struct CompanionLibraryContent: View {
     var pairingMessage: String?
     var onPair: () -> Void = {}
     var onForgetPairing: () -> Void = {}
+    var syncLine = SyncStatusLine(status: nil, servingDocuments: nil)
+    var lastSyncedAt: Date?
+    var loginItem: CompanionLoginItemState = .off
+    var loginItemMessage: String?
+    var onSetOpenAtLogin: (Bool) -> Void = { _ in }
+    var onOpenLoginItems: () -> Void = {}
 
     /// Document counts per subject: the fixed Drive EMBER subjects first, then any other subject found.
     static func subjectCounts(_ snapshot: LibrarySnapshot?) -> [(subject: String, documents: Int)] {
@@ -65,7 +71,14 @@ struct CompanionLibraryContent: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
                 Text("EmberPad Companion").font(.system(size: 14, weight: .semibold))
-                Text("Local library preparation").font(.system(size: 12)).opacity(0.65)
+                HStack(spacing: 5) {
+                    if syncLine.tone != .off {
+                        Circle().fill(Self.toneColor(syncLine.tone)).frame(width: 7, height: 7)
+                    }
+                    Text(syncLine.text).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                }
+                .opacity(0.65)
+                .accessibilityElement(children: .combine)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
@@ -178,7 +191,16 @@ struct CompanionLibraryContent: View {
         return "\(read) documents read · \(skipped) build files skipped · \(notRead) not read"
     }
 
-    // MARK: 4. iPad (pairing is live; sync arrives with EP-23)
+    static func toneColor(_ tone: SyncStatusLine.Tone) -> Color {
+        switch tone {
+        case .off: .secondary
+        case .ready: .green
+        case .active: emberRed
+        case .problem: .orange
+        }
+    }
+
+    // MARK: 4. iPad (pairing, the sync server and open at login)
 
     private static let pairedFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -196,14 +218,14 @@ struct CompanionLibraryContent: View {
             case .notPaired:
                 HStack(spacing: 6) {
                     Circle().fill(.secondary).frame(width: 8, height: 8)
-                    Text("Not paired. Sync arrives in a later build.")
+                    Text("Not paired. Pair the iPad to sync over Wi-Fi or directly.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Button("Pair iPad…", action: onPair).buttonStyle(.bordered)
             case .paired(let createdAt, let shortID):
                 HStack(spacing: 6) {
                     Circle().fill(.green).frame(width: 8, height: 8)
-                    Text("Paired (\(shortID)) · \(Self.pairedFormatter.string(from: createdAt))")
+                    Text(pairedLine(createdAt: createdAt, shortID: shortID))
                         .font(.system(size: 12))
                 }
                 HStack {
@@ -214,8 +236,37 @@ struct CompanionLibraryContent: View {
             if let pairingMessage {
                 Text(pairingMessage).font(.system(size: 12)).foregroundStyle(.secondary)
             }
+            openAtLoginRow
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
+    }
+
+    private func pairedLine(createdAt: Date, shortID: String) -> String {
+        let synced = lastSyncedAt.map { "synced \(Self.timeFormatter.string(from: $0))" } ?? "not synced yet"
+        return "Paired (\(shortID)) · \(Self.pairedFormatter.string(from: createdAt)) · \(synced)"
+    }
+
+    /// Off until the user turns it on; the Companion never registers itself.
+    private var openAtLoginRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Open at login", isOn: Binding(get: { loginItem == .on || loginItem == .needsApproval },
+                                                  set: { onSetOpenAtLogin($0) }))
+                .toggleStyle(.switch).controlSize(.mini).font(.system(size: 12))
+                .disabled(loginItem == .unavailable)
+            switch loginItem {
+            case .needsApproval:
+                Button("Allow in Login Items…", action: onOpenLoginItems).buttonStyle(.link).font(.system(size: 11))
+            case .unavailable:
+                Text("Move EmberPad Companion to Applications to open it at login.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            case .on, .off:
+                EmptyView()
+            }
+            if let loginItemMessage {
+                Text(loginItemMessage).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 2)
     }
 
     // MARK: 5. Renewal (static placeholder; nothing is loaded, installed or scheduled)
