@@ -19,7 +19,9 @@ final class AppEnvironment {
                                     inbox: documents.appendingPathComponent("Inbox", isDirectory: true), syncFolder: syncFolder)
         let keychain = PairingKeychain()
         pairing = PairingController(keychain: keychain)
-        sync = SyncClient(library: library, folder: syncFolder, credential: { try keychain.load() })
+        // What the paired Mac holds of the ink backup (EP-33), kept beside the library, never inside it.
+        sync = SyncClient(library: library, folder: syncFolder, credential: { try keychain.load() },
+                          backupLedger: support.appendingPathComponent("Backup/ledger.json"))
     }
 }
 

@@ -28,6 +28,12 @@ struct CompanionLibraryContent: View {
     var onForgetPairing: () -> Void = {}
     var syncLine = SyncStatusLine(status: nil, servingDocuments: nil)
     var lastSyncedAt: Date?
+    /// EP-33: where the iPad's ink backup is kept, when it last arrived, and why a chosen folder was refused.
+    var backupFolder: URL?
+    var lastBackupAt: Date?
+    var backupMessage: String?
+    var onChooseBackupFolder: () -> Void = {}
+    var onShowBackupFolder: () -> Void = {}
     var loginItem: CompanionLoginItemState = .off
     var loginItemMessage: String?
     var onSetOpenAtLogin: (Bool) -> Void = { _ in }
@@ -236,6 +242,7 @@ struct CompanionLibraryContent: View {
             if let pairingMessage {
                 Text(pairingMessage).font(.system(size: 12)).foregroundStyle(.secondary)
             }
+            backupRow
             openAtLoginRow
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
@@ -244,6 +251,32 @@ struct CompanionLibraryContent: View {
     private func pairedLine(createdAt: Date, shortID: String) -> String {
         let synced = lastSyncedAt.map { "synced \(Self.timeFormatter.string(from: $0))" } ?? "not synced yet"
         return "Paired (\(shortID)) · \(Self.pairedFormatter.string(from: createdAt)) · \(synced)"
+    }
+
+    /// The ink backup folder (EP-33): one way, iPad to Mac, kept here by subject and paper.
+    private var backupRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "externaldrive").font(.system(size: 11))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Ink backup").font(.system(size: 12, weight: .semibold))
+                    Text(backupFolder.map { $0.path.replacingOccurrences(of: NSHomeDirectory(), with: "~") } ?? "Not set")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            Text(lastBackupAt.map { "Last backup \(Self.pairedFormatter.string(from: $0))" } ?? "No ink backed up this session yet.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            HStack {
+                Button("Choose backup folder…", action: onChooseBackupFolder).buttonStyle(.bordered).controlSize(.small)
+                Button("Show in Finder", action: onShowBackupFolder).buttonStyle(.link).font(.system(size: 11))
+            }
+            if let backupMessage {
+                Text(backupMessage).font(.system(size: 11)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 2)
     }
 
     /// Off until the user turns it on; the Companion never registers itself.

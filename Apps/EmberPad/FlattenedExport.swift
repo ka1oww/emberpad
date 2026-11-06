@@ -151,6 +151,21 @@ extension LibraryController {
     }
 }
 
+extension FlattenedExport {
+    /// The ink backup's renderer (EP-33): the same flattening as Share, from the saved ink the backup read, off the
+    /// main actor. Like Share it opens the source PDF read-only and writes nothing to the library.
+    static func backupRenderer(store: LibraryStore) -> InkBackupQueue.Flatten {
+        { record, drawings in
+            let sourceURL = try await store.originalURL(documentID: record.id)
+            let title = record.title
+            return try await Task.detached(priority: .utility) { () -> Data in
+                guard let pdf = PDFDocument(url: sourceURL), !pdf.isLocked else { throw FlattenedExportError.unreadablePDF }
+                return try FlattenedExport.render(source: pdf, drawings: drawings, title: title)
+            }.value
+        }
+    }
+}
+
 // MARK: - Share presentation
 
 /// Drives one export at a time and owns the temporary file while the share sheet is up.

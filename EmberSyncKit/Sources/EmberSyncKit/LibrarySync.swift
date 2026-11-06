@@ -91,7 +91,11 @@ public struct LibrarySyncDownload: Equatable, Sendable {
     public let bytesDownloaded: Int64
     /// PDFs that did not arrive intact, by hash, with why.
     public let failed: [ContentHash: WireRequestFailure]
+    /// The ink backup sent on the same connection after the download (EP-33), or nil when none was asked for.
+    /// It never changes anything above: the library sync is complete or not on its own.
+    public internal(set) var backup: InkBackupReport?
 
+    /// Every PDF the library needed arrived. Says nothing about the backup.
     public var isComplete: Bool { failed.isEmpty }
 }
 
@@ -121,6 +125,9 @@ public enum LibrarySyncError: Error, Equatable, Sendable, LocalizedError {
 /// writes nothing to the library: the caller applies `folder` through `LibraryDeliveryApplier`, the Inbox path.
 public struct LibrarySyncDownloader: Sendable {
     public typealias Progress = @Sendable (LibrarySyncProgress) -> Void
+    /// Called once the download is written, while the connection is still open. The caller files the download
+    /// here, then returns what to back up on the same connection, or nil for nothing.
+    public typealias WhileConnected = @Sendable (LibrarySyncDownload) async -> (any InkBackupSource)?
 
     public let folder: LibrarySyncFolder
     public let limits: WireLimits
@@ -128,11 +135,14 @@ public struct LibrarySyncDownloader: Sendable {
     public let parallelFiles: Int
     /// How often timeouts are checked.
     public let tickInterval: Duration
+    /// Protocol versions to offer. Every supported version by default; tests pass `1...1` to play an older iPad.
+    public let versions: ClosedRange<UInt16>
 
     public init(folder: LibrarySyncFolder, limits: WireLimits = .standard, parallelFiles: Int = 4,
-                tickInterval: Duration = .milliseconds(500)) {
+                tickInterval: Duration = .milliseconds(500), versions: ClosedRange<UInt16> = WireProtocol.supportedVersions) {
         self.folder = folder
         self.limits = limits
+        self.versions = versions
         self.parallelFiles = max(1, min(parallelFiles, limits.maxConcurrentRequests))
         self.tickInterval = tickInterval
     }
@@ -140,8 +150,15 @@ public struct LibrarySyncDownloader: Sendable {
     /// Runs one sync over `transport` and closes it. `local` is the library's documents, used only to plan which
     /// PDFs to fetch. Throws when no manifest arrived; then nothing was written. Cancelling stops the download,
     /// closes the connection and keeps the PDFs already verified for the next sync.
+    ///
+    /// With `whileConnected`, the connection stays open after the download: the closure is called with the
+    /// download (to file it), and the backup items it returns are PUT on the same connection when the Mac speaks
+    /// version 2. The backup only ever adds `backup` to the result. It never throws, never touches the download
+    /// folder, and once the closure has run nothing it meets (a failed PUT, a closed connection, an old Mac,
+    /// leaving the foreground) can undo or fail the download.
     public func download(over transport: any WireTransport, local: @escaping @Sendable () async throws -> [DocumentRecord],
-                         now: Date = Date(), progress: @escaping Progress = { _ in }) async throws -> LibrarySyncDownload {
+                         now: Date = Date(), progress: @escaping Progress = { _ in },
+                         whileConnected: WhileConnected? = nil) async throws -> LibrarySyncDownload {
         try folder.prepare()
         let (inputs, continuation) = AsyncStream.makeStream(of: Input.self)
         let reader = Task {
@@ -158,28 +175,35 @@ public struct LibrarySyncDownloader: Sendable {
                 continuation.yield(.tick)
             }
         }
-        var run = Run(downloader: self, transport: transport, local: local, now: now, progress: progress)
+        var run = Run(downloader: self, transport: transport, local: local, now: now, progress: progress,
+                      keepOpen: whileConnected != nil)
         defer {
             reader.cancel()
             ticker.cancel()
             continuation.finish()
             run.discardOpenFiles()
         }
+        var iterator = inputs.makeAsyncIterator()
+        var result: LibrarySyncDownload
         do {
             try await run.start()
-            for await input in inputs {
+            while let input = await iterator.next() {
                 try Task.checkCancellation()
                 try await run.handle(input)
                 if run.finished { break }
             }
             try Task.checkCancellation()
             try run.finish()
+            result = try run.result()
         } catch {
             await transport.close()
             throw error
         }
+        if let whileConnected, let source = await whileConnected(result) {
+            result.backup = await run.backUp(from: source, inputs: &iterator)
+        }
         await transport.close()
-        return try run.result()
+        return result
     }
 
     enum Input: Sendable {
@@ -215,15 +239,26 @@ public struct LibrarySyncDownloader: Sendable {
         var status = LibrarySyncProgress()
         var closeReason: WireCloseReason?
         var finished = false
+        /// Leave the session open once every PDF has an outcome, for the backup that follows.
+        let keepOpen: Bool
+        var backup: BackupState?
+
+        struct BackupState {
+            let source: any InkBackupSource
+            var current: (id: WireRequestID, upload: InkBackupUpload)?
+            var report = InkBackupReport()
+            var done = false
+        }
 
         init(downloader: LibrarySyncDownloader, transport: any WireTransport, local: @escaping @Sendable () async throws -> [DocumentRecord],
-             now: Date, progress: @escaping Progress) {
+             now: Date, progress: @escaping Progress, keepOpen: Bool) {
             self.downloader = downloader
             self.transport = transport
             self.local = local
             self.now = now
             self.progress = progress
-            session = WireClientSession(limits: downloader.limits)
+            self.keepOpen = keepOpen
+            session = WireClientSession(limits: downloader.limits, versions: downloader.versions)
         }
 
         mutating func start() async throws {
@@ -295,6 +330,9 @@ public struct LibrarySyncDownloader: Sendable {
                 queue = []
                 progress(status)
                 try finish()
+            case .putCompleted:
+                // The download makes no PUT.
+                break
             }
         }
 
@@ -329,7 +367,7 @@ public struct LibrarySyncDownloader: Sendable {
                 try await perform(output)
             }
             if active.isEmpty, queue.isEmpty, manifest != nil, !finished {
-                try await perform(session.close())
+                if !keepOpen { try await perform(session.close()) }
                 try finish()
             }
         }
@@ -353,6 +391,98 @@ public struct LibrarySyncDownloader: Sendable {
                 try? FileManager.default.removeItem(at: folder.partialURL(for: transfer.entry.sha256))
             }
             active = [:]
+        }
+
+        // MARK: Backup (EP-33)
+
+        /// PUTs what `source` offers, one item at a time, on the session the download used. Never throws: every
+        /// failure is recorded in the report, and the items not confirmed are offered again on the next sync.
+        mutating func backUp(from source: any InkBackupSource, inputs: inout AsyncStream<Input>.Iterator) async -> InkBackupReport {
+            var report = InkBackupReport()
+            guard case .ready = session.phase else {
+                report.skipped = .connectionClosed
+                return report
+            }
+            guard session.supportsPut else {
+                report.skipped = .macTooOld
+                return report
+            }
+            backup = BackupState(source: source)
+            await offerNextBackup()
+            while backup?.done == false {
+                guard !Task.isCancelled, let input = await inputs.next() else {
+                    backup?.report.interrupted = true
+                    break
+                }
+                switch input {
+                case .bytes(let bytes): await performBackup(session.receive(bytes, now: .now))
+                case .tick: await performBackup(session.tick(now: .now))
+                case .transportClosed: await performBackup(session.transportClosed())
+                }
+                while session.hasPendingPutData, backup?.done == false {
+                    await performBackup(session.pullPuts(now: .now, maxFrames: 8))
+                }
+            }
+            return backup?.report ?? report
+        }
+
+        private mutating func performBackup(_ output: WireClientOutput) async {
+            if !output.outbound.isEmpty { try? await transport.send(output.bytes) }
+            if output.closeTransport { await transport.close() }
+            for event in output.events { await reactBackup(event) }
+        }
+
+        private mutating func reactBackup(_ event: WireClientEvent) async {
+            guard let state = backup else { return }
+            switch event {
+            case .putCompleted(let id, let alreadyHeld):
+                guard let current = state.current, current.id == id else { return }
+                if alreadyHeld { backup?.report.alreadyHeld += 1 } else { backup?.report.stored += 1 }
+                backup?.current = nil
+                await state.source.confirmed(current.upload)
+                await offerNextBackup()
+            case .failed(let id, let failure):
+                guard state.current?.id == id else { return }
+                backup?.report.failed.append(failure)
+                backup?.current = nil
+                if failure == .connectionClosed {
+                    backup?.report.interrupted = true
+                    backup?.done = true
+                } else {
+                    await offerNextBackup()
+                }
+            case .closed:
+                if !state.done {
+                    backup?.report.interrupted = true
+                    backup?.done = true
+                }
+            case .ready, .manifest, .chunk, .completed:
+                break
+            }
+        }
+
+        /// Starts the next item's PUT, or ends the backup when the source has nothing more.
+        private mutating func offerNextBackup() async {
+            guard let source = backup?.source else { return }
+            while backup?.done == false, backup?.current == nil {
+                guard case .ready = session.phase, !Task.isCancelled else {
+                    backup?.report.interrupted = true
+                    backup?.done = true
+                    return
+                }
+                guard let upload = await source.next() else {
+                    backup?.done = true
+                    return
+                }
+                do {
+                    let (id, output) = try session.requestPut(
+                        WireDataFile(upload.bytes), hash: upload.hash, metadata: try upload.header.encoded(), now: .now)
+                    backup?.current = (id, upload)
+                    await performBackup(output)
+                } catch {
+                    backup?.report.failed.append(.rejected)
+                }
+            }
         }
 
         private mutating func request<T>(_ body: (inout WireClientSession) throws -> T) throws -> T {

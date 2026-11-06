@@ -396,6 +396,14 @@ private struct SyncStatusRow: View {
             if let notice = sync.notice, !sync.isSyncing {
                 Text(notice).font(.footnote).foregroundStyle(.red)
             }
+            // EP-33: the ink backup has its own line, so it never reads as a failed sync.
+            if let backedUp = sync.lastBackedUp {
+                Text("Ink backed up to your Mac \(backedUp.formatted(date: .abbreviated, time: .shortened)).")
+                    .foregroundStyle(Theme.text3)
+            }
+            if let notice = sync.backupNotice, !sync.isSyncing {
+                Text(notice).foregroundStyle(Theme.text3)
+            }
         }
     }
 
@@ -407,6 +415,7 @@ private struct SyncStatusRow: View {
             Label(progress.filesTotal == 0 ? "Checking the library…" : "Receiving \(min(progress.filesDone + 1, progress.filesTotal)) of \(progress.filesTotal)",
                   systemImage: "arrow.down.circle")
         case .filing: Label("Filing worksheets…", systemImage: "tray.and.arrow.down")
+        case .backingUp: Label("Backing up ink to your Mac…", systemImage: "arrow.up.circle")
         }
     }
 }

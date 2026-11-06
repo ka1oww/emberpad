@@ -18,6 +18,8 @@ public enum WireClientEvent: Equatable, Sendable {
     /// Every byte arrived, the size matched and the SHA-256 matched the requested hash.
     case completed(WireRequestID, ContentHash, totalBytes: UInt64)
     case failed(WireRequestID, WireRequestFailure)
+    /// Version 2: the server stored the PUT, or (`alreadyHeld`) already had these bytes and kept no new copy.
+    case putCompleted(WireRequestID, alreadyHeld: Bool)
     case closed(WireCloseReason)
 }
 
@@ -44,9 +46,22 @@ public struct WireClientSession: Sendable {
         var consumed: UInt64 = 0
     }
 
+    private struct Upload {
+        let file: any WireFile
+        let size: UInt64
+        var sent: UInt64 = 0
+        /// Total credit the server has granted.
+        var granted: UInt64 = 0
+        /// PUT_END was sent; only the server's PUT_DONE or ERROR is left.
+        var ended = false
+
+        var hasWork: Bool { !ended && (granted > sent || sent == size) }
+    }
+
     private enum Kind {
         case manifest
         case file(FileTransfer)
+        case upload(Upload)
     }
 
     private struct Request {
@@ -60,19 +75,25 @@ public struct WireClientSession: Sendable {
             switch kind {
             case .manifest: true
             case .file(let file): file.granted > file.received
+            case .upload(let upload): !upload.hasWork
             }
         }
     }
 
     public let limits: WireLimits
     public private(set) var phase: Phase = .idle
+    private let hello: WireHello
+    private var peerMaxChunkBytes = WireProtocol.chunkSizeBounds.lowerBound
     private var handshakeStarted: Instant?
     private var decoder: WireFrameDecoder
     private var requests: [WireRequestID: Request] = [:]
     private var lastRequestID: UInt32 = 0
 
-    public init(limits: WireLimits = .standard) {
+    /// `versions` defaults to every version this build supports; tests pass `1...1` to play a client from before
+    /// PUT existed.
+    public init(limits: WireLimits = .standard, versions: ClosedRange<UInt16> = WireProtocol.supportedVersions) {
         self.limits = limits
+        hello = limits.hello(role: .client, versions: versions)
         decoder = WireFrameDecoder(
             accepting: WireMessageType.serverToClient, maxChunkBytes: limits.maxChunkBytes,
             maxManifestBytes: limits.maxManifestBytes)
@@ -87,7 +108,7 @@ public struct WireClientSession: Sendable {
         guard phase == .idle else { return out }
         phase = .handshaking
         handshakeStarted = now
-        out.outbound.append(.hello(limits.hello(role: .client)))
+        out.outbound.append(.hello(hello))
         return out
     }
 
@@ -130,6 +151,76 @@ public struct WireClientSession: Sendable {
 
     public mutating func requestFile(for entry: ManifestEntry, now: Instant) throws(WireSessionError) -> (WireRequestID, WireClientOutput) {
         try requestFile(entry.sha256, expectedSize: UInt64(entry.size), now: now)
+    }
+
+    /// The negotiated version, once ready.
+    public var version: UInt16? {
+        if case .ready(let version) = phase { version } else { nil }
+    }
+
+    /// The server negotiated a version with PUT (2 or later).
+    public var supportsPut: Bool { (version ?? 0) >= WireProtocol.putVersion }
+
+    /// Version 2: offer `file` to the server under `hash`, with `metadata` for its receiver. Bytes flow only as the
+    /// server grants credit: call `pullPuts` whenever `hasPendingPutData`. The request ends with exactly one
+    /// `putCompleted` or `failed` event. Throws `unsupportedByPeer` when the server negotiated version 1, so an older
+    /// Mac is never sent a frame it does not know.
+    public mutating func requestPut(
+        _ file: any WireFile, hash: ContentHash, metadata: Data, now: Instant
+    ) throws(WireSessionError) -> (WireRequestID, WireClientOutput) {
+        guard case .ready = phase else { throw .notReady }
+        guard supportsPut else { throw .unsupportedByPeer }
+        guard file.size <= WireProtocol.maxPutBytes, (1...Int(WireProtocol.maxPutMetadataBytes)).contains(metadata.count)
+        else { throw .putTooLarge }
+        let id = try nextRequestID()
+        var upload = Upload(file: file, size: file.size)
+        var out = WireClientOutput()
+        out.outbound.append(.put(id, size: upload.size, hash: hash, metadata: metadata))
+        if upload.size == 0 {
+            upload.ended = true
+            out.outbound.append(.putEnd(id, totalBytes: 0))
+        }
+        requests[id] = Request(kind: .upload(upload), lastProgress: now)
+        return (id, out)
+    }
+
+    /// Some PUT has credit and bytes left (or only its PUT_END left), so `pullPuts` would produce frames.
+    public var hasPendingPutData: Bool {
+        requests.values.contains { request in
+            guard request.drainingSince == nil, case .upload(let upload) = request.kind else { return false }
+            return upload.hasWork
+        }
+    }
+
+    /// Up to `maxFrames` PUT_DATA frames within the credit the server granted, and PUT_END once a PUT's bytes are all
+    /// sent. A file that cannot be read fails its PUT as `unavailable` and cancels it.
+    public mutating func pullPuts(now: Instant, maxFrames: Int = 16) -> WireClientOutput {
+        var out = WireClientOutput()
+        guard case .ready = phase else { return out }
+        var frames = 0
+        let chunk = UInt64(min(limits.maxChunkBytes, peerMaxChunkBytes))
+        for id in requests.keys.sorted() {
+            while frames < maxFrames, var request = requests[id], request.drainingSince == nil,
+                case .upload(var upload) = request.kind, upload.hasWork {
+                frames += 1
+                if upload.sent == upload.size {
+                    upload.ended = true
+                    out.outbound.append(.putEnd(id, totalBytes: upload.size))
+                } else {
+                    let count = Int(min(chunk, upload.granted - upload.sent, upload.size - upload.sent))
+                    guard let bytes = try? upload.file.read(at: upload.sent, count: count), bytes.count == count else {
+                        abandon(id, .unavailable, now: now, &out)
+                        break
+                    }
+                    out.outbound.append(.putData(id, offset: upload.sent, bytes: bytes))
+                    upload.sent += UInt64(count)
+                }
+                request.kind = .upload(upload)
+                request.lastProgress = now
+                requests[id] = request
+            }
+        }
+        return out
     }
 
     /// Report that the caller has written `byteCount` more delivered bytes of a transfer. Once half a window is
@@ -219,10 +310,11 @@ public struct WireClientSession: Sendable {
             close(.remote(code), &out)
         case (.handshaking, .hello(let hello)):
             guard hello.role == .server else { return violate(.roleMismatch, &out) }
-            guard let version = limits.hello(role: .client).negotiatedVersion(with: hello) else {
+            guard let version = self.hello.negotiatedVersion(with: hello) else {
                 out.outbound.append(.error(nil, .unsupportedVersion))
                 return close(.unsupportedVersion, &out)
             }
+            peerMaxChunkBytes = hello.maxChunkBytes
             phase = .ready(version: version)
             out.events.append(.ready(version: version))
         case (.ready, .manifest(let id, let json)):
@@ -233,6 +325,10 @@ public struct WireClientSession: Sendable {
             receiveEnd(id, totalBytes: totalBytes, &out)
         case (.ready, .error(let id?, let code)):
             receiveError(id, code, &out)
+        case (.ready(let version), .putWindow(let id, let increment)) where version >= WireProtocol.putVersion:
+            receivePutWindow(id, increment: increment, now: now, &out)
+        case (.ready(let version), .putDone(let id, let alreadyHeld)) where version >= WireProtocol.putVersion:
+            receivePutDone(id, alreadyHeld: alreadyHeld, &out)
         default:
             violate(.unexpectedFrame(message.type), &out)
         }
@@ -293,10 +389,35 @@ public struct WireClientSession: Sendable {
         case .busy: failure = .busy
         case .manifestTooLarge: failure = .manifestTooLarge
         case .unavailable: failure = .unavailable
+        case .rejected: failure = .rejected
+        case .storageFailed: failure = .storageFailed
+        case .integrityFailed: failure = .hashMismatch
         case .protocolViolation, .unsupportedVersion: return violate(.unexpectedFrame(.error), &out)
         }
         requests[id] = nil
         if request.drainingSince == nil { out.events.append(.failed(id, failure)) }
+    }
+
+    private mutating func receivePutWindow(_ id: WireRequestID, increment: UInt32, now: Instant, _ out: inout WireClientOutput) {
+        guard var request = requests[id] else { return violate(.unknownRequest(id), &out) }
+        guard case .upload(var upload) = request.kind else { return violate(.unexpectedFrame(.putWindow), &out) }
+        upload.granted += UInt64(increment)
+        guard upload.granted <= upload.size, upload.granted - upload.sent <= WireProtocol.maxCreditBytes else {
+            return violate(.creditExceeded(id), &out)
+        }
+        request.kind = .upload(upload)
+        request.lastProgress = now
+        requests[id] = request
+    }
+
+    private mutating func receivePutDone(_ id: WireRequestID, alreadyHeld: Bool, _ out: inout WireClientOutput) {
+        guard let request = requests[id] else { return violate(.unknownRequest(id), &out) }
+        guard case .upload(let upload) = request.kind else { return violate(.unexpectedFrame(.putDone), &out) }
+        // The server may skip bytes it already holds, but cannot claim to have stored bytes it never received.
+        guard upload.ended || alreadyHeld || request.drainingSince != nil else { return violate(.lengthMismatch(id), &out) }
+        requests[id] = nil
+        guard request.drainingSince == nil else { return }
+        out.events.append(.putCompleted(id, alreadyHeld: alreadyHeld))
     }
 
     // MARK: - Helpers

@@ -20,6 +20,14 @@ struct WireCodecTests {
             .cancel(requestID(UInt32.max)),
             .error(requestID(3), .notFound),
             .error(nil, .protocolViolation),
+            .put(requestID(4), size: 4_097, hash: hash, metadata: Data(#"{"kind":"ink"}"#.utf8)),
+            .putWindow(requestID(4), increment: 4_097),
+            .putData(requestID(4), offset: 0, bytes: syntheticBytes(4_096)),
+            .putData(requestID(4), offset: 4_096, bytes: Data([0x7f])),
+            .putEnd(requestID(4), totalBytes: 4_097),
+            .putDone(requestID(4), alreadyHeld: false),
+            .putDone(requestID(5), alreadyHeld: true),
+            .error(requestID(6), .storageFailed),
         ]
     }
 
@@ -102,7 +110,7 @@ struct WireCodecTests {
     @Test func unknownFrameTypeIsRejectedFromItsFirstByte() {
         #expect(Self.violation(Data([0xee])) == .unknownFrameType(0xee))
         #expect(Self.violation(Data([0])) == .unknownFrameType(0))
-        #expect(Self.violation(WireCodec.encode(.cancel(requestID(1))) + Data([10])) == .unknownFrameType(10))
+        #expect(Self.violation(WireCodec.encode(.cancel(requestID(1))) + Data([15])) == .unknownFrameType(15))
     }
 
     @Test func frameTypesFromTheWrongDirectionAreRejectedBeforeTheirPayload() {
