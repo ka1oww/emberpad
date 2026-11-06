@@ -7,13 +7,19 @@ final class AppEnvironment {
     static let shared: Result<AppEnvironment, Error> = Result { try AppEnvironment() }
     let library: LibraryController
     let presentation = PresentationState()
-    let pairing = PairingController()
+    let pairing: PairingController
+    let sync: SyncClient
     private init() throws {
         let files = FileManager.default
         let support = try files.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let documents = try files.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        // The sync download lives in Application Support, out of the Files-visible Documents folder.
+        let syncFolder = LibrarySyncFolder(root: support.appendingPathComponent("Sync", isDirectory: true))
         library = LibraryController(store: try LibraryStore(root: support.appendingPathComponent("Library", isDirectory: true)),
-                                    inbox: documents.appendingPathComponent("Inbox", isDirectory: true))
+                                    inbox: documents.appendingPathComponent("Inbox", isDirectory: true), syncFolder: syncFolder)
+        let keychain = PairingKeychain()
+        pairing = PairingController(keychain: keychain)
+        sync = SyncClient(library: library, folder: syncFolder, credential: { try keychain.load() })
     }
 }
 
@@ -49,9 +55,12 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     func sceneDidBecomeActive(_ scene: UIScene) {
         environment?.presentation.mainSceneActive = true
         Task { await environment?.library.fileInbox() }
+        // Launch and every return to the foreground (EP-24). Networking runs only while EmberPad is active.
+        environment?.sync.sync()
     }
     func sceneWillResignActive(_ scene: UIScene) {
         environment?.presentation.mainSceneActive = false
+        environment?.sync.suspend()
         environment?.library.flushForBackground()
     }
     func sceneDidEnterBackground(_ scene: UIScene) { environment?.library.flushForBackground() }
@@ -67,7 +76,7 @@ private final class CaptureGuardHostingController: UIHostingController<LibraryVi
     init(environment: AppEnvironment) {
         self.environment = environment
         super.init(rootView: LibraryView(library: environment.library, presentation: environment.presentation,
-                                         pairing: environment.pairing))
+                                         pairing: environment.pairing, sync: environment.sync))
     }
     @MainActor required dynamic init?(coder aDecoder: NSCoder) { nil }
     override func viewDidLoad() {

@@ -7,19 +7,33 @@ import Testing
 /// nightly copy (simulated here, fully or cut short) puts it in the Inbox, and the iPad applies it. Every name and
 /// byte is synthetic.
 struct LibraryDeliveryTests {
+    /// The same delivery reaches the iPad by either route, and every ink-safety test below runs over both: the
+    /// nightly copy into the Inbox, or a sync download over the wire protocol from a server serving the Outbox.
     struct Fixture {
         let tree: SyntheticDriveTree
         let base: URL
+        let route: LibraryDeliveryRoute
+        let store: LibraryStore
         var outbox: LibraryOutbox { LibraryOutbox(root: base.appendingPathComponent("Outbox", isDirectory: true)) }
         var inbox: URL { base.appendingPathComponent("Inbox", isDirectory: true) }
-        var storeRoot: URL { base.appendingPathComponent("Library", isDirectory: true) }
+        var syncFolder: LibrarySyncFolder { LibrarySyncFolder(root: base.appendingPathComponent("Sync", isDirectory: true)) }
+        /// Beside `base`, so the Outbox tests see only what preparation wrote there.
+        let storeBase: URL
+        var storeRoot: URL { storeBase.appendingPathComponent("Library", isDirectory: true) }
 
-        init() throws {
+        init(route: LibraryDeliveryRoute = .inbox) throws {
             tree = try SyntheticDriveTree()
             base = temporaryRoot()
+            storeBase = temporaryRoot()
+            self.route = route
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            store = try LibraryStore(root: storeBase.appendingPathComponent("Library", isDirectory: true))
         }
-        func remove() { tree.remove(); try? FileManager.default.removeItem(at: base) }
+        func remove() {
+            tree.remove()
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: storeBase)
+        }
 
         /// Reads the tree with the Outbox's manifest as `previous`, as the Companion does, and writes the Outbox.
         @discardableResult
@@ -30,7 +44,40 @@ struct LibraryDeliveryTests {
 
         /// Copies the Outbox into the Inbox like `devicectl device copy to`: files merge into what is already there.
         /// `skipping` leaves PDFs out (an interrupted copy); `truncating` writes only half of those PDFs' bytes.
-        func deliver(skipping: Set<ContentHash> = [], truncating: Set<ContentHash> = [], manifest: Bool = true) throws {
+        /// By sync, `skipping` makes the server answer not-found for those PDFs (the connection dropping before
+        /// them) and `truncating` makes it serve only half of their bytes.
+        @discardableResult
+        func deliver(skipping: Set<ContentHash> = [], truncating: Set<ContentHash> = [], manifest: Bool = true) async throws -> LibrarySyncDownload? {
+            switch route {
+            case .inbox:
+                try copyToInbox(skipping: skipping, truncating: truncating, manifest: manifest)
+                return nil
+            case .sync:
+                #expect(manifest, "a sync always carries the manifest first")
+                return try await syncFromOutbox(skipping: skipping, truncating: truncating)
+            }
+        }
+
+        func syncFromOutbox(skipping: Set<ContentHash> = [], truncating: Set<ContentHash> = []) async throws -> LibrarySyncDownload {
+            var provider = TestProvider(manifestValue: try ManifestCodec.decode(Data(contentsOf: outbox.manifestURL)))
+            let filesFolder = outbox.root.appendingPathComponent(LibraryDelivery.folderName + "/files")
+            for name in try FileManager.default.contentsOfDirectory(atPath: filesFolder.path) {
+                let hash = try #require(LibraryDelivery.hash(fromFileName: name))
+                guard !skipping.contains(hash) else { continue }
+                let data = try Data(contentsOf: filesFolder.appendingPathComponent(name))
+                provider.files[hash] = truncating.contains(hash) ? data.prefix(data.count / 2) : data
+            }
+            let (client, server) = InMemoryWireTransport.pair(capacity: 4_096, maxReadBytes: 1_024)
+            let serving = Task { await serveLoopback(server, provider: provider) }
+            defer { serving.cancel() }
+            let store = self.store
+            let download = try await LibrarySyncDownloader(folder: syncFolder)
+                .download(over: client, local: { try await store.documents() })
+            _ = await serving.value
+            return download
+        }
+
+        func copyToInbox(skipping: Set<ContentHash>, truncating: Set<ContentHash>, manifest: Bool) throws {
             let source = outbox.root.appendingPathComponent(LibraryDelivery.folderName)
             let target = inbox.appendingPathComponent(LibraryDelivery.folderName)
             let files = FileManager.default
@@ -50,9 +97,14 @@ struct LibraryDeliveryTests {
             }
         }
 
+        /// Applies the route's delivery through the path the app uses for both routes.
         func apply(_ store: LibraryStore, now: Date = fixtureDate) async throws -> DeliveryReport {
-            let delivery = try #require(try InboxScanner.libraryDelivery(in: inbox))
-            return try await LibraryDeliveryApplier.apply(delivery, to: store, now: now, pageCount: { _ in 2 })
+            let outcome = try await LibraryDeliveryApplier.applyNewest(inbox: route == .inbox ? inbox : nil,
+                                                                       sync: route == .sync ? syncFolder : nil,
+                                                                       to: store, now: now, pageCount: { _ in 2 })
+            #expect(outcome.unreadable.isEmpty)
+            #expect(outcome.route == route)
+            return try #require(outcome.report)
         }
     }
 
@@ -138,12 +190,13 @@ struct LibraryDeliveryTests {
 
     // MARK: Applying on the iPad
 
-    @Test func aCompleteDeliveryFilesEverythingPairedAndBySubject() async throws {
-        let fixture = try Fixture(); defer { fixture.remove() }
+    @Test(arguments: LibraryDeliveryRoute.allCases)
+    func aCompleteDeliveryFilesEverythingPairedAndBySubject(route: LibraryDeliveryRoute) async throws {
+        let fixture = try Fixture(route: route); defer { fixture.remove() }
         try writeLibrary(fixture.tree)
         try fixture.prepare()
-        try fixture.deliver()
-        let store = try LibraryStore(root: fixture.storeRoot)
+        try await fixture.deliver()
+        let store = fixture.store
         let report = try await fixture.apply(store)
         #expect(report.isComplete && report.imported == 4 && report.archived == 0)
         let documents = try await current(store)
@@ -157,12 +210,13 @@ struct LibraryDeliveryTests {
         #expect(try await fixture.apply(store).alreadyApplied)
     }
 
-    @Test func aHalfDeliveredOutboxFilesOnlyWhatArrivedAndArchivesNothing() async throws {
-        let fixture = try Fixture(); defer { fixture.remove() }
+    @Test(arguments: LibraryDeliveryRoute.allCases)
+    func aHalfDeliveredOutboxFilesOnlyWhatArrivedAndArchivesNothing(route: LibraryDeliveryRoute) async throws {
+        let fixture = try Fixture(route: route); defer { fixture.remove() }
         try writeLibrary(fixture.tree)
         try fixture.prepare()
-        try fixture.deliver()
-        let store = try LibraryStore(root: fixture.storeRoot)
+        try await fixture.deliver()
+        let store = fixture.store
         _ = try await fixture.apply(store)
         let firstReceipt = try await store.appliedDeliveryDigest()
         let notes = try #require(try await current(store).first { $0.subject == "Math" })
@@ -177,7 +231,7 @@ struct LibraryDeliveryTests {
         // Prepare without the previous manifest so the vanished booklet really is dropped and would be archived.
         try FileManager.default.removeItem(at: fixture.outbox.root)
         try fixture.prepare()
-        try fixture.deliver(skipping: [hash("revised synthetic notes"), hash("EMBER PHYSICS/Synthetic Physics Sheet.pdf")])
+        try await fixture.deliver(skipping: [hash("revised synthetic notes"), hash("EMBER PHYSICS/Synthetic Physics Sheet.pdf")])
 
         let report = try await fixture.apply(store, now: fixtureDate.addingTimeInterval(86_400))
         #expect(!report.isComplete)
@@ -195,7 +249,7 @@ struct LibraryDeliveryTests {
         #expect(!documents.contains { $0.subject == "Physics" })
 
         // The rest arrives: the inked notes gain a new version beside them, and only now is the booklet archived.
-        try fixture.deliver()
+        try await fixture.deliver()
         let finished = try await fixture.apply(store, now: fixtureDate.addingTimeInterval(2 * 86_400))
         #expect(finished.isComplete && finished.versionsAdded == 1 && finished.imported == 1 && finished.archived == 1)
         #expect(try await store.document(notes.id).status == .olderVersion)
@@ -203,18 +257,19 @@ struct LibraryDeliveryTests {
         #expect(try await store.documents().first { $0.subject == "Booklets" }?.status == .archived)
     }
 
-    @Test func aTruncatedPDFIsNeverFiledAndNeverReplacesAnything() async throws {
-        let fixture = try Fixture(); defer { fixture.remove() }
+    @Test(arguments: LibraryDeliveryRoute.allCases)
+    func aTruncatedPDFIsNeverFiledAndNeverReplacesAnything(route: LibraryDeliveryRoute) async throws {
+        let fixture = try Fixture(route: route); defer { fixture.remove() }
         try writeLibrary(fixture.tree)
         try fixture.prepare()
-        try fixture.deliver()
-        let store = try LibraryStore(root: fixture.storeRoot)
+        try await fixture.deliver()
+        let store = fixture.store
         _ = try await fixture.apply(store)
         let booklet = try #require(try await current(store).first { $0.subject == "Booklets" })
 
         try fixture.tree.write(Self.booklet, "revised synthetic booklet with more pages")
         try fixture.prepare()
-        try fixture.deliver(truncating: [hash("revised synthetic booklet with more pages")])
+        try await fixture.deliver(truncating: [hash("revised synthetic booklet with more pages")])
         let report = try await fixture.apply(store)
         #expect(report.missing.map(\.relativePath) == ["JC/Synthetic Booklet.pdf"] && report.replaced == 0)
         #expect(try await store.document(booklet.id).source.sha256 == booklet.source.sha256)
@@ -225,7 +280,7 @@ struct LibraryDeliveryTests {
         let fixture = try Fixture(); defer { fixture.remove() }
         try writeLibrary(fixture.tree)
         try fixture.prepare()
-        try fixture.deliver(manifest: false)
+        try await fixture.deliver(manifest: false)
         #expect(try InboxScanner.libraryDelivery(in: fixture.inbox) == nil)
         let manifest = try Data(contentsOf: fixture.outbox.manifestURL)
         try manifest.prefix(manifest.count / 2)
@@ -235,12 +290,13 @@ struct LibraryDeliveryTests {
         #expect(try InboxScanner.items(in: fixture.inbox).isEmpty)
     }
 
-    @Test func anOpenWorksheetDefersArchivesUntilItCanBeFiled() async throws {
-        let fixture = try Fixture(); defer { fixture.remove() }
+    @Test(arguments: LibraryDeliveryRoute.allCases)
+    func anOpenWorksheetDefersArchivesUntilItCanBeFiled(route: LibraryDeliveryRoute) async throws {
+        let fixture = try Fixture(route: route); defer { fixture.remove() }
         try writeLibrary(fixture.tree)
         try fixture.prepare()
-        try fixture.deliver()
-        let store = try LibraryStore(root: fixture.storeRoot)
+        try await fixture.deliver()
+        let store = fixture.store
         _ = try await fixture.apply(store)
         let notes = try #require(try await current(store).first { $0.subject == "Math" })
         try await store.pinDocument(notes.id)
@@ -249,7 +305,7 @@ struct LibraryDeliveryTests {
         try FileManager.default.removeItem(at: fixture.outbox.root)
         try fixture.tree.delete(Self.booklet)
         try fixture.prepare()
-        try fixture.deliver()
+        try await fixture.deliver()
         let report = try await fixture.apply(store)
         #expect(report.refused.keys.map(\.relativePath) == ["NOTES & TUTORIALS/Synthetic Notes.pdf"])
         #expect(report.archived == 0 && report.archivesDeferred == 1)
@@ -259,15 +315,16 @@ struct LibraryDeliveryTests {
         #expect(finished.isComplete && finished.replaced == 1 && finished.archived == 1)
     }
 
-    @Test func worksheetsImportedOutsideTheLibraryAreNeverArchivedByADelivery() async throws {
-        let fixture = try Fixture(); defer { fixture.remove() }
+    @Test(arguments: LibraryDeliveryRoute.allCases)
+    func worksheetsImportedOutsideTheLibraryAreNeverArchivedByADelivery(route: LibraryDeliveryRoute) async throws {
+        let fixture = try Fixture(route: route); defer { fixture.remove() }
         try writeLibrary(fixture.tree)
-        let store = try LibraryStore(root: fixture.storeRoot)
+        let store = fixture.store
         let own = try await store.importPDF(data: Data("synthetic own worksheet".utf8),
                                             source: SourcePath(classFolder: "Synthetic Class", relativePath: "own.pdf"), pageCount: 1)
         try await store.saveDrawing(Data("synthetic-ink".utf8), documentID: own.id, page: 0, hasInk: true)
         try fixture.prepare()
-        try fixture.deliver()
+        try await fixture.deliver()
         let report = try await fixture.apply(store)
         #expect(report.isComplete && report.archived == 0)
         #expect(try await store.document(own.id).status == .current)
@@ -277,12 +334,12 @@ struct LibraryDeliveryTests {
         let fixture = try Fixture(); defer { fixture.remove() }
         try writeLibrary(fixture.tree)
         try fixture.prepare()
-        try fixture.deliver()
-        let store = try LibraryStore(root: fixture.storeRoot)
+        try await fixture.deliver()
+        let store = fixture.store
         _ = try await fixture.apply(store)
         try fixture.tree.write(Self.notes, "revised synthetic notes")
         try fixture.prepare()
-        try fixture.deliver()
+        try await fixture.deliver()
         let files = fixture.inbox.appendingPathComponent("EmberLibrary/files")
         let unrelated = files.appendingPathComponent("keep-me.pdf")
         try Data("synthetic".utf8).write(to: unrelated)

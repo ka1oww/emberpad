@@ -288,8 +288,12 @@ public struct LibrarySyncDownloader: Sendable {
             case .closed(let reason):
                 closeReason = reason
                 guard manifest != nil else { throw LibrarySyncError.closedBeforeManifest(reason) }
-                for entry in queue { failed[entry.sha256] = .connectionClosed }
+                for entry in queue {
+                    failed[entry.sha256] = .connectionClosed
+                    status.bytesTotal -= entry.size
+                }
                 queue = []
+                progress(status)
                 try finish()
             }
         }
@@ -354,5 +358,61 @@ public struct LibrarySyncDownloader: Sendable {
         private mutating func request<T>(_ body: (inout WireClientSession) throws -> T) throws -> T {
             do { return try body(&session) } catch let error as WireSessionError { throw LibrarySyncError.session(error) }
         }
+    }
+}
+
+// MARK: - Choosing between the Inbox and sync
+
+/// The route a library delivery reached the iPad by.
+public enum LibraryDeliveryRoute: String, Sendable, CaseIterable {
+    /// The nightly copy of the Outbox into `Documents/Inbox`.
+    case inbox
+    /// A sync download into the app's own sync folder.
+    case sync
+}
+
+/// What `LibraryDeliveryApplier.applyNewest` did.
+public struct PendingDeliveryOutcome: Sendable {
+    /// The route whose delivery was applied, or nil when neither route held one.
+    public var route: LibraryDeliveryRoute?
+    public var report: DeliveryReport?
+    /// Routes holding a manifest that could not be read (cut short or not version 2), with the reason. Such a
+    /// delivery changes nothing.
+    public var unreadable: [LibraryDeliveryRoute: String] = [:]
+
+    public init(route: LibraryDeliveryRoute? = nil, report: DeliveryReport? = nil, unreadable: [LibraryDeliveryRoute: String] = [:]) {
+        self.route = route
+        self.report = report
+        self.unreadable = unreadable
+    }
+}
+
+extension LibraryDeliveryApplier {
+    /// Applies the newest library delivery waiting by either route, by the manifest's `generatedAt`, through
+    /// `apply`, the one manifest path both routes share. The older delivery is never applied in the same check:
+    /// its absences are stale and could archive papers the newer one adds, and once the newer delivery is
+    /// complete its receipt marks the older one superseded. On a tie the sync copy wins, as its bytes were
+    /// verified as they arrived. After a complete apply from the sync folder its downloaded PDFs are dropped,
+    /// because the library now holds them.
+    public static func applyNewest(inbox: URL?, sync: LibrarySyncFolder?, to store: LibraryStore, now: Date = Date(),
+                                   read: Reader = { try Data(contentsOf: $0) }, pageCount: PageCounter) async throws -> PendingDeliveryOutcome {
+        var outcome = PendingDeliveryOutcome()
+        var candidates: [(LibraryDeliveryRoute, InboxLibraryDelivery)] = []
+        func look(_ route: LibraryDeliveryRoute, _ body: () throws -> InboxLibraryDelivery?) {
+            do { if let delivery = try body() { candidates.append((route, delivery)) } }
+            catch { outcome.unreadable[route] = error.localizedDescription }
+        }
+        if let sync { look(.sync) { try sync.delivery() } }
+        if let inbox { look(.inbox) { try InboxScanner.libraryDelivery(in: inbox) } }
+        // Sync is listed first, so `max` keeps it on a tie.
+        guard let (route, delivery) = candidates.reduce(nil, { (best: (LibraryDeliveryRoute, InboxLibraryDelivery)?, next) in
+            guard let best else { return next }
+            return next.1.manifest.generatedAt > best.1.manifest.generatedAt ? next : best
+        }) else { return outcome }
+        let report = try await apply(delivery, to: store, now: now, read: read, pageCount: pageCount)
+        outcome.route = route
+        outcome.report = report
+        if route == .sync, report.isComplete { sync?.removeDownloadedFiles() }
+        return outcome
     }
 }
