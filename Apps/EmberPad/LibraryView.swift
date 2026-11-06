@@ -401,6 +401,7 @@ private struct LibraryCardCell: View {
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
     @ObservedObject var thumbnails: ThumbnailCache
+    @StateObject private var flattenedExport = FlattenedExportModel()
 
     var body: some View {
         // Subscribes the card to thumbnail arrivals for this document version.
@@ -423,9 +424,12 @@ private struct LibraryCardCell: View {
                     Task { await library.archiveDocument(record.id) }
                 }
             }
-            Button("Export flattened PDF") {}
-                .disabled(true)
+            Button("Export flattened PDF", systemImage: "square.and.arrow.up") {
+                flattenedExport.export(record.id, library: library)
+            }
+            .disabled(record.role != .student || flattenedExport.isExporting)
         }
+        .flattenedExportSheet(flattenedExport)
         .task(id: ThumbnailCache.key(for: record)) {
             await thumbnails.thumbnail(for: record)
         }

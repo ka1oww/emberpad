@@ -154,6 +154,7 @@ struct EditorScreen: View {
     @SceneStorage("cardOpen") private var teacherCardOpen = true
     @SceneStorage("cardCorner.landscape") private var landscapeCorner = TeacherCopyCardCorner.topLeading
     @SceneStorage("cardCorner.portrait") private var portraitCorner = TeacherCopyCardCorner.topLeading
+    @StateObject private var flattenedExport = FlattenedExportModel()
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
@@ -200,6 +201,7 @@ struct EditorScreen: View {
             .overlay(alignment: .top) { ToolToastOverlay(toast: tools.toast) }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .flattenedExportSheet(flattenedExport)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 if let session { EditorTitleBlock(session: session, currentPage: chrome.currentPage) }
@@ -229,9 +231,16 @@ struct EditorScreen: View {
                     Button {} label: {
                         HStack { Text("Record lesson"); Spacer(); PhaseTag(text: "Phase 3") }
                     }.disabled(true)
-                    Button {} label: {
-                        HStack { Text("Export flattened PDF"); Spacer(); PhaseTag(text: "Phase 4") }
-                    }.disabled(true)
+                    Button {
+                        flattenedExport.export(documentID, library: library)
+                    } label: {
+                        HStack {
+                            Text("Export flattened PDF")
+                            Spacer()
+                            if flattenedExport.isExporting { ProgressView() }
+                        }
+                    }
+                    .disabled(session?.record.role != .student || flattenedExport.isExporting)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
