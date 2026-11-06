@@ -93,13 +93,17 @@ struct SharePillLabel: View {
     }
 }
 
-/// The Sharing section shared by the share pill menu and the More menu.
-/// Mirror-mode switching arrives with EP-15, so both rows are disabled placeholders.
+/// The Sharing section shared by the share pill menu and the More menu: the two student-view framings, the
+/// current one checkmarked (design 5.5). There is deliberately no Mirror Entire Screen.
 struct WorksheetSharingRows: View {
+    @Binding var framing: StudentFraming
     var body: some View {
         Section("Sharing") {
-            Button("Mirror Presenter Page (follow my view)") {}.disabled(true)
-            Button("Mirror Full Page") {}.disabled(true)
+            Picker("Student view framing", selection: $framing) {
+                ForEach(StudentFraming.allCases) { mode in Text(mode.title).tag(mode) }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
         }
     }
 }
@@ -196,7 +200,7 @@ struct EditorScreen: View {
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu {
-                    WorksheetSharingRows()
+                    WorksheetSharingRows(framing: $presentation.studentFraming)
                 } label: {
                     SharePillLabel(state: pillState, short: shortPill)
                 }
@@ -214,7 +218,7 @@ struct EditorScreen: View {
                 Button("Undo", systemImage: "arrow.uturn.backward") { renderer?.undo() }
                 Button("Redo", systemImage: "arrow.uturn.forward") { renderer?.redo() }
                 Menu {
-                    WorksheetSharingRows()
+                    WorksheetSharingRows(framing: $presentation.studentFraming)
                     Button {} label: {
                         HStack { Text("Record lesson"); Spacer(); PhaseTag(text: "Phase 3") }
                     }.disabled(true)
