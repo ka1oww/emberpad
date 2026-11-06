@@ -133,11 +133,7 @@ public struct LibraryOutbox: Sendable {
     /// True for any item at `url`, including a symlink (which `fileExists` would follow).
     static func itemExists(_ url: URL) -> Bool { (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil }
 
-    static func matches(_ url: URL, _ entry: ManifestEntry) -> Bool {
-        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
-              size.int64Value == entry.size, let hash = try? ContentHash.digest(fileAt: url) else { return false }
-        return hash == entry.sha256
-    }
+    static func matches(_ url: URL, _ entry: ManifestEntry) -> Bool { DeliveryFileCheck.matches(url, entry) }
 
     /// Moves `stage` to `destination` in one rename. An existing destination is exchanged with the stage
     /// (`RENAME_SWAP`), so the old Outbox lands in the stage folder and is removed with it.
@@ -191,6 +187,9 @@ extension InboxScanner {
 public struct DeliveryReport: Equatable, Sendable {
     /// True when the delivery was already fully applied, so nothing was read or changed.
     public var alreadyApplied = false
+    /// True when a newer manifest was already applied completely (for example by sync before the nightly Inbox
+    /// copy of an older one), so nothing was read or changed.
+    public var superseded = false
     public var imported = 0
     public var replaced = 0
     public var versionsAdded = 0
@@ -223,9 +222,16 @@ public enum LibraryDeliveryApplier {
     public static func apply(_ delivery: InboxLibraryDelivery, to store: LibraryStore, now: Date = Date(),
                              read: Reader = { try Data(contentsOf: $0) }, pageCount: PageCounter) async throws -> DeliveryReport {
         var report = DeliveryReport()
-        if try await store.appliedDeliveryDigest() == delivery.manifestDigest {
-            report.alreadyApplied = true
-            return report
+        if let receipt = try await store.appliedDelivery() {
+            if receipt.manifestSHA256 == delivery.manifestDigest {
+                report.alreadyApplied = true
+                return report
+            }
+            // An older manifest would archive papers the newer one added. Its absences are stale, so skip it whole.
+            if let newest = receipt.manifestGeneratedAt, delivery.manifest.generatedAt < newest {
+                report.superseded = true
+                return report
+            }
         }
         let actions = try DiffPlanner.plan(remote: delivery.manifest, local: try await store.documents(), now: now)
         var archives: [UUID] = []
@@ -279,7 +285,7 @@ public enum LibraryDeliveryApplier {
             try await store.archive(documentID: id)
             report.archived += 1
         }
-        try await store.recordAppliedDelivery(delivery.manifestDigest, at: now)
+        try await store.recordAppliedDelivery(delivery.manifestDigest, generatedAt: delivery.manifest.generatedAt, at: now)
         removeStaleFiles(in: delivery)
         return report
     }
