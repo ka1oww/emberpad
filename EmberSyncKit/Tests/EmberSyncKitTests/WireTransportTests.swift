@@ -5,7 +5,7 @@ import Testing
 /// Serves one connection: answers control frames, then sends DATA while any transfer has credit. A frozen server
 /// completes the handshake and then reads but never answers or sends again.
 @discardableResult
-func serveLoopback(_ transport: InMemoryWireTransport, provider: TestProvider, limits: WireLimits = .standard,
+func serveLoopback(_ transport: any WireTransport, provider: TestProvider, limits: WireLimits = .standard,
                    frozenAfterHello: Bool = false) async -> WireServerSession.Phase {
     var session = WireServerSession(provider: provider, limits: limits, now: .now)
     do {

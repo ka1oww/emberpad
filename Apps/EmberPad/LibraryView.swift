@@ -19,6 +19,7 @@ struct LibraryView: View {
     @StateObject private var thumbnails: ThumbnailCache
     private let signingExpiryDate: Date?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @ObservedObject var sync: SyncClient
     @State private var showImport = false
     @State private var showPairing = false
     @State private var confirmForget = false
@@ -153,19 +154,10 @@ struct LibraryView: View {
             } else {
                 Text("Inbox not checked yet")
             }
-            HStack(spacing: 6) {
-                Text("Mac sync")
-                Text("Phase 2")
-                    .font(.system(size: 10, weight: .semibold))
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Theme.surface2, in: Capsule())
-                    .foregroundStyle(Theme.text3)
-                Spacer()
-                Button("Sync now") {}
-                    .disabled(true)
-            }
             if let paired = pairing.paired {
-                Text("Paired with your Mac (\(paired.shortID))")
+                SyncStatusRow(sync: sync, paired: paired)
+            } else {
+                Text("Automatic Mac sync starts once you pair with your Mac.")
             }
             SigningFooterLine(expiry: signingExpiryDate)
         }
@@ -275,6 +267,10 @@ struct LibraryView: View {
                 Menu {
                     Button("File Inbox", systemImage: "tray") { Task { await library.fileInbox() } }
                         .disabled(library.isImporting)
+                    if pairing.paired != nil {
+                        Button("Sync now", systemImage: "arrow.triangle.2.circlepath") { sync.sync() }
+                            .disabled(sync.isSyncing)
+                    }
                     if pairing.paired == nil {
                         Button("Pair with Mac…", systemImage: "qrcode.viewfinder") { showPairing = true }
                     } else {
@@ -367,6 +363,49 @@ struct LibraryView: View {
 
     private func updateColumnVisibility(for sizeClass: UserInterfaceSizeClass?) {
         columnVisibility = sizeClass == .compact ? .detailOnly : .all
+    }
+}
+
+/// The minimal EP-24 sync hook: what sync is doing, when it last finished, and **Sync now**. The full sync and
+/// pairing screen is EP-25.
+private struct SyncStatusRow: View {
+    @ObservedObject var sync: SyncClient
+    let paired: PairingController.Paired
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                status
+                Spacer()
+                Button("Sync now") { sync.sync() }
+                    .disabled(sync.isSyncing)
+            }
+            if case .downloading(let progress) = sync.phase, progress.filesTotal > 0 {
+                ProgressView(value: progress.fraction)
+            }
+            Group {
+                if let last = sync.lastSynced {
+                    Text("Last synced \(last.formatted(date: .abbreviated, time: .shortened)) with your Mac (\(paired.shortID)).")
+                } else {
+                    Text("Paired with your Mac (\(paired.shortID)). Not synced yet.")
+                }
+            }
+            .font(.footnote).foregroundStyle(.secondary)
+            if let notice = sync.notice, !sync.isSyncing {
+                Text(notice).font(.footnote).foregroundStyle(.red)
+            }
+        }
+    }
+
+    @ViewBuilder private var status: some View {
+        switch sync.phase {
+        case .idle: Label("Mac sync", systemImage: "arrow.triangle.2.circlepath")
+        case .connecting: Label("Looking for your Mac…", systemImage: "wifi")
+        case .downloading(let progress):
+            Label(progress.filesTotal == 0 ? "Checking the library…" : "Receiving \(min(progress.filesDone + 1, progress.filesTotal)) of \(progress.filesTotal)",
+                  systemImage: "arrow.down.circle")
+        case .filing: Label("Filing worksheets…", systemImage: "tray.and.arrow.down")
+        }
     }
 }
 

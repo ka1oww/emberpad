@@ -13,6 +13,8 @@ enum LibrarySidebarSelection: Hashable {
 final class LibraryController: ObservableObject {
     let store: LibraryStore
     let inbox: URL
+    /// Where sync (EP-24) downloads the Mac's library; applied by the same manifest path as the Inbox.
+    let syncFolder: LibrarySyncFolder?
     @Published private(set) var documents: [DocumentRecord] = [] {
         didSet { reconcileSelection() }
     }
@@ -31,7 +33,11 @@ final class LibraryController: ObservableObject {
         case flush
     }
 
-    init(store: LibraryStore, inbox: URL) { self.store = store; self.inbox = inbox }
+    init(store: LibraryStore, inbox: URL, syncFolder: LibrarySyncFolder? = nil) {
+        self.store = store
+        self.inbox = inbox
+        self.syncFolder = syncFolder
+    }
     var classes: [String] { Set(documents.filter { !$0.showsAsArchived }.map { $0.source.source.classFolder }).sorted() }
 
     // MARK: - EP-10 library selection (subject sidebar + class filter)
@@ -265,15 +271,26 @@ final class LibraryController: ObservableObject {
         await refresh()
     }
 
-    func fileInbox() async {
+    /// Files the Mac library delivery (the newer of the Inbox copy and the sync download) and loose Inbox PDFs.
+    /// A second check while one runs is skipped, unless `waitIfBusy` asks it to wait its turn, as sync does
+    /// after a download so its delivery is never left unfiled. Returns what the library delivery did.
+    @discardableResult
+    func fileInbox(waitIfBusy: Bool = false) async -> PendingDeliveryOutcome? {
+        if waitIfBusy {
+            while isImporting {
+                guard (try? await Task.sleep(for: .milliseconds(100))) != nil else { return nil }
+            }
+        }
         let operation = FailedOperation.inbox
-        guard !isImporting else { return }
+        guard !isImporting else { return nil }
         isImporting = true
         defer { isImporting = false }
         var inboxError: String?
+        var outcome: PendingDeliveryOutcome?
         do {
+            // Saves every open page's ink before anything is filed.
             try await flush()
-            await applyLibraryDelivery()
+            outcome = await applyLibraryDelivery()
             let items = try InboxScanner.items(in: inbox)
             for item in items {
                 do {
@@ -292,29 +309,41 @@ final class LibraryController: ObservableObject {
             setError(inboxError, for: operation)
         } else { clearError(for: operation) }
         await refresh()
+        return outcome
     }
 
-    /// Applies the Mac's library delivery (`Inbox/EmberLibrary`) through the manifest planner. A delivery that is
-    /// still arriving files only the PDFs that arrived intact and archives nothing; the next check finishes it.
-    private func applyLibraryDelivery() async {
+    /// Applies the Mac's library delivery through the manifest planner: the newer of the nightly Inbox copy
+    /// (`Inbox/EmberLibrary`) and the sync download, both by `LibraryDeliveryApplier.applyNewest`. A delivery that
+    /// is still arriving files only the PDFs that arrived intact and archives nothing; the next check finishes it.
+    /// The store's ink rules hold for both: an inked copy gets a new version beside it and an open worksheet waits.
+    private func applyLibraryDelivery() async -> PendingDeliveryOutcome? {
         do {
-            guard let delivery = try InboxScanner.libraryDelivery(in: inbox) else { return }
-            let report = try await LibraryDeliveryApplier.apply(delivery, to: store, read: { try await CoordinatedPDFReader.read($0) },
-                                                                pageCount: { data in
-                guard let pdf = PDFDocument(data: data), !pdf.isLocked, pdf.pageCount > 0 else { return nil }
-                return pdf.pageCount
-            })
-            lastInboxImport = Date()
+            let outcome = try await LibraryDeliveryApplier.applyNewest(
+                inbox: inbox, sync: syncFolder, to: store, read: { try await CoordinatedPDFReader.read($0) },
+                pageCount: { data in
+                    guard let pdf = PDFDocument(data: data), !pdf.isLocked, pdf.pageCount > 0 else { return nil }
+                    return pdf.pageCount
+                })
+            guard let report = outcome.report else {
+                if outcome.unreadable[.inbox] != nil {
+                    errorMessage = "The Mac library delivery in the Inbox could not be read yet. Nothing was changed."
+                }
+                return outcome
+            }
+            if outcome.route == .inbox { lastInboxImport = Date() }
             await dropReplacedSessions()
+            let next = outcome.route == .sync ? "the next sync" : "the next Inbox check"
             if !report.missing.isEmpty {
                 errorMessage = "The Mac library is still arriving: \(report.missing.count) worksheet(s) not here yet. " +
-                    "Nothing was archived; they will be filed on the next Inbox check."
+                    "Nothing was archived; they will be filed on \(next)."
             } else if let reason = report.refused.values.sorted().first {
                 errorMessage = "\(report.refused.count) worksheet(s) from the Mac library could not be filed yet. " +
                     "Nothing was archived. " + reason
             }
+            return outcome
         } catch {
             errorMessage = "The Mac library delivery could not be read yet. Nothing was changed. " + error.localizedDescription
+            return nil
         }
     }
 
