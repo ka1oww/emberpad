@@ -9,7 +9,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     let tools: ToolState
     /// Internal, not private, so the EP-15 external-display screenshot test can scroll and zoom it.
     let pdfView = PageHitTestPDFView()
-    private var canvases: [Int: PKCanvasView] = [:]
+    private(set) var canvases: [Int: PKCanvasView] = [:]
     private weak var activeCanvas: PKCanvasView?
     private var pageObserver: NSObjectProtocol?
     private var viewportObservers: [NSObjectProtocol] = []
@@ -22,9 +22,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var publishing = true
     private var studentPage = 0
     /// True while EmberPad itself swaps a canvas drawing, so the change is not read as new ink.
-    private var isReplacingStroke = false
+    var isReplacingStroke = false
     /// The thin guide shown while a held highlighter stroke is about to snap straight.
     private let holdGuide = PDFOverlayPageController.makeHoldGuide()
+    /// EmberPad's own ink selection, for circle to lasso and the toolbar lasso (EP-29).
+    private(set) lazy var inkSelection = InkSelectionController(host: self)
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
 
@@ -78,6 +80,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let redoTap = UITapGestureRecognizer(target: self, action: #selector(redoGesture))
         redoTap.numberOfTapsRequired = 2; redoTap.numberOfTouchesRequired = 3
         pdfView.addGestureRecognizer(undoTap); pdfView.addGestureRecognizer(redoTap)
+        inkSelection.install(in: view, pages: pdfView)
         // Without a PKToolPicker nothing else answers the Pencil, so EmberPad follows
         // the iPad's double-tap and squeeze preferences itself (design 5.4).
         let pencil = UIPencilInteraction()
@@ -155,8 +158,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.tool = tools.pencilTool
         canvas.delegate = self
         canvas.addGestureRecognizer(makeHoldRecognizer())
+        inkSelection.prepare(canvas)
         canvases[index] = canvas
         pdfView.visibleCanvases = Array(canvases.values)
+        updateCanvasInput()
         return canvas
     }
 
@@ -168,6 +173,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         guard let canvas = overlayView as? PKCanvasView else { return }
         // Saving already happened through the model delegate; this callback only releases views.
         let index = session.pdf.index(for: page)
+        inkSelection.canvasWillLeave(canvas)
         if canvases[index] === canvas { canvases.removeValue(forKey: index) }
         self.pdfView.visibleCanvases = Array(canvases.values)
     }
@@ -175,6 +181,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !isReplacingStroke, let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
         let previousCount = session.drawing(on: page).strokes.count
+        inkSelection.pageDidChange(page)
         session.update(canvasView.drawing, page: page)
         straightenIfHeld(canvasView, page: page, previousCount: previousCount)
     }
@@ -187,7 +194,21 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// The single tool path: every live canvas gets the tool; new canvases take
     /// `tools.pencilTool` when they are created.
     func apply(_ tool: any PKTool) {
+        inkSelection.dismiss()
         for canvas in canvases.values { canvas.tool = tool }
+        updateCanvasInput()
+    }
+
+    /// Only the focused page takes Pencil input. The toolbar lasso is
+    /// EmberPad's own (EP-29), so with it chosen PencilKit's drawing
+    /// recogniser is off and the lasso recogniser takes the Pencil instead.
+    private func updateCanvasInput() {
+        let lasso = tools.current == .lasso
+        for candidate in canvases.values {
+            let focused = candidate === activeCanvas
+            candidate.drawingGestureRecognizer.isEnabled = focused && !lasso
+            InkSelectionController.lassoRecognizer(on: candidate)?.isEnabled = focused && lasso
+        }
     }
 
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
@@ -206,9 +227,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             studentPage = page
             publishPage()
         }
-        for candidate in canvases.values { candidate.drawingGestureRecognizer.isEnabled = candidate === canvas }
+        updateCanvasInput()
         canvas.tool = tools.pencilTool
-        // First responder keeps undo and the system lasso's edit menu on the touched page.
+        // First responder keeps undo on the touched page.
         canvas.becomeFirstResponder()
     }
 
@@ -301,6 +322,15 @@ extension PDFOverlayPageController {
         guard let hold = Self.holdRecognizer(on: canvas), hold.heldAtEnd else { return }
         // A hold applies to the one drawing change it ended, whatever that change was.
         hold.consumeHold()
+        if canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last, inkSelection.isLassoLoop(stroke) {
+            // Circle to lasso (EP-29): the same wait for PencilKit's commit as the snap below.
+            let count = canvas.drawing.strokes.count
+            let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
+            DispatchQueue.main.async { [weak self] in
+                self?.inkSelection.lassoNewestStroke(page: page, strokeCount: count, undoManager: undoManager)
+            }
+            return
+        }
         guard canvas.drawing.strokes.count == previousCount + 1, tools.settings.straightHighlighter,
               let stroke = canvas.drawing.strokes.last, stroke.ink.inkType == .marker, let straight = StrokeSnap.straightened(stroke) else { return }
         let count = canvas.drawing.strokes.count
@@ -347,7 +377,7 @@ extension PDFOverlayPageController {
 
     /// Registers an undo (or, while undoing, a redo) that sets `page` back to
     /// `restoring` and registers its own inverse.
-    private func registerDrawingSwap(on undoManager: UndoManager, page: Int, restoring: PKDrawing, then other: PKDrawing) {
+    func registerDrawingSwap(on undoManager: UndoManager, page: Int, restoring: PKDrawing, then other: PKDrawing) {
         undoManager.registerUndo(withTarget: self) { controller in
             MainActor.assumeIsolated {
                 controller.setDrawing(restoring, page: page)
@@ -359,6 +389,7 @@ extension PDFOverlayPageController {
     /// Sets a page's drawing from EmberPad's own undo and redo, whether or
     /// not its canvas is still on screen.
     private func setDrawing(_ drawing: PKDrawing, page: Int) {
+        inkSelection.pageDidChange(page)
         if let canvas = canvases[page] {
             isReplacingStroke = true
             canvas.drawing = drawing

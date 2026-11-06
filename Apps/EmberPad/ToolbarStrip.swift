@@ -248,14 +248,16 @@ struct ToolSettingsPopover: View {
                     TaggedRow(title: "Ball pen, brush pen", tag: "Not planned")
                 }
                 colorSection(.pen)
-                Section("Pen gestures") {
+                Section {
                     Toggle(isOn: Binding(get: { tools.settings.scribbleToErase }, set: tools.setScribbleToErase)) {
                         TaggedLabel(title: "Scribble to erase", tag: "Phase 3", stacked: true)
                     }.disabled(true)
-                    Toggle(isOn: Binding(get: { tools.settings.circleToLasso }, set: tools.setCircleToLasso)) {
-                        TaggedLabel(title: "Circle to lasso", tag: "Phase 3", stacked: true)
-                    }.disabled(true)
+                    Toggle("Circle to lasso", isOn: Binding(get: { tools.settings.circleToLasso }, set: tools.setCircleToLasso))
                     TaggedRow(title: "Pencil double-tap", tag: "iPad Settings")
+                } header: {
+                    Text("Pen gestures")
+                } footer: {
+                    Text("Circle ink with the pen and hold still for half a second to select it.")
                 }
             case .highlighter:
                 colorSection(.highlighter)
