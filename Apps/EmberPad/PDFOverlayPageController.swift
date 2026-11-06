@@ -13,6 +13,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var pageObserver: NSObjectProtocol?
     private var currentPage = 0
     private var studentPage = 0
+    /// True while EmberPad itself swaps a canvas drawing, so the change is not read as new ink.
+    private var isReplacingStroke = false
+    /// The thin guide shown while a held highlighter stroke is about to snap straight.
+    private let holdGuide = PDFOverlayPageController.makeHoldGuide()
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
 
@@ -98,6 +102,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.drawing = session.drawing(on: index)
         canvas.tool = tools.pencilTool
         canvas.delegate = self
+        canvas.addGestureRecognizer(makeHoldRecognizer())
         canvases[index] = canvas
         pdfView.visibleCanvases = Array(canvases.values)
         return canvas
@@ -116,8 +121,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-        guard let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
+        guard !isReplacingStroke, let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
+        let previousCount = session.drawing(on: page).strokes.count
         session.update(canvasView.drawing, page: page)
+        straightenIfHeld(canvasView, page: page, previousCount: previousCount)
     }
 
     func undo() { activeCanvas?.undoManager?.undo() }
@@ -171,6 +178,129 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let size = canvases[studentPage]?.bounds.size ?? page.bounds(for: .cropBox).size
         // A Teacher copy publishes only the private placeholder; the snapshot type refuses its pages.
         student.publish(session: session, pageIndex: studentPage, canvasSize: size)
+    }
+}
+
+// MARK: - Straight-line highlighter (EP-14)
+
+extension PDFOverlayPageController {
+    /// Every canvas gets a passive hold recogniser beside PencilKit's own; it
+    /// only reports holds and never touches the ink path (design 6.4).
+    private func makeHoldRecognizer() -> HoldRecognizer {
+        let hold = HoldRecognizer()
+        hold.onHold = { [weak self] in self?.updateHoldGuide($0) }
+        hold.onMoveAfterHold = { [weak self] in self?.updateHoldGuide($0) }
+        hold.onEnd = { [weak self] _ in self?.holdGuide.removeFromSuperlayer() }
+        return hold
+    }
+
+    private static func makeHoldGuide() -> CAShapeLayer {
+        let guide = CAShapeLayer()
+        guide.strokeColor = UIColor.emberAccent.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)).cgColor
+        guide.fillColor = nil
+        guide.lineWidth = 1.5
+        guide.lineCap = .round
+        guide.lineDashPattern = [4, 4]
+        return guide
+    }
+
+    /// While a held highlighter stroke is down, a dashed line shows where it
+    /// will snap: from where it began to the (flattened) Pencil position.
+    private func updateHoldGuide(_ hold: HoldRecognizer) {
+        guard tools.current == .highlighter, tools.settings.straightHighlighter,
+              let canvas = hold.view, let start = hold.startLocation, let current = hold.currentLocation
+        else { return }
+        let path = UIBezierPath()
+        path.move(to: start)
+        path.addLine(to: StrokeSnap.snappedEnd(from: start, to: current))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if holdGuide.superlayer !== canvas.layer {
+            holdGuide.frame = canvas.bounds
+            canvas.layer.addSublayer(holdGuide)
+        }
+        holdGuide.path = path.cgPath
+        CATransaction.commit()
+    }
+
+    private static func holdRecognizer(on canvas: PKCanvasView) -> HoldRecognizer? {
+        canvas.gestureRecognizers?.lazy.compactMap { $0 as? HoldRecognizer }.first
+    }
+
+    /// After PencilKit commits a stroke: if the Pencil was held still at its
+    /// end and it is a highlighter stroke, swap it for a straight one. The
+    /// swap waits a turn of the run loop so PencilKit finishes its commit and
+    /// closes its undo group first; the ink was already drawn, so nothing
+    /// here can delay it.
+    private func straightenIfHeld(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
+        guard let hold = Self.holdRecognizer(on: canvas), hold.heldAtEnd,
+              canvas.drawing.strokes.count == previousCount + 1 else { return }
+        // A hold applies to the one stroke it ended, whatever that stroke was.
+        hold.consumeHold()
+        guard tools.settings.straightHighlighter, let stroke = canvas.drawing.strokes.last,
+              stroke.ink.inkType == .marker, let straight = StrokeSnap.straightened(stroke) else { return }
+        let count = canvas.drawing.strokes.count
+        let undoManager = canvas.undoManager
+        DispatchQueue.main.async { [weak self] in
+            self?.replaceNewestStroke(page: page, strokeCount: count, with: straight, undoManager: undoManager)
+        }
+    }
+
+    /// Replaces the newest stroke on `page` with `replacement` so that the
+    /// stroke and its snap are one undo step: PencilKit's own undo action for
+    /// the freehand stroke is popped first, then one action swaps between the
+    /// page without the stroke and the page with the straight line. One undo
+    /// removes the straight line; redo puts it back. Does nothing if the
+    /// page's drawing has moved on since the stroke was committed.
+    func replaceNewestStroke(page: Int, strokeCount: Int, with replacement: PKStroke, undoManager: UndoManager?) {
+        guard let canvas = canvases[page], canvas.drawing.strokes.count == strokeCount, strokeCount > 0,
+              undoManager?.isUndoing != true, undoManager?.isRedoing != true else { return }
+        isReplacingStroke = true
+        defer {
+            isReplacingStroke = false
+            session.update(canvas.drawing, page: page)
+        }
+        if let undoManager, undoManager.canUndo {
+            undoManager.undo()
+            guard canvas.drawing.strokes.count == strokeCount - 1 else {
+                // The top undo step was not the freehand stroke: put it back and leave the ink as drawn.
+                undoManager.redo()
+                return
+            }
+        } else {
+            canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes.dropLast())
+        }
+        let before = canvas.drawing
+        let after = PKDrawing(strokes: before.strokes + [replacement])
+        canvas.drawing = after
+        if let undoManager {
+            undoManager.beginUndoGrouping()
+            registerDrawingSwap(on: undoManager, page: page, restoring: before, then: after)
+            undoManager.setActionName("Straight Line")
+            undoManager.endUndoGrouping()
+        }
+    }
+
+    /// Registers an undo (or, while undoing, a redo) that sets `page` back to
+    /// `restoring` and registers its own inverse.
+    private func registerDrawingSwap(on undoManager: UndoManager, page: Int, restoring: PKDrawing, then other: PKDrawing) {
+        undoManager.registerUndo(withTarget: self) { controller in
+            MainActor.assumeIsolated {
+                controller.setDrawing(restoring, page: page)
+                controller.registerDrawingSwap(on: undoManager, page: page, restoring: other, then: restoring)
+            }
+        }
+    }
+
+    /// Sets a page's drawing from EmberPad's own undo and redo, whether or
+    /// not its canvas is still on screen.
+    private func setDrawing(_ drawing: PKDrawing, page: Int) {
+        if let canvas = canvases[page] {
+            isReplacingStroke = true
+            canvas.drawing = drawing
+            isReplacingStroke = false
+        }
+        session.update(drawing, page: page)
     }
 }
 
