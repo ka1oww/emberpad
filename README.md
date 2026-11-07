@@ -1,6 +1,6 @@
 # EmberPad
 
-Base code for a personal offline iPad teaching app. The Ember House colour tokens, reusable type styles, original app and Companion artwork, and branded launch background are in place, along with the initial worksheet chrome and the toolbar strip; the teacher's on-device decisions are still pending. This is a development scaffold, not yet a classroom-ready release.
+Base code for a personal offline iPad teaching app. The Ember House colour tokens, reusable type styles, original app and Companion artwork, and branded launch background, the phase-1 library screen, the initial worksheet chrome and the toolbar strip are in place; the teacher's on-device decisions are still pending. This is a development scaffold, not yet a classroom-ready release.
 
 ## Layout
 
@@ -43,6 +43,8 @@ The GitHub workflow runs package tests, both unsigned builds, the EmberPadTests 
 Import PDFs with **Import from Files**, choosing an existing or new class name. Files open through security-scoped coordinated reads and are copied into the app. Encrypted/locked or unreadable PDFs are rejected. A Finder/Files delivery can also place PDFs at `Documents/Inbox/<Class>/<file>.pdf`; a loose Inbox PDF goes to `Unfiled`. The reserved `Documents/Inbox/EmberLibrary` folder is the Mac's library delivery, described below, and is never read as loose PDFs. Nested paths within a class are preserved as source identity. Inbox is checked on foreground and by **File Inbox**. Retained Inbox files are idempotent receipts, and are never deleted while a sender could be writing them. Symlink deliveries are skipped. No absent-file deletion is inferred from an incremental Inbox.
 
 If separate import locations would otherwise share a class/path, EmberPad gives the later assignment an available visible filename suffix, preserving any existing suffixes. It remembers each source's assignment, so re-imports keep their identity across picker batch order, Inbox/Files arrival order and app/store reopen. A changed file at that same source path follows the version rules below.
+
+The library sidebar groups non-archived Student worksheets by subject and shows their counts. Select a subject or **All subjects**, then optionally filter its grid by class tag; **Archived** shows archived Student worksheets. Cards use the Student copy's first page as a thumbnail and can show Updated, Older version, Teacher-paired and Ink badges. The grid defaults to newest first, with an oldest-first option. Use a card's context menu to archive or restore a worksheet. Import progress and operation errors appear in the library; retry is offered when the failed operation can be repeated. Signing reminders are amber at 48 hours or less, red below 24 hours, and unknown when the embedded signing expiry cannot be read. A [normal-state screenshot](docs/screenshots/library-normal-light.png) is one of the library state screenshots included under `docs/screenshots/`.
 
 Each document version has its own `Application Support/Library/<UUID>/` folder:
 
@@ -104,9 +106,9 @@ Each side keeps the pairing only as one generic-password Keychain item (this-dev
 
 ## Page and presentation seams
 
-`WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. The worksheet scrolls continuously (vertical, 16 pt page gaps with shadows on the canvas token); every ink canvas is forced to the light style so black ink never inverts in dark mode.
+`WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. The worksheet scrolls continuously (vertical, 16 pt page gaps with shadows on the canvas token); every ink canvas is forced to the light style so black ink never inverts in dark mode. The library uses a subject sidebar and paper grid.
 
-Theme tokens are defined in `Apps/EmberPad/Theme.swift`; the app chrome uses light/dark color sets in `Apps/EmberPad/Assets.xcassets`, while ink colors stay fixed for the white worksheet page. The fountain-pen default is black at the middle width (2.5), and the marker default is translucent yellow at 18. See the [light](docs/screenshots/theme-tokens-light.png) and [dark](docs/screenshots/theme-tokens-dark.png) token previews. The editor nav bar (serif title with page/save caption, share pill, Teacher-copy toggle, undo/redo, More menu), the capture-leak and ink-not-saved banners, and the page pill use those tokens; the floating Teacher card is a later package.
+Theme tokens are defined in `Apps/EmberPad/Theme.swift`; the app chrome uses light/dark color sets in `Apps/EmberPad/Assets.xcassets`, while ink colors stay fixed for the white worksheet page. The fountain-pen default is black at the middle width (2.5), and the marker default is translucent yellow at 18. See the [light](docs/screenshots/theme-tokens-light.png) and [dark](docs/screenshots/theme-tokens-dark.png) token previews. The editor nav bar (serif title with page/save caption, share pill, Teacher-copy toggle, undo/redo, More menu), the capture-leak and ink-not-saved banners, and the page pill use those tokens; the floating Teacher card is a later package. The library screen uses the same tokens.
 
 The original worksheet-and-pen AppIcon and `bg`-coloured iOS launch screen, plus the Companion's monochrome menu-bar glyph and window badge, are documented with their vector sources and raster exporters in the [iPad](Apps/EmberPad/Brand.Sources/README.md) and [Companion](Apps/Companion/Brand.Sources/README.md) source notes. See the [home-screen icon screenshot](docs/screenshots/home-screen-icon.png).
 
