@@ -59,7 +59,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
     var eraserSizeIndex = Theme.eraserDefaultSizeIndex
     /// Draw and hold for a straight highlighter line. Its behaviour ships separately.
     var straightHighlighter = true
-    /// Pen gestures, phase 3. Stored now so the teacher's choice survives until they ship.
+    /// Pen gestures, phase 3. Circle to lasso works (EP-29); scribble to erase is
+    /// stored now so the teacher's choice survives until it ships.
     var scribbleToErase = true
     var circleToLasso = true
 
