@@ -10,7 +10,7 @@ Base code for a personal offline iPad teaching app. The Ember House colour token
 | `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink and student-display scene |
 | `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, phase-2 placeholders, with no networking |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
-| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader and tests |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script, format helpers, disabled example config and LaunchAgent template |
 
@@ -80,6 +80,14 @@ Class is the folder- or file-name prefix (`MI PU1-3`, `YIJC JC1-2`, `NYJC-EJC JC
 
 The macOS Companion defaults to the discovered Drive EMBER folder and remembers a folder chosen with **Choose EMBER folder…**. Click **Prepare iPad library** to read it on demand; opening the window or changing folders does not start a scan. The window shows document counts per subject, the pair, single-copy and archived totals, and the PDFs or folders not read this time with their reasons. Preparation is read-only and keeps the snapshot in the window: it does not save a manifest or deliver files to the iPad. See the [light](docs/screenshots/companion-light.png) and [dark](docs/screenshots/companion-dark.png) screenshots.
 
+### Sync wire protocol
+
+`Wire*.swift` in EmberSyncKit is the private protocol a later transport carries between the Mac (server) and the iPad (client). It opens no connection itself: `WireClientSession` and `WireServerSession` are pure state machines that take received bytes and the current time and return frames to send and events, so a driver moves bytes and calls `tick` on a timer. The server emits at most one frame per `receive` call; send that frame, then call `receive(Data(), now:)` while `hasPendingInput` is true before reading more transport bytes. This bounds response generation for coalesced requests while preserving the transport's backpressure. `InMemoryWireTransport` is an in-process pair with bounded buffers for tests; it opens no socket.
+
+A frame is a 1-byte type, a 4-byte big-endian payload length and the payload. The client sends HELLO (magic `EMBR`, version range, role, largest chunk and manifest it accepts) and the server answers HELLO with the highest common version. The client then sends GET-MANIFEST (answered by MANIFEST, the `ManifestCodec` JSON) and GET by SHA-256 with initial credit (answered by DATA chunks at explicit offsets and a final END with the total length). Each request has a strictly increasing client-chosen id and gets exactly one terminal frame: MANIFEST, END or a request ERROR (not found, cancelled, stalled, busy, manifest too large, unavailable).
+
+Flow control is per transfer credit: the server sends only bytes the client has granted, chunked to the smaller of both peers' limits and round-robin across transfers. The client grants WINDOW increments only as the app reports bytes written, so a slow writer holds at most one window. The client checks every chunk's offset and credit, hashes the bytes as they arrive and reports a completed file only when the size and SHA-256 both match. CANCEL fails a request at once and discards its late bytes until the server acknowledges. A transfer with credit outstanding and no progress stalls on the client; one the client leaves without credit is dropped by the server. Unknown, out-of-direction and oversized frames are rejected from their headers before their payloads are buffered; malformed payloads are rejected when decoded. These violations close the session with a protocol-violation ERROR. Every length is bounded: chunks to 1 MiB, manifests to 32 MiB and credit to 16 MiB per transfer; concurrent requests are limited by `WireLimits`.
+
 ## Page and presentation seams
 
 `WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. A provisional vertical layout enables the spike; it is not the teacher's final navigation choice.
@@ -105,7 +113,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 - **Must resolve before first classroom use:** Teacher copies are identified by a version-2 manifest's role, but nothing yet keeps them off the student view: opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
 - External-display sharing/recording method and capture tests.
 - Scroll versus page navigation, production in-app screen styling and tool presentation.
-- Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
+- Joint planning before phase 2+: Bonjour/TLS-PSK pairing, iCloud/Drive, live ink, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
 No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.
