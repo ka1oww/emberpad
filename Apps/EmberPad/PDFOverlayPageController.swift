@@ -142,7 +142,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let index = session.pdf.index(for: page)
         guard index != NSNotFound else { return nil }
         if let existing = canvases[index] { return existing }
-        let canvas = PKCanvasView(frame: CGRect(origin: .zero, size: page.bounds(for: .cropBox).size))
+        let canvas = PKCanvasView(frame: CGRect(origin: .zero, size: page.displayedSize))
         Self.styleCanvas(canvas)
         canvas.isScrollEnabled = false
         canvas.drawingPolicy = .pencilOnly
@@ -220,7 +220,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     private func publishPage() {
         guard publishing, let page = session.pdf.page(at: studentPage) else { return }
-        let size = canvases[studentPage]?.bounds.size ?? page.bounds(for: .cropBox).size
+        let size = canvases[studentPage]?.bounds.size ?? page.displayedSize
         // A Teacher copy publishes only the private placeholder; the snapshot type refuses its pages in both framings.
         student.publish(session: session, pageIndex: studentPage, canvasSize: size, viewport: presenterViewport())
     }

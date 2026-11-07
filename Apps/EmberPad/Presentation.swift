@@ -234,7 +234,7 @@ final class StudentPageDrawingView: UIView {
                 // Ink stays light in both themes, as on the iPad's page canvases.
                 var image: CGImage?
                 Self.light.performAsCurrent {
-                    image = item.drawing.image(from: CGRect(origin: .zero, size: item.page.bounds(for: .cropBox).size), scale: scale).cgImage
+                    image = item.drawing.image(from: CGRect(origin: .zero, size: pageSize), scale: scale).cgImage
                 }
                 return image
             }
