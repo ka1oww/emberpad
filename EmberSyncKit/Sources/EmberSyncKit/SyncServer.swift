@@ -258,6 +258,7 @@ public final class SyncServer: @unchecked Sendable {
     private var current = SyncServerStatus()
     private var powerHeld = false
     private var powerReleaseToken = 0
+    private var powerReleasePending = false
     private var published: SyncServerStatus?
 
     public init(
@@ -393,11 +394,13 @@ public final class SyncServer: @unchecked Sendable {
         current.activeTransfers = connections.values.reduce(0) { $0 + $1.activeTransfers }
         if connections.values.contains(where: \.isSending) {
             setPower(true)
-        } else if powerHeld {
-            powerReleaseToken += 1
+        } else if powerHeld, !powerReleasePending {
+            powerReleasePending = true
             let token = powerReleaseToken
             queue.asyncAfter(deadline: .now() + configuration.powerReleaseDelay.timeInterval) { [weak self] in
-                guard let self, powerReleaseToken == token, !connections.values.contains(where: \.isSending) else { return }
+                guard let self, powerReleaseToken == token else { return }
+                powerReleasePending = false
+                guard !connections.values.contains(where: \.isSending) else { return }
                 setPower(false)
                 publish()
             }
@@ -407,6 +410,7 @@ public final class SyncServer: @unchecked Sendable {
 
     private func setPower(_ held: Bool) {
         powerReleaseToken += 1
+        powerReleasePending = false
         guard held != powerHeld else { return }
         powerHeld = held
         powerGuard?.setHeld(held)
