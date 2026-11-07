@@ -55,7 +55,7 @@ final class LiveInkScreenshotTests: XCTestCase {
         let committed = Self.stroke([CGPoint(x: 90, y: 560), CGPoint(x: 300, y: 600), CGPoint(x: 520, y: 550)])
         student.update(PKDrawing(strokes: [committed]), page: 0)
 
-        let controller = PDFOverlayPageController(session: student, student: model)
+        let controller = PDFOverlayPageController(session: student, student: model, tools: Self.isolatedTools())
         let window = UIWindow(windowScene: main)
         window.rootViewController = controller
         window.isHidden = false
@@ -111,7 +111,7 @@ final class LiveInkScreenshotTests: XCTestCase {
 
         // A Teacher copy refuses live ink: the student view keeps only its placeholder.
         let teacher = try StudentMirrorFixture.session(.teacher, pages: 1, root: root.appendingPathComponent("teacher"))
-        let teacherController = PDFOverlayPageController(session: teacher, student: model)
+        let teacherController = PDFOverlayPageController(session: teacher, student: model, tools: Self.isolatedTools())
         model.opened(teacher.record)
         window.rootViewController = teacherController
         spin(0.8)
@@ -159,5 +159,9 @@ final class LiveInkScreenshotTests: XCTestCase {
         }
         let path = PKStrokePath(controlPoints: strokePoints, creationDate: Date(timeIntervalSince1970: 0))
         return PKStroke(ink: PKInk(.pen, color: blue), path: path)
+    }
+
+    private static func isolatedTools() -> ToolState {
+        ToolState(defaults: UserDefaults(suiteName: "EmberPadTests.LiveInkShots.\(UUID().uuidString)")!)
     }
 }

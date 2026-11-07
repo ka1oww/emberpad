@@ -104,15 +104,19 @@ final class LiveInkTests: XCTestCase {
     // MARK: Tools and touches
 
     func testOnlyInkingToolsDrawLiveInk() throws {
-        let fountain = try XCTUnwrap(LiveInkStyle(tool: WorksheetTool.fountain.pencilTool))
-        XCTAssertEqual(fountain.width, Theme.fountainDefaultWidth)
-        let marker = try XCTUnwrap(LiveInkStyle(tool: WorksheetTool.highlighter.pencilTool))
-        XCTAssertEqual(marker.width, Theme.highlighterDefaultWidth)
+        let settings = ToolSettings()
+        let pen = try XCTUnwrap(LiveInkStyle(tool: settings.pencilTool(for: .pen)))
+        XCTAssertEqual(pen.width, settings.penWidth)
+        let marker = try XCTUnwrap(LiveInkStyle(tool: settings.pencilTool(for: .highlighter)))
+        XCTAssertEqual(marker.width, settings.highlighterWidth)
         var alpha: CGFloat = 0
         marker.color.getRed(nil, green: nil, blue: nil, alpha: &alpha)
         XCTAssertLessThan(alpha, 1, "The highlighter stays translucent")
-        for tool in [WorksheetTool.partialEraser, .strokeEraser, .lasso] {
-            XCTAssertNil(LiveInkStyle(tool: tool.pencilTool), "\(tool.rawValue) draws no live ink")
+        XCTAssertNil(LiveInkStyle(tool: settings.pencilTool(for: .lasso)), "The lasso draws no live ink")
+        for mode in EraserMode.allCases {
+            var erasing = ToolSettings()
+            erasing.eraserMode = mode
+            XCTAssertNil(LiveInkStyle(tool: erasing.pencilTool(for: .eraser)), "The \(mode) eraser draws no live ink")
         }
     }
 
@@ -131,7 +135,8 @@ final class LiveInkTests: XCTestCase {
     }
 
     func testWorksheetInstallsTheRecogniserBesidePencilKit() throws {
-        let controller = PDFOverlayPageController(session: try makeSession(.student, pages: 1), student: StudentDisplayModel())
+        let controller = PDFOverlayPageController(session: try makeSession(.student, pages: 1), student: StudentDisplayModel(),
+                                                tools: ToolState(defaults: UserDefaults(suiteName: "EmberPadTests.LiveInk.\(UUID().uuidString)")!))
         controller.loadViewIfNeeded()
         XCTAssertTrue(controller.pdfView.gestureRecognizers?.contains { $0 === controller.liveInk } == true)
         XCTAssertTrue(controller.liveInk.delegate === controller)
