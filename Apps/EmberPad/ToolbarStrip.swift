@@ -260,10 +260,11 @@ struct ToolSettingsPopover: View {
             case .highlighter:
                 colorSection(.highlighter)
                 Section {
-                    Toggle(isOn: Binding(get: { tools.settings.straightHighlighter }, set: tools.setStraightHighlighter)) {
-                        TaggedLabel(title: "Draw and hold: straight line", tag: "Coming later", stacked: true)
-                    }.disabled(true)
+                    Toggle("Draw and hold: straight line",
+                           isOn: Binding(get: { tools.settings.straightHighlighter }, set: tools.setStraightHighlighter))
                     TaggedRow(title: "Highlight behind ink", tag: "Phase 4")
+                } footer: {
+                    Text("Hold the Pencil still for half a second at the end of a stroke and it snaps straight. Lines within 8° of level lie flat.")
                 }
             case .eraser:
                 Section {
@@ -295,7 +296,7 @@ struct ToolSettingsPopover: View {
     private var height: CGFloat {
         switch tool {
         case .pen: 560
-        case .highlighter: 460
+        case .highlighter: 540
         case .eraser: 300
         case .lasso: 230
         }
