@@ -24,20 +24,22 @@ struct LibraryView: View {
     @State private var showPairing = false
     @State private var confirmForget = false
 
-    init(library: LibraryController, presentation: PresentationState, pairing: PairingController) {
-        self.init(library: library, presentation: presentation, pairing: pairing,
+    init(library: LibraryController, presentation: PresentationState, pairing: PairingController,
+         sync: SyncClient) {
+        self.init(library: library, presentation: presentation, pairing: pairing, sync: sync,
                   signingExpiryDate: Self.embeddedSigningExpiryDate)
     }
 
     init(library: LibraryController, presentation: PresentationState, pairing: PairingController,
-         signingExpiryDate: Date?) {
-        self.init(library: library, presentation: presentation, pairing: pairing,
+         sync: SyncClient, signingExpiryDate: Date?) {
+        self.init(library: library, presentation: presentation, pairing: pairing, sync: sync,
                   signingExpiryDate: signingExpiryDate, thumbnailCache: nil)
     }
 
     init(library: LibraryController, presentation: PresentationState, pairing: PairingController,
-         signingExpiryDate: Date?, thumbnailCache: ThumbnailCache?) {
+         sync: SyncClient, signingExpiryDate: Date?, thumbnailCache: ThumbnailCache?) {
         self.library = library
+        self.sync = sync
         self.presentation = presentation
         self.pairing = pairing
         _thumbnails = StateObject(wrappedValue: thumbnailCache ?? ThumbnailCache(store: library.store))

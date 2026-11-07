@@ -170,7 +170,9 @@ final class SyncClientTests: XCTestCase {
     func testTheAppDeclaresLocalNetworkUseAndTheSyncService() {
         let usage = Bundle.main.object(forInfoDictionaryKey: "NSLocalNetworkUsageDescription") as? String
         XCTAssertTrue(usage?.contains("EmberPad Companion") == true)
-        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "NSBonjourServices") as? [String], [PairingTLS.serviceType])
+        let services = Bundle.main.object(forInfoDictionaryKey: "NSBonjourServices") as? [String] ?? []
+        XCTAssertTrue(services.contains(PairingTLS.serviceType))
+        XCTAssertTrue(services.contains(PeerHello.serviceType))
     }
 
     func testAMacThatIsNotFoundLeavesANoticeAndChangesNothing() async throws {
