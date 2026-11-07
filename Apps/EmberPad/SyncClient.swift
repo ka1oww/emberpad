@@ -51,11 +51,13 @@ final class SyncClient: ObservableObject {
 
     /// Starts a sync unless one is already running. Does nothing while the iPad is not paired.
     func sync() {
-        guard task == nil else { return }
+        if let task, !task.isCancelled { return }
+        let previous = task
         runID += 1
         let id = runID
         task = Task { [weak self] in
-            await self?.run(id)
+            await previous?.value
+            if !Task.isCancelled { await self?.run(id) }
             guard let self, self.runID == id else { return }
             self.task = nil
         }
@@ -64,7 +66,6 @@ final class SyncClient: ObservableObject {
     /// Stops the sync in progress when the app leaves the foreground. Verified PDFs stay for the next sync.
     func suspend() {
         task?.cancel()
-        task = nil
         phase = .idle
     }
 
@@ -95,7 +96,7 @@ final class SyncClient: ObservableObject {
             let store = library.store
             let download = try await LibrarySyncDownloader(folder: folder).download(
                 over: transport, local: { try await store.documents() },
-                progress: { progress in Task { @MainActor [weak self] in self?.show(progress) } })
+                progress: { progress in Task { @MainActor [weak self] in self?.show(progress, id) } })
             try Task.checkCancellation()
             phase = .filing
             await library.fileInbox(waitIfBusy: true)
@@ -115,12 +116,12 @@ final class SyncClient: ObservableObject {
         } catch is CancellationError {
             // Left the foreground; the next foreground syncs again.
         } catch {
-            notice = error.localizedDescription
+            if runID == id { notice = error.localizedDescription }
         }
     }
 
-    private func show(_ progress: LibrarySyncProgress) {
-        guard case .downloading = phase else { return }
+    private func show(_ progress: LibrarySyncProgress, _ id: Int) {
+        guard runID == id, case .downloading = phase else { return }
         phase = .downloading(progress)
     }
 }
