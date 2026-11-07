@@ -234,7 +234,7 @@ final class StudentPageDrawingView: UIView {
                 // Ink stays light in both themes, as on the iPad's page canvases.
                 var image: CGImage?
                 Self.light.performAsCurrent {
-                    image = item.drawing.image(from: CGRect(origin: .zero, size: pageSize), scale: scale).cgImage
+                    image = item.drawing.image(from: CGRect(origin: .zero, size: item.page.bounds(for: .cropBox).size), scale: scale).cgImage
                 }
                 return image
             }
@@ -247,8 +247,9 @@ final class StudentPageDrawingView: UIView {
                 .init(pageIndex: $0.pageIndex, page: $0.page, drawing: $0.drawing, inkRevision: $0.inkRevision, frame: $0.frame)
             }, margin: 0)
         }
-        guard snapshot.canvasSize.width > 0, snapshot.canvasSize.height > 0 else { return nil }
-        let whole = CGRect(origin: .zero, size: snapshot.canvasSize)
+        let displayed = snapshot.page.displayedSize
+        guard displayed.width > 0, displayed.height > 0 else { return nil }
+        let whole = CGRect(origin: .zero, size: displayed)
         return Scene(visibleRect: whole, items: [
             .init(pageIndex: snapshot.pageIndex, page: snapshot.page, drawing: snapshot.drawing, inkRevision: snapshot.inkRevision, frame: whole)
         ], margin: MirrorGeometry.fullPageMargin)
