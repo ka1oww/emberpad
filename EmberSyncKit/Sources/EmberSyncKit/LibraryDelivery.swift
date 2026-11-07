@@ -225,6 +225,10 @@ public enum LibraryDeliveryApplier {
         if let receipt = try await store.appliedDelivery() {
             if receipt.manifestSHA256 == delivery.manifestDigest {
                 report.alreadyApplied = true
+                if receipt.manifestGeneratedAt == nil {
+                    try await store.recordAppliedDelivery(receipt.manifestSHA256, generatedAt: delivery.manifest.generatedAt,
+                                                          at: receipt.appliedAt)
+                }
                 return report
             }
             // An older manifest would archive papers the newer one added. Its absences are stale, so skip it whole.
