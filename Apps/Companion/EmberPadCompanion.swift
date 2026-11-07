@@ -31,27 +31,30 @@ struct EmberPadCompanion: App {
     }
 }
 
-/// Reads the Ember Projects source folder through EP-07's `EmberLibrarySource` and
+/// Reads the Drive EMBER folder through EP-07's `EmberLibrarySource` and
 /// publishes the snapshot the window shows. It only reads: preparing never writes
 /// inside the source folder, and delivery to the iPad is EP-16's job (see
 /// `deliverToOutbox`). The read runs off the main thread.
 @MainActor
 final class CompanionModel: ObservableObject {
-    private static let sourceFolderKey = "EmberPadCompanion.sourceFolderPath"
+    /// A folder chosen with **Choose EMBER folder…**. A new key, so a folder chosen for the
+    /// earlier Ember Projects source does not replace the Drive EMBER default.
+    private static let sourceFolderKey = "EmberPadCompanion.emberFolderPath"
 
-    @Published private(set) var folder: URL
+    /// The chosen folder, else the discovered Drive EMBER folder. Nil when neither exists.
+    @Published private(set) var folder: URL?
     @Published private(set) var snapshot: LibrarySnapshot?
     @Published private(set) var scannedAt: Date?
     @Published private(set) var isPreparing = false
     @Published private(set) var message: String?
 
-    var isSourceAvailable: Bool { isCompanionSourceDirectory(folder) }
+    var isSourceAvailable: Bool { folder.map(isCompanionSourceDirectory) ?? false }
 
     init() {
         if let path = UserDefaults.standard.string(forKey: Self.sourceFolderKey), !path.isEmpty {
             folder = URL(fileURLWithPath: path, isDirectory: true)
         } else {
-            folder = EmberLibrarySource.defaultRoot
+            folder = EmberLibrarySource.discoverDriveRoot()
         }
     }
 
@@ -61,7 +64,8 @@ final class CompanionModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.prompt = "Use Ember Projects folder"
+        panel.prompt = "Use EMBER folder"
+        panel.directoryURL = folder ?? EmberLibrarySource.discoverDriveRoot()
         guard panel.runModal() == .OK, let url = panel.url else { return }
         folder = url
         UserDefaults.standard.set(url.path, forKey: Self.sourceFolderKey)
@@ -72,15 +76,14 @@ final class CompanionModel: ObservableObject {
 
     func prepare() {
         guard !isPreparing else { return }
-        guard isSourceAvailable else {
+        guard isSourceAvailable, let root = folder else {
             snapshot = nil
             scannedAt = nil
-            message = "Source folder not found."
+            message = "EMBER folder not found."
             return
         }
         isPreparing = true
         message = nil
-        let root = folder
         Task {
             defer { self.isPreparing = false }
             do {
@@ -92,7 +95,7 @@ final class CompanionModel: ObservableObject {
                 guard isCompanionSourceDirectory(root) else {
                     self.snapshot = nil
                     self.scannedAt = nil
-                    self.message = "Source folder not found."
+                    self.message = "EMBER folder not found."
                     return
                 }
                 self.snapshot = snapshot
@@ -104,7 +107,7 @@ final class CompanionModel: ObservableObject {
                 } else {
                     self.snapshot = nil
                     self.scannedAt = nil
-                    self.message = "Source folder not found."
+                    self.message = "EMBER folder not found."
                 }
             }
         }

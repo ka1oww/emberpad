@@ -61,7 +61,7 @@ private struct DocumentListView: View {
     var body: some View {
         List {
             ForEach(library.documents.filter {
-                className == nil ? $0.status == .archived : ($0.status != .archived && $0.source.source.classFolder == className)
+                className == nil ? $0.showsAsArchived : (!$0.showsAsArchived && $0.source.source.classFolder == className)
             }) { doc in
                 NavigationLink {
                     EditorScreen(documentID: doc.id, library: library, presentation: presentation)

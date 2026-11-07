@@ -1,191 +1,271 @@
 #if os(macOS)
 import Foundation
 
-/// Builds a library snapshot from the configured Ember Projects root. See `README.md`,
-/// "Library source: Ember Projects", for selection, privacy and carry-forward rules.
+/// Builds a library snapshot from the Google Drive EMBER folder. See `README.md`, "Library source: Drive EMBER
+/// folder", for selection, pairing, privacy and carry-forward rules. It only reads.
 public struct EmberLibrarySource: Sendable {
-    /// The subject folders the Ember publisher knows, plus H2 Econs. Every other top-level folder is skipped.
-    public static let subjectFolders = ["A-Math", "H2 Chemistry", "H2 Econs", "H2 Math", "H2 Physics", "Pure Chemistry",
-                                        "Pure Physics"]
-    /// Subjects whose tutorials also need a captain sign-off bound to the build `latest.json` names.
-    public static let signoffSubjects: Set<String> = ["H2 Math"]
+    /// Top-level folders with a fixed subject name. Any other top-level folder is a subject under its own name.
+    public static let subjectNames = ["EMBER CHEMISTRY": "Chemistry", "EMBER MATH": "Math", "EMBER PHYSICS": "Physics",
+                                      "EMBER BOOKLETS (MI + JC)": "Booklets"]
+    /// Display order of the fixed subjects. Other subjects follow by name.
+    public static let subjectOrder = ["Chemistry", "Math", "Physics", "Booklets"]
+    /// Subject of a PDF that sits directly in the root folder.
+    public static let rootSubject = "General"
     /// Shown for an entry with no class tag: a nil `classTag` means the copy belongs under every class.
     public static let allClassesLabel = "All classes"
+    /// Folders that hold build output, not documents (case-insensitive). A folder whose name starts with one of
+    /// `buildLeftoverFolderPrefixes` also counts. PDFs below them are counted as skipped and never read.
+    public static let buildLeftoverFolders: Set<String> = ["redraws", "crops", "_build", "artifacts", "_assets", "_qa"]
+    public static let buildLeftoverFolderPrefixes = ["_redraws"]
+    /// Shared asset PDFs that every LaTeX source folder carries (case-insensitive), counted as skipped.
+    public static let buildLeftoverFiles: Set<String> = ["ember-star.pdf"]
 
-    public static var defaultRoot: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Ember Projects", isDirectory: true)
+    /// The Drive EMBER folder, `~/Library/CloudStorage/GoogleDrive-*/My Drive/EMBER`, from the first Drive account
+    /// folder (by name) that has one. Nil when Drive is not mounted or no account has the folder.
+    public static func discoverDriveRoot(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL? {
+        let cloud = home.appendingPathComponent("Library/CloudStorage", isDirectory: true)
+        let accounts = (try? FileManager.default.contentsOfDirectory(at: cloud, includingPropertiesForKeys: nil,
+                                                                     options: [.skipsHiddenFiles])) ?? []
+        return accounts.filter { $0.lastPathComponent.hasPrefix("GoogleDrive-") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { $0.appendingPathComponent("My Drive", isDirectory: true).appendingPathComponent("EMBER", isDirectory: true) }
+            .first { FileAccess.isDirectory($0) }
+    }
+
+    /// Orders subjects for display: the fixed subjects first, then any other subject by name.
+    public static func displayOrder(_ subjects: some Sequence<String>) -> [String] {
+        let present = Set(subjects)
+        return subjectOrder + present.subtracting(subjectOrder).sorted()
     }
 
     public let root: URL
     public let aliases: ClassAliasTable
-    // TODO(emberpad-library-source-scope Q1): the captain has not decided whether the 12 published papers that no
-    // longer have a finished pair in Ember Projects should come from the main Drive EMBER folder through the
-    // publisher registry. Until he picks it, no fallback is configured and v1 lists Ember Projects pairs only.
-    public let fallback: (any LibraryFallbackSource)?
+    private let metadataReader: @Sendable (URL) throws -> ChildMetadata
 
-    public init(root: URL = Self.defaultRoot, aliases: ClassAliasTable = .empty, fallback: (any LibraryFallbackSource)? = nil) {
+    /// `root` is used as given; pass `discoverDriveRoot()` for the Drive EMBER folder. Tests pass synthetic roots.
+    public init(root: URL, aliases: ClassAliasTable = .empty) {
         self.root = root
         self.aliases = aliases
-        self.fallback = fallback
+        self.metadataReader = { url in
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+            return ChildMetadata(isDirectory: values.isDirectory, isRegularFile: values.isRegularFile,
+                                 isSymbolicLink: values.isSymbolicLink)
+        }
+    }
+
+    init(root: URL, aliases: ClassAliasTable = .empty,
+         metadataReader: @escaping @Sendable (URL) throws -> ChildMetadata) {
+        self.root = root
+        self.aliases = aliases
+        self.metadataReader = metadataReader
     }
 
     /// Walks the root and returns a version-2 manifest plus the miss list. `previous` is the manifest last
-    /// delivered: any of its papers that is not found again is carried forward unchanged.
+    /// delivered: any of its copies that is not found again, or not read this time, is carried forward unchanged.
+    /// Throws when the root is not a real directory or cannot be listed.
     public func read(previous: Manifest? = nil, generatedAt: Date = Date()) throws -> LibrarySnapshot {
-        var reader = Reader(root: root, aliases: aliases)
-        var found: [LibraryPair] = []
-        var misses: [LibraryMiss] = []
-        var unrecorded: [String] = []
-        var seenKeys: Set<PaperKey> = []
+        guard FileAccess.isDirectory(root) else { throw CocoaError(.fileReadNoSuchFile) }
+        var walker = Walker(root: root, aliases: aliases, metadataReader: metadataReader)
+        try walker.walk()
+        var misses = walker.misses
+        let withheld = aliases.withheldTerms + walker.withheldTerms
 
-        let subjectDirectories = Dictionary(uniqueKeysWithValues: try reader.directories(in: root).map {
-            ($0.lastPathComponent, $0)
-        })
-        for subject in Self.subjectFolders {
-            guard let folder = subjectDirectories[subject] else { continue }
-            for project in try reader.directories(in: folder) {
-                let name = project.lastPathComponent
-                let label = subject + "/" + name
-                switch reader.examine(project: project, subject: subject) {
-                case .pair(let pair): found.append(pair); seenKeys.insert(pair.paperKey)
-                case .miss(let reason, let detail, let key):
-                    misses.append(LibraryMiss(project: label, reason: reason, detail: detail))
-                    if let key { seenKeys.insert(key) }
-                case .unrecorded: unrecorded.append(label)
-                }
+        var documents = Gate.unique(walker.documents, misses: &misses)
+        documents = documents.filter { document in
+            guard Gate.passesPrivacy(document.entry, terms: withheld) else {
+                misses.append(LibraryMiss(path: document.localPath, reason: .privacyWithheld,
+                                          detail: "a manifest string failed the final privacy check", paperKey: document.entry.paperKey))
+                return false
             }
+            return true
         }
-        if let fallback {
-            let present = Set(found.map(\.paperKey))
-            found += try fallback.pairs(excluding: present).filter { !present.contains($0.paperKey) }
-        }
+        documents = Gate.crossRole(documents, misses: &misses)
 
-        let withheld = aliases.withheldTerms + reader.withheldTerms + found.flatMap(\.withheldTerms)
-        var pairs = Gate.uniqueKeys(found, misses: &misses)
-        pairs = Gate.privacy(pairs, terms: withheld, misses: &misses)
-
+        var files = documents.map(\.entry)
         var retained: [LibraryRetained] = []
-        var files = pairs.flatMap { [$0.student.entry, $0.teacher.entry] }
         if let previous {
-            let current = Set(pairs.map(\.paperKey))
-            let carried = Dictionary(grouping: previous.files.filter { $0.paperKey.map { !current.contains($0) } ?? false },
-                                     by: { $0.paperKey! })
-            let occupied = Set(files.map(\.source))
-            for (key, entries) in carried.sorted(by: { $0.key < $1.key }) {
-                let strings = entries.flatMap { [$0.source.key, $0.title, $0.subject] + ($0.classTag.map { [$0] } ?? []) } + [key.rawValue]
-                if let term = Gate.firstWithheld(in: strings, terms: withheld) {
-                    misses.append(LibraryMiss(project: key.rawValue, reason: .privacyWithheld,
-                                              detail: "previous entry carries a withheld term (\(term.count) characters)"))
+            let unreadKeys = Set(misses.filter { $0.reason == .unreadable }.compactMap(\.paperKey))
+            let heldKeys = Set(misses.filter { $0.reason != .unreadable }.compactMap(\.paperKey))
+            var copies = Set(files.compactMap(Gate.copyKey))
+            var occupied = Set(files.map(\.source))
+            for entry in previous.files {
+                guard let key = entry.paperKey, let copy = Gate.copyKey(entry), !copies.contains(copy), !occupied.contains(entry.source)
+                else { continue }
+                guard Gate.passesPrivacy(entry, terms: withheld) else {
+                    misses.append(LibraryMiss(path: key.rawValue, reason: .privacyWithheld,
+                                              detail: "a previous entry failed the final privacy check", paperKey: key))
                     continue
                 }
-                guard entries.allSatisfy({ !occupied.contains($0.source) }) else {
-                    misses.append(LibraryMiss(project: key.rawValue, reason: .duplicatePaperKey,
-                                              detail: "previous entry's path is now used by another paper"))
-                    continue
-                }
-                retained.append(LibraryRetained(paperKey: key, reason: seenKeys.contains(key) ? .noLongerFinished : .sourceVanished,
-                                                entries: entries))
-                files += entries
+                let underUnreadFolder = walker.unreadSourcePrefixes.contains { entry.source.key.hasPrefix($0 + "/") }
+                let reason: LibraryRetained.Reason = unreadKeys.contains(key) || underUnreadFolder ? .sourceUnreadable
+                    : heldKeys.contains(key) ? .heldBack : .sourceVanished
+                retained.append(LibraryRetained(entry: entry, reason: reason))
+                copies.insert(copy)
+                occupied.insert(entry.source)
+                files.append(entry)
             }
+            // A carried Student copy must not match any Teacher copy, current or carried.
+            let teacherHashes = Set(files.filter { $0.role == .teacher }.map(\.sha256))
+            let blocked = retained.filter { $0.entry.role == .student && teacherHashes.contains($0.entry.sha256) }
+            for item in blocked {
+                misses.append(LibraryMiss(path: item.entry.paperKey?.rawValue ?? item.entry.source.key, reason: .studentMatchesTeacher,
+                                          detail: "a previous Student copy has the same bytes as a Teacher copy",
+                                          paperKey: item.entry.paperKey))
+            }
+            // Carried sources are never a current document's source, so removing them by source leaves current copies.
+            let blockedSources = Set(blocked.map(\.entry.source))
+            retained.removeAll { blockedSources.contains($0.entry.source) }
+            files.removeAll { $0.role == .student && blockedSources.contains($0.source) }
         }
-        files = Gate.crossRole(files, retained: &retained, pairs: &pairs, misses: &misses,
-                               previous: previous?.files ?? [], withheldTerms: withheld)
-        files = Gate.finalPrivacy(files, pairs: &pairs, retained: &retained, terms: withheld, misses: &misses)
 
         let manifest = try Manifest(version: 2, generatedAt: generatedAt, files: files)
-        return LibrarySnapshot(manifest: manifest, pairs: pairs, misses: misses.sorted { ($0.project, $0.reason.rawValue) < ($1.project, $1.reason.rawValue) },
-                               retained: retained, unrecordedProjects: unrecorded)
+        return LibrarySnapshot(manifest: manifest, documents: documents,
+                               misses: misses.sorted { ($0.path, $0.reason.rawValue) < ($1.path, $1.reason.rawValue) },
+                               retained: retained, skippedLeftoverPDFs: walker.skippedLeftoverPDFs,
+                               skippedOtherFiles: walker.skippedOtherFiles)
     }
 }
 
-/// An extension point for copies that live outside Ember Projects (open captain question
-/// emberpad-library-source-scope Q1). A fallback pair never replaces a pair found under the root, and passes the
-/// same duplicate-key, privacy and cross-role gates.
-public protocol LibraryFallbackSource: Sendable {
-    func pairs(excluding paperKeys: Set<PaperKey>) throws -> [LibraryPair]
+struct ChildMetadata: Sendable {
+    let isDirectory: Bool?
+    let isRegularFile: Bool?
+    let isSymbolicLink: Bool?
 }
 
-/// One copy of a pair: the manifest entry the iPad sees, and the local file it was read from (Mac only).
-public struct LibraryCopy: Equatable, Sendable {
+/// One delivered copy: the manifest entry the iPad sees, and where it was read from (Mac only).
+public struct LibraryDocument: Equatable, Sendable {
     public let entry: ManifestEntry
     public let fileURL: URL
-    public init(entry: ManifestEntry, fileURL: URL) { self.entry = entry; self.fileURL = fileURL }
-}
-
-public struct LibraryPair: Equatable, Sendable {
-    public enum Rule: String, Sendable { case paper, tutorial, fallback }
-    public let paperKey: PaperKey
-    /// Local only: the `<Subject>/<Project>` label the pair was read from.
-    public let project: String
-    public let rule: Rule
-    /// Local only: the build directory both copies came from. It can carry a person's name, so it is never put in
-    /// the manifest.
-    public let buildID: String
-    public let student: LibraryCopy
-    public let teacher: LibraryCopy
-    /// Terms that must not reach the iPad, found while naming this pair.
-    let withheldTerms: [String]
-    public var bytes: Int64 { student.entry.size + teacher.entry.size }
-
-    public init(paperKey: PaperKey, project: String, rule: Rule, buildID: String, student: LibraryCopy, teacher: LibraryCopy) throws {
-        try self.init(paperKey: paperKey, project: project, rule: rule, buildID: buildID, student: student, teacher: teacher,
-                      withheldTerms: [])
-    }
-
-    init(paperKey: PaperKey, project: String, rule: Rule, buildID: String, student: LibraryCopy, teacher: LibraryCopy,
-         withheldTerms: [String]) throws {
-        guard student.entry.role == .student, teacher.entry.role == .teacher,
-              student.entry.paperKey == paperKey, teacher.entry.paperKey == paperKey else { throw LibraryError.invalidManifest }
-        self.paperKey = paperKey
-        self.project = project
-        self.rule = rule
-        self.buildID = buildID
-        self.student = student
-        self.teacher = teacher
-        self.withheldTerms = withheldTerms
+    /// Local only: the path below the root, as found. It can carry a person's name, so it never goes in the manifest.
+    public let localPath: String
+    public init(entry: ManifestEntry, fileURL: URL, localPath: String) {
+        self.entry = entry
+        self.fileURL = fileURL
+        self.localPath = localPath
     }
 }
 
-/// A project that has a publication record but yields no finished pair, or a pair the gates held back.
-/// `project` is the local `<Subject>/<Project>` label; the miss list stays on the Mac.
+/// A PDF or folder that was found but not delivered this time. `path` is local (below the root) and stays on the Mac.
 public struct LibraryMiss: Equatable, Sendable {
     public enum Reason: String, Sendable, CaseIterable {
-        case paperNotSignedOff = "paper-not-signed-off"
-        case tutorialPointerMissing = "tutorial-pointer-missing"
-        case tutorialPointerUnreadable = "tutorial-pointer-unreadable"
-        case tutorialHashMismatch = "tutorial-hash-mismatch"
-        case mathTutorialUnsigned = "math-tutorial-unsigned"
+        /// The file or folder could not be read, for example Drive is offline or the file is not downloaded yet.
+        case unreadable
+        case duplicatePaperKey = "duplicate-paper-key"
+        case privacyWithheld = "privacy-withheld"
         case identicalCopies = "identical-copies"
         case studentMatchesTeacher = "student-matches-a-teacher-copy"
-        case privacyWithheld = "privacy-withheld"
-        case duplicatePaperKey = "duplicate-paper-key"
-        case invalidRecord = "invalid-record"
+        /// The name cannot form a safe manifest path or label.
+        case invalidName = "invalid-name"
     }
-    public let project: String
+    public let path: String
     public let reason: Reason
     public let detail: String
+    /// The paper key the copy would have had, when one could be formed. Local only.
+    public let paperKey: PaperKey?
+
+    public init(path: String, reason: Reason, detail: String, paperKey: PaperKey? = nil) {
+        self.path = path
+        self.reason = reason
+        self.detail = detail
+        self.paperKey = paperKey
+    }
 }
 
-/// A paper kept from the previous manifest because it was not found again. Its entries are listed unchanged.
+/// A copy kept unchanged from the previous manifest because it was not delivered again.
 public struct LibraryRetained: Equatable, Sendable {
-    public enum Reason: String, Sendable { case sourceVanished = "source-vanished", noLongerFinished = "no-longer-finished" }
-    public let paperKey: PaperKey
+    public enum Reason: String, Sendable {
+        case sourceVanished = "source-vanished"
+        case sourceUnreadable = "source-unreadable"
+        /// Found again, but this run's copy is a miss (privacy, duplicate or cross-role).
+        case heldBack = "held-back"
+    }
+    public let entry: ManifestEntry
     public let reason: Reason
-    public let entries: [ManifestEntry]
 }
 
 public struct LibrarySnapshot: Equatable, Sendable {
-    /// Version 2: found pairs first, then retained entries.
+    /// Version 2: documents found this run first, then retained entries.
     public let manifest: Manifest
-    public let pairs: [LibraryPair]
+    public let documents: [LibraryDocument]
     public let misses: [LibraryMiss]
     public let retained: [LibraryRetained]
-    /// Local `<Subject>/<Project>` labels with neither `paper.json` nor `tutorial.tex`. Not imported.
-    public let unrecordedProjects: [String]
-    public var pairBytes: Int64 { pairs.reduce(0) { $0 + $1.bytes } }
+    /// PDFs below build-leftover folders, plus shared asset PDFs. Counted, never read or listed.
+    public let skippedLeftoverPDFs: Int
+    /// Non-PDF files (tex, png, json and other build output). Hidden entries are not counted.
+    public let skippedOtherFiles: Int
+
+    public init(manifest: Manifest, documents: [LibraryDocument], misses: [LibraryMiss], retained: [LibraryRetained],
+                skippedLeftoverPDFs: Int = 0, skippedOtherFiles: Int = 0) {
+        self.manifest = manifest
+        self.documents = documents
+        self.misses = misses
+        self.retained = retained
+        self.skippedLeftoverPDFs = skippedLeftoverPDFs
+        self.skippedOtherFiles = skippedOtherFiles
+    }
+
+    private var rolesByKey: [PaperKey: Set<DocumentRole>] {
+        var roles: [PaperKey: Set<DocumentRole>] = [:]
+        for document in documents { if let key = document.entry.paperKey { roles[key, default: []].insert(document.entry.role) } }
+        return roles
+    }
+    /// Paper keys found this run with both a Student and a Teacher copy.
+    public var pairCount: Int { rolesByKey.values.filter { $0.count == 2 }.count }
+    /// Copies found this run with no partner of the other role.
+    public var singleCopyCount: Int { rolesByKey.values.filter { $0.count == 1 }.count }
+    public var archivedCount: Int { documents.filter(\.entry.isArchived).count }
+    public var documentBytes: Int64 { documents.reduce(0) { $0 + $1.entry.size } }
+    /// Documents found this run, per subject.
+    public var documentCounts: [String: Int] {
+        Dictionary(documents.map { ($0.entry.subject, 1) }, uniquingKeysWith: +)
+    }
 }
 
-/// Maps a project-name prefix to a class tag, for prefixes such as a personal name followed by "Sec 3".
+// MARK: - Teacher and Student name markers
+
+/// Role markers at the end of a PDF name. A Teacher-marked PDF pairs with the same-directory PDF whose name is the
+/// same once the marker is removed (case and spacing ignored); a Student marker is removed the same way.
+enum RoleMarker {
+    private static let teacherWords = #"teachers?(?:'s)?(?:\s+(?:copy|version|edition))?|solutions?|answers?|answer\s+key|mark\s+scheme"#
+    private static let studentWords = #"students?(?:'s)?(?:\s+(?:copy|version|edition))?"#
+
+    private static func patterns(_ words: String) -> [NSRegularExpression] {
+        [
+            #"^(.*?)\s*[\(\[]\s*(?:\#(words))\s*[\)\]]\s*$"#,  // "Name (Teacher)", "Name [Teacher Copy]"
+            #"^(.*?)\s*[-–—_]\s*(?:\#(words))\s*$"#,           // "Name - Teacher", "Name — TEACHERS", "Name - Solutions"
+            #"^(.*\S)\s+(?:\#(words))\s*$"#,                   // "Name Teacher"
+            #"^()(?:\#(words))$"#                              // "teacher"
+        ].map { try! NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+    }
+    // Also "Name (Teacher, other notes)": a bracketed group at the end that names the Teacher copy.
+    private static let teacher = patterns(teacherWords) + [
+        try! NSRegularExpression(pattern: #"^(.*?)\s*[\(\[][^\(\)\[\]]*\bteachers?\b[^\(\)\[\]]*[\)\]]\s*$"#, options: [.caseInsensitive])
+    ]
+    private static let student = patterns(studentWords)
+
+    /// The role a name's marker says and the name without it. An unmarked name is a Student copy named as is.
+    static func parse(_ stem: String) -> (role: DocumentRole, base: String, marked: Bool) {
+        if let base = strip(stem, teacher) { return (.teacher, base, true) }
+        if let base = strip(stem, student) { return (.student, base, true) }
+        return (.student, stem, false)
+    }
+
+    private static func strip(_ stem: String, _ expressions: [NSRegularExpression]) -> String? {
+        let range = NSRange(stem.startIndex..., in: stem)
+        for expression in expressions {
+            guard let match = expression.firstMatch(in: stem, range: range), let base = Range(match.range(at: 1), in: stem) else { continue }
+            return stem[base].trimmingCharacters(in: .whitespaces)
+        }
+        return nil
+    }
+
+    /// Comparison form: case and runs of spaces ignored.
+    static func normalized(_ name: String) -> String {
+        name.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+    }
+}
+
+/// Maps a folder- or file-name prefix to a class tag, for prefixes such as a personal name followed by "Sec 3".
 /// The real table is personal data and lives outside the repository, at `defaultURL`:
 ///
 /// ```json
@@ -232,12 +312,12 @@ public struct ClassAliasTable: Equatable, Sendable {
     }
 }
 
-// MARK: - Class from the project-name prefix
+// MARK: - Class from a folder- or file-name prefix
 
 struct ClassResolution: Equatable {
     /// Nil is the "All classes" bucket.
     let classTag: String?
-    /// The project name with any personal prefix replaced by its class or removed.
+    /// The name with any personal prefix replaced by its class or removed.
     let displayName: String
     let withheldTerms: [String]
     /// Applies the same prefix rewrite to another string, such as a publisher display name.
@@ -419,61 +499,51 @@ enum ClassResolver {
     }
 }
 
-// MARK: - Gates applied to every pair before it reaches the manifest
+// MARK: - Gates applied to every copy before it reaches the manifest
 
 enum Gate {
-    /// Two projects that would show under one paper key are both held back rather than guessed between.
-    static func uniqueKeys(_ pairs: [LibraryPair], misses: inout [LibraryMiss]) -> [LibraryPair] {
-        let paths = pairs.flatMap { [$0.student.entry.source, $0.teacher.entry.source] }
-        let pathCounts = Dictionary(paths.map { ($0, 1) }, uniquingKeysWith: +)
-        let keyCounts = Dictionary(pairs.map { ($0.paperKey, 1) }, uniquingKeysWith: +)
-        return pairs.filter { pair in
-            let unique = keyCounts[pair.paperKey] == 1 &&
-                pathCounts[pair.student.entry.source] == 1 && pathCounts[pair.teacher.entry.source] == 1
+    struct CopyKey: Hashable {
+        let paperKey: PaperKey
+        let role: DocumentRole
+    }
+
+    static func copyKey(_ entry: ManifestEntry) -> CopyKey? { entry.paperKey.map { CopyKey(paperKey: $0, role: entry.role) } }
+
+    /// Copies that would share a paper key and role, or a manifest path, are all held back rather than guessed between.
+    static func unique(_ documents: [LibraryDocument], misses: inout [LibraryMiss]) -> [LibraryDocument] {
+        let keyCounts = Dictionary(documents.compactMap { copyKey($0.entry) }.map { ($0, 1) }, uniquingKeysWith: +)
+        let pathCounts = Dictionary(documents.map { ($0.entry.source, 1) }, uniquingKeysWith: +)
+        return documents.filter { document in
+            let unique = copyKey(document.entry).map { keyCounts[$0] == 1 } == true && pathCounts[document.entry.source] == 1
             if !unique {
-                misses.append(LibraryMiss(project: pair.project, reason: .duplicatePaperKey,
-                                          detail: "another project shows under the same paper key or path"))
+                misses.append(LibraryMiss(path: document.localPath, reason: .duplicatePaperKey,
+                                          detail: "another PDF would show under the same paper key and role, or the same path",
+                                          paperKey: document.entry.paperKey))
             }
             return unique
         }
     }
 
-    static func privacy(_ pairs: [LibraryPair], terms: [String], misses: inout [LibraryMiss]) -> [LibraryPair] {
-        pairs.filter { pair in
-            let entries = [pair.student.entry, pair.teacher.entry]
-            guard passesPrivacy(entries, key: pair.paperKey, terms: terms) else {
-                misses.append(LibraryMiss(project: pair.project, reason: .privacyWithheld,
-                                          detail: "a manifest string failed the final privacy check"))
-                return false
-            }
-            return true
+    /// A Student copy whose bytes equal any Teacher copy would show answers to students, so it is held back. The
+    /// Teacher copy is still delivered.
+    static func crossRole(_ documents: [LibraryDocument], misses: inout [LibraryMiss]) -> [LibraryDocument] {
+        let teachers = documents.filter { $0.entry.role == .teacher }
+        let teacherHashes = Set(teachers.map(\.entry.sha256))
+        return documents.filter { document in
+            guard document.entry.role == .student, teacherHashes.contains(document.entry.sha256) else { return true }
+            let ownTeacher = teachers.contains { $0.entry.paperKey == document.entry.paperKey && $0.entry.sha256 == document.entry.sha256 }
+            misses.append(LibraryMiss(path: document.localPath, reason: ownTeacher ? .identicalCopies : .studentMatchesTeacher,
+                                      detail: ownTeacher ? "the Student and Teacher copies are the same bytes"
+                                          : "a Student copy has the same bytes as a Teacher copy",
+                                      paperKey: document.entry.paperKey))
+            return false
         }
     }
 
-    static func finalPrivacy(_ files: [ManifestEntry], pairs: inout [LibraryPair], retained: inout [LibraryRetained],
-                             terms: [String], misses: inout [LibraryMiss]) -> [ManifestEntry] {
-        let groups = Dictionary(grouping: files, by: \.paperKey)
-        let blocked = Set(groups.compactMap { key, entries -> PaperKey? in
-            guard passesPrivacy(entries, key: key, terms: terms) else {
-                misses.append(LibraryMiss(project: key?.rawValue ?? "manifest-entry", reason: .privacyWithheld,
-                                          detail: "a manifest string failed the final privacy check"))
-                return key
-            }
-            return nil
-        })
-        pairs.removeAll { blocked.contains($0.paperKey) }
-        retained.removeAll { blocked.contains($0.paperKey) }
-        return files.filter { entry in
-            guard let key = entry.paperKey else { return false }
-            return !blocked.contains(key)
-        }
-    }
-
-    private static func passesPrivacy(_ entries: [ManifestEntry], key: PaperKey?, terms: [String]) -> Bool {
-        let strings = entries.flatMap { entry in
-            [entry.source.key, entry.source.relativePath, entry.title, entry.subject] + (entry.classTag.map { [$0] } ?? [])
-        } + (key.map { [$0.rawValue] } ?? [])
-        let invalidClassTag = entries.contains { $0.classTag.map { !ClassResolver.isClassTag($0) } ?? false }
+    static func passesPrivacy(_ entry: ManifestEntry, terms: [String]) -> Bool {
+        let strings = [entry.source.key, entry.source.relativePath, entry.title, entry.subject] +
+            (entry.classTag.map { [$0] } ?? []) + (entry.paperKey.map { [$0.rawValue] } ?? [])
+        let invalidClassTag = entry.classTag.map { !ClassResolver.isClassTag($0) } ?? false
         return !invalidClassTag && !strings.contains(where: ClassResolver.containsPersonalNameShape) &&
             firstWithheld(in: strings, terms: terms) == nil
     }
@@ -494,314 +564,208 @@ enum Gate {
             }
         }
     }
-
-    /// A Student entry whose bytes equal any Teacher copy in the library would show answers to students, so the
-    /// whole paper it belongs to is held back.
-    static func crossRole(_ files: [ManifestEntry], retained: inout [LibraryRetained], pairs: inout [LibraryPair],
-                          misses: inout [LibraryMiss], previous: [ManifestEntry], withheldTerms: [String]) -> [ManifestEntry] {
-        let teacherHashes = Set(files.filter { $0.role == .teacher }.map(\.sha256))
-        let blocked = Set(files.filter { $0.role == .student && teacherHashes.contains($0.sha256) }.compactMap(\.paperKey))
-        guard !blocked.isEmpty else { return files }
-        let blockedPairs = pairs.filter { blocked.contains($0.paperKey) }
-        for key in blocked.sorted() {
-            misses.append(LibraryMiss(project: pairs.first { $0.paperKey == key }?.project ?? key.rawValue, reason: .studentMatchesTeacher,
-                                      detail: "a Student copy has the same bytes as a Teacher copy"))
-        }
-        pairs.removeAll { blocked.contains($0.paperKey) }
-        retained.removeAll { blocked.contains($0.paperKey) }
-        var remaining = files.filter { !($0.paperKey.map(blocked.contains) ?? false) }
-        var previousByKey: [PaperKey: [ManifestEntry]] = [:]
-        for entry in previous {
-            if let key = entry.paperKey { previousByKey[key, default: []].append(entry) }
-        }
-        let occupied = Set(remaining.map(\.source))
-        let candidates = blockedPairs.compactMap { pair -> (PaperKey, [ManifestEntry])? in
-            guard let entries = previousByKey[pair.paperKey], entries.count == 2,
-                  entries.filter({ $0.role == .student }).count == 1,
-                  entries.filter({ $0.role == .teacher }).count == 1,
-                  entries.allSatisfy({ $0.paperKey == pair.paperKey && !occupied.contains($0.source) }),
-                  Gate.firstWithheld(in: entries.flatMap {
-                      [$0.source.key, $0.title, $0.subject] + ($0.classTag.map { [$0] } ?? [])
-                  } + [pair.paperKey.rawValue], terms: withheldTerms) == nil else { return nil }
-            return (pair.paperKey, entries)
-        }
-        let candidateFiles = candidates.flatMap(\.1)
-        for (key, entries) in candidates {
-            guard let student = entries.first(where: { $0.role == .student }),
-                  let teacher = entries.first(where: { $0.role == .teacher }) else { continue }
-            let others = remaining + candidateFiles.filter { $0.paperKey != key }
-            let otherStudentHashes = Set(others.filter { $0.role == .student }.map(\.sha256))
-            let otherTeacherHashes = Set(others.filter { $0.role == .teacher }.map(\.sha256))
-            guard student.sha256 != teacher.sha256,
-                  !otherTeacherHashes.contains(student.sha256), !otherStudentHashes.contains(teacher.sha256) else { continue }
-            retained.append(LibraryRetained(paperKey: key, reason: .noLongerFinished, entries: entries))
-            remaining += entries
-        }
-        return remaining
-    }
 }
 
-// MARK: - Reading one project
+// MARK: - Walking the root (read-only)
 
-private struct Reader {
-    // The real Ember Projects library uses these G11 versions; any other or missing schema is rejected.
-    private static let visualSignoffSchemas: Set<String> = [
-        "ember.visual-signoff/v1", "ember.visual-signoff/v3", "ember.visual-signoff/v4", "ember.visual-signoff/v5"
-    ]
-    private static let paperSubjectFolders = [
-        "amath": "A-Math", "h2_chem": "H2 Chemistry", "h2_math": "H2 Math", "h2_physics": "H2 Physics",
-        "pure_chem": "Pure Chemistry", "h2_econs": "H2 Econs", "pure_physics": "Pure Physics"
-    ]
+private struct Walker {
+    /// Where a folder sits: its subject, the raw folder names below the subject folder, and its local path.
+    struct Context {
+        let subject: String
+        let folders: [String]
+        let localPath: String
+        let archived: Bool
 
-    enum Outcome {
-        case pair(LibraryPair)
-        case miss(LibraryMiss.Reason, String, PaperKey?)
-        case unrecorded
+        func entering(_ name: String) -> Context {
+            Context(subject: subject, folders: folders + [name], localPath: localPath.isEmpty ? name : localPath + "/" + name,
+                    archived: archived || name.hasPrefix("_"))
+        }
+    }
+
+    struct Child {
+        let url: URL
+        let name: String
+        let isDirectory: Bool?
     }
 
     let root: URL
     let aliases: ClassAliasTable
+    let metadataReader: @Sendable (URL) throws -> ChildMetadata
     let fileManager = FileManager.default
-    var hashes: [String: ContentHash] = [:]
+    var documents: [LibraryDocument] = []
+    var misses: [LibraryMiss] = []
     var withheldTerms: [String] = []
+    /// Manifest-path prefixes (`<subject>/<folders>`) of folders that could not be listed this run.
+    var unreadSourcePrefixes: [String] = []
+    var skippedLeftoverPDFs = 0
+    var skippedOtherFiles = 0
 
-    init(root: URL, aliases: ClassAliasTable) {
+    init(root: URL, aliases: ClassAliasTable, metadataReader: @escaping @Sendable (URL) throws -> ChildMetadata) {
         self.root = root
         self.aliases = aliases
+        self.metadataReader = metadataReader
     }
 
-    /// Real (non-symlink) subdirectories, sorted by name. A missing folder has none.
-    func directories(in folder: URL) throws -> [URL] {
-        guard isDirectory(folder) else { return [] }
-        let children = try fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
-                                                           options: [.skipsHiddenFiles])
-        return try children.filter { child in
-            let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            return values.isDirectory == true && values.isSymbolicLink != true
-        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-    }
-
-    mutating func examine(project: URL, subject: String) -> Outcome {
-        let naming = ClassResolver.resolve(project.lastPathComponent, aliases: aliases)
-        withheldTerms += naming.withheldTerms
-        let key = try? PaperKey(rawValue: subject + "/" + naming.displayName)
-        if isFile(project.appendingPathComponent("paper.json")) {
-            return paper(project: project, subject: subject, naming: naming, key: key)
+    mutating func walk() throws {
+        let children = try list(root)
+        let rootContext = Context(subject: EmberLibrarySource.rootSubject, folders: [], localPath: "", archived: false)
+        files(children.filter { $0.isDirectory == false || ($0.isDirectory == nil && Self.isPDF($0.name)) }, in: rootContext)
+        for child in children where child.isDirectory == true {
+            if Self.isLeftoverFolder(child.name) { countLeftovers(in: child.url); continue }
+            let archived = child.name.hasPrefix("_")
+            let ownName = archived ? String(child.name.drop(while: { $0 == "_" })) : child.name
+            let subject = EmberLibrarySource.subjectNames[child.name] ?? (ownName.isEmpty ? child.name : ownName)
+            folder(child.url, Context(subject: subject, folders: [], localPath: child.name, archived: archived))
         }
-        if isFile(project.appendingPathComponent("tutorial.tex")) {
-            return tutorial(project: project, subject: subject, naming: naming, key: key)
-        }
-        return .unrecorded
-    }
-
-    // R1
-    private mutating func paper(project: URL, subject: String, naming: ClassResolution, key: PaperKey?) -> Outcome {
-        guard let paper = json(project.appendingPathComponent("paper.json")) else {
-            return .miss(.invalidRecord, "paper.json is not a JSON object", key)
-        }
-        guard let details = paper["paper"] as? [String: Any],
-              let title = details["title"] as? String, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let paperSubject = details["subject"] as? String, Self.paperSubjectFolders[paperSubject] == subject,
-              let output = paper["output"] as? [String: Any],
-              let studentOutput = output["student_pdf"] as? String,
-              !studentOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let teacherOutput = output["teacher_pdf"] as? String,
-              !teacherOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .miss(.invalidRecord, "paper.json is incomplete or its subject does not match the project folder", key)
-        }
-        struct Candidate { let reviewedAt: Date; let finishedAt: Date?; let build: String }
-        var candidates: [Candidate] = []
-        var seen: Set<String> = []
-        let audit = project.appendingPathComponent("audit/visual", isDirectory: true)
-        let records = hasRealDirectoryChain(project: project, relativePath: "audit/visual")
-            ? (try? fileManager.contentsOfDirectory(at: audit, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-                                                             options: [.skipsHiddenFiles])) ?? []
-            : []
-        for record in records.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-        where record.pathExtension == "json" && isFile(record) {
-            guard let signoff = json(record), let schema = signoff["schema_version"] as? String,
-                  Self.visualSignoffSchemas.contains(schema), signoff["status"] as? String == "pass",
-                  let build = signoff["build_id"] as? String, Self.isSafeComponent(build), !seen.contains(build),
-                  let reviewedAt = Self.timestamp(signoff["reviewed_at"] as? String),
-                  let student = signoff["student_pdf_sha256"] as? String, let teacher = signoff["teacher_pdf_sha256"] as? String,
-                  matches(project: project, build: build, student: student, teacher: teacher) else { continue }
-            seen.insert(build)
-            let buildRecord = json(project.appendingPathComponent("artifacts/\(build)/build-record.json"))
-            let finishedAt = Self.timestamp(buildRecord?["finished_at"] as? String)
-            candidates.append(Candidate(reviewedAt: reviewedAt, finishedAt: finishedAt, build: build))
-        }
-        guard let newestReview = candidates.map(\.reviewedAt).max() else {
-            return .miss(.paperNotSignedOff, "no passing audit/visual record whose two hashes match its build's copies", key)
-        }
-        let newestCandidates = candidates.filter { $0.reviewedAt == newestReview }
-        guard newestCandidates.allSatisfy({ $0.finishedAt != nil }) else {
-            return .miss(.invalidRecord, "a newest hash-matched candidate has no valid build finish timestamp", key)
-        }
-        let pick = newestCandidates.max(by: { lhs, rhs in
-            if lhs.finishedAt != rhs.finishedAt { return lhs.finishedAt! < rhs.finishedAt! }
-            return lhs.build < rhs.build
-        })!
-        func displayName(_ file: String, fallback: String) -> String {
-            guard file.lowercased().hasSuffix(".pdf"), file.count > 4 else { return fallback }
-            return naming.rewrite(String(file.dropLast(4))).trimmingCharacters(in: .whitespaces)
-        }
-        let studentTitle = displayName(studentOutput, fallback: naming.rewrite(title))
-        let teacherTitle = displayName(teacherOutput, fallback: studentTitle + " (Teacher)")
-        return makePair(project: project, subject: subject, naming: naming, key: key, rule: .paper, build: pick.build,
-                        titles: (studentTitle, teacherTitle))
-    }
-
-    // R2
-    private mutating func tutorial(project: URL, subject: String, naming: ClassResolution, key: PaperKey?) -> Outcome {
-        let pointerURL = project.appendingPathComponent("artifacts/latest.json")
-        guard hasRealDirectoryChain(project: project, relativePath: "artifacts"), isFile(pointerURL) else {
-            return .miss(.tutorialPointerMissing, "no artifacts/latest.json", key)
-        }
-        guard let pointer = json(pointerURL), let build = pointer["build_id"] as? String, Self.isSafeComponent(build),
-              let recorded = Self.pointerHashes(pointer) else {
-            return .miss(.tutorialPointerUnreadable, "artifacts/latest.json names no build with hashes in a known schema", key)
-        }
-        guard matches(project: project, build: build, student: recorded.student, teacher: recorded.teacher) else {
-            return .miss(.tutorialHashMismatch, "artifacts/latest.json hashes do not match its build's copies", key)
-        }
-        if EmberLibrarySource.signoffSubjects.contains(subject),
-           !hasSignoff(project: project, build: build, student: recorded.student, teacher: recorded.teacher) {
-            return .miss(.mathTutorialUnsigned, "no evidence sign-off bound to the build and both hashes", key)
-        }
-        return makePair(project: project, subject: subject, naming: naming, key: key, rule: .tutorial, build: build,
-                        titles: (naming.displayName, naming.displayName + " (Teacher)"))
-    }
-
-    /// `{student, teacher}` (string hashes) or `{pdfs: {student: {sha256}, teacher: {sha256}}}`. Both present must agree.
-    static func pointerHashes(_ pointer: [String: Any]) -> (student: String, teacher: String)? {
-        let flat = (pointer["student"] as? String).flatMap { s in (pointer["teacher"] as? String).map { (s, $0) } }
-        let pdfs = pointer["pdfs"] as? [String: Any]
-        let nested = ((pdfs?["student"] as? [String: Any])?["sha256"] as? String).flatMap { s in
-            ((pdfs?["teacher"] as? [String: Any])?["sha256"] as? String).map { (s, $0) }
-        }
-        switch (flat, nested) {
-        case let (a?, b?): return a.0.lowercased() == b.0.lowercased() && a.1.lowercased() == b.1.lowercased() ? a : nil
-        case let (a?, nil): return a
-        case let (nil, b?): return b
-        default: return nil
+        for child in children where child.isDirectory == nil && !Self.isPDF(child.name) {
+            let archived = child.name.hasPrefix("_")
+            let ownName = archived ? String(child.name.drop(while: { $0 == "_" })) : child.name
+            let subject = EmberLibrarySource.subjectNames[child.name] ?? (ownName.isEmpty ? child.name : ownName)
+            markUnreadableFolder(Context(subject: subject, folders: [], localPath: child.name, archived: archived))
         }
     }
 
-    /// A JSON object under `evidence/` with the required schema, build, hashes and non-empty verbatim approval.
-    private mutating func hasSignoff(project: URL, build: String, student: String, teacher: String) -> Bool {
-        let evidence = project.appendingPathComponent("evidence", isDirectory: true)
-        guard hasRealDirectoryChain(project: project, relativePath: "evidence"), let walker = fileManager.enumerator(
-            at: evidence, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: [.skipsHiddenFiles])
-        else { return false }
-        for case let url as URL in walker where url.pathExtension == "json" && isFile(url) &&
-            hasRealDirectoryChain(project: project, relativePath: relativeDirectory(of: url, below: project)) {
-            guard let record = json(url), record["schema"] as? String == "ember.math-tutorial-signoff/v1",
-                  record["build_id"] as? String == build,
-                  let verbatim = record["verbatim"] as? String,
-                  !verbatim.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            for field in ["pdf_sha256", "pdfs"] {
-                guard let map = record[field] as? [String: Any] else { continue }
-                func hash(_ role: String) -> String? { map[role] as? String ?? (map[role] as? [String: Any])?["sha256"] as? String }
-                if let s = hash("student"), let t = hash("teacher"), s.lowercased() == student.lowercased(),
-                   t.lowercased() == teacher.lowercased() { return true }
+    private mutating func folder(_ url: URL, _ context: Context) {
+        let children: [Child]
+        do { children = try list(url) } catch {
+            misses.append(LibraryMiss(path: context.localPath, reason: .unreadable,
+                                      detail: "the folder could not be listed (Drive offline or not available)"))
+            let rewritten = context.folders.map { ClassResolver.resolve($0, aliases: aliases).displayName }
+            unreadSourcePrefixes.append(([context.subject] + rewritten).joined(separator: "/"))
+            return
+        }
+        files(children.filter { $0.isDirectory == false || ($0.isDirectory == nil && Self.isPDF($0.name)) }, in: context)
+        for child in children where child.isDirectory == true {
+            if Self.isLeftoverFolder(child.name) { countLeftovers(in: child.url); continue }
+            folder(child.url, context.entering(child.name))
+        }
+        for child in children where child.isDirectory == nil && !Self.isPDF(child.name) {
+            markUnreadableFolder(context.entering(child.name))
+        }
+    }
+
+    /// Pairs the PDFs of one folder by name, then reads each one.
+    private mutating func files(_ files: [Child], in context: Context) {
+        var pdfs: [(child: Child, stem: String, ext: String, role: DocumentRole, base: String)] = []
+        for file in files {
+            let lower = file.name.lowercased()
+            guard lower.hasSuffix(".pdf"), file.name.count > 4 else { skippedOtherFiles += 1; continue }
+            if EmberLibrarySource.buildLeftoverFiles.contains(lower) { skippedLeftoverPDFs += 1; continue }
+            let stem = String(file.name.dropLast(4)), ext = String(file.name.suffix(4))
+            let marker = RoleMarker.parse(stem)
+            pdfs.append((file, stem, ext, marker.role, marker.base))
+        }
+        let groups = Dictionary(grouping: pdfs, by: { RoleMarker.normalized($0.base) })
+        for name in groups.keys.sorted() {
+            guard let copies = groups[name]?.sorted(by: { $0.child.name < $1.child.name }) else { continue }
+            // Both copies of a pair share the paper key named after the Student copy's unmarked name.
+            let base = (copies.first { $0.role == .student } ?? copies[0]).base
+            for copy in copies {
+                read(copy.child, stem: copy.stem, ext: copy.ext, role: copy.role, base: base, context: context)
             }
         }
-        return false
     }
 
-    private mutating func makePair(project: URL, subject: String, naming: ClassResolution, key: PaperKey?, rule: LibraryPair.Rule,
-                                   build: String, titles: (student: String, teacher: String)) -> Outcome {
-        let directory = project.appendingPathComponent("artifacts/\(build)", isDirectory: true)
-        let studentURL = directory.appendingPathComponent("student.pdf"), teacherURL = directory.appendingPathComponent("teacher.pdf")
+    private mutating func read(_ file: Child, stem: String, ext: String, role: DocumentRole, base: String, context: Context) {
+        let localPath = context.localPath.isEmpty ? file.name : context.localPath + "/" + file.name
+        func miss(_ reason: LibraryMiss.Reason, _ detail: String, _ key: PaperKey? = nil) {
+            misses.append(LibraryMiss(path: localPath, reason: reason, detail: detail, paperKey: key))
+        }
+        let folderNames = context.folders.map { ClassResolver.resolve($0, aliases: aliases) }
+        let stemName = ClassResolver.resolve(stem, aliases: aliases)
+        let baseName = base.isEmpty ? nil : ClassResolver.resolve(base, aliases: aliases)
+        withheldTerms += folderNames.flatMap(\.withheldTerms) + stemName.withheldTerms + (baseName?.withheldTerms ?? [])
+
+        let folders = folderNames.map { $0.displayName.trimmingCharacters(in: .whitespaces) }
+        let fileStem = stemName.displayName.trimmingCharacters(in: .whitespaces)
+        guard !folders.contains(where: \.isEmpty), !fileStem.isEmpty else {
+            return miss(.invalidName, "a name is empty once personal-name words are removed")
+        }
+        let keyBase = baseName?.displayName.trimmingCharacters(in: .whitespaces) ?? ""
+        let key = try? PaperKey(rawValue: ([context.subject] + folders + [keyBase]).joined(separator: "/"))
+        let titleFolders = zip(context.folders, folders).filter { !$0.0.hasPrefix("_") }.map(\.1)
+        let classTag = folderNames.lazy.compactMap(\.classTag).first ?? stemName.classTag
+        guard let key, let source = try? SourcePath(classFolder: context.subject, relativePath: (folders + [fileStem + ext]).joined(separator: "/")),
+              let publication = try? Publication(subject: context.subject, classTag: classTag, paperKey: key, role: role,
+                                                 title: (titleFolders + [fileStem]).joined(separator: " / "), archived: context.archived)
+        else { return miss(.invalidName, "the name cannot form a safe manifest path or label") }
+
+        if file.isDirectory == nil {
+            return miss(.unreadable, "the entry's metadata could not be read", key)
+        }
+
+        let values: URLResourceValues, hash: ContentHash
         do {
-            guard let key, hasRealDirectoryChain(project: project, relativePath: "artifacts/\(build)") else {
-                throw LibraryError.invalidManifest
-            }
-            guard let studentHash = hash(studentURL), let teacherHash = hash(teacherURL) else { throw LibraryError.documentMissing }
-            guard studentHash != teacherHash else { return .miss(.identicalCopies, "the Student and Teacher copies are the same bytes", key) }
-            func copy(_ url: URL, _ hash: ContentHash, _ role: DocumentRole, _ title: String) throws -> LibraryCopy {
-                let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-                let publication = try Publication(subject: subject, classTag: naming.classTag, paperKey: key, role: role, title: title)
-                let source = try SourcePath(classFolder: subject, relativePath: naming.displayName + "/" + role.rawValue + ".pdf")
-                // Whole seconds, so the manifest round-trips through its ISO 8601 encoding unchanged.
-                let modified = values.contentModificationDate.map { Date(timeIntervalSince1970: $0.timeIntervalSince1970.rounded(.down)) }
-                let entry = try ManifestEntry(source: source, sha256: hash, size: Int64(values.fileSize ?? -1),
-                                              modifiedAt: modified ?? Date(timeIntervalSince1970: .nan), publication: publication)
-                return LibraryCopy(entry: entry, fileURL: url)
-            }
-            return .pair(try LibraryPair(paperKey: key, project: subject + "/" + project.lastPathComponent, rule: rule, buildID: build,
-                                         student: copy(studentURL, studentHash, .student, titles.student),
-                                         teacher: copy(teacherURL, teacherHash, .teacher, titles.teacher),
-                                         withheldTerms: naming.withheldTerms))
+            values = try file.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            hash = try ContentHash.digest(fileAt: file.url)
         } catch {
-            return .miss(.invalidRecord, "the selected pair cannot form a manifest entry", key)
+            return miss(.unreadable, "the file could not be read (Drive offline or not downloaded yet)", key)
+        }
+        // Whole seconds, so the manifest round-trips through its ISO 8601 encoding unchanged.
+        let modified = values.contentModificationDate.map { Date(timeIntervalSince1970: $0.timeIntervalSince1970.rounded(.down)) }
+        guard let size = values.fileSize, let modified,
+              let entry = try? ManifestEntry(source: source, sha256: hash, size: Int64(size), modifiedAt: modified, publication: publication)
+        else { return miss(.unreadable, "the file's size or modification date could not be read", key) }
+        documents.append(LibraryDocument(entry: entry, fileURL: file.url, localPath: localPath))
+    }
+
+    private static func isLeftoverFolder(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return EmberLibrarySource.buildLeftoverFolders.contains(lower) ||
+            EmberLibrarySource.buildLeftoverFolderPrefixes.contains { lower.hasPrefix($0) }
+    }
+
+    private static func isPDF(_ name: String) -> Bool {
+        name.lowercased().hasSuffix(".pdf") && name.count > 4
+    }
+
+    private mutating func markUnreadableFolder(_ context: Context) {
+        misses.append(LibraryMiss(path: context.localPath, reason: .unreadable,
+                                  detail: "the folder's metadata could not be read"))
+        let rewritten = context.folders.map { ClassResolver.resolve($0, aliases: aliases).displayName }
+        unreadSourcePrefixes.append(([context.subject] + rewritten).joined(separator: "/"))
+    }
+
+    /// Counts PDFs below a build-leftover folder from the listing alone; nothing is opened.
+    private mutating func countLeftovers(in folder: URL) {
+        guard let walker = fileManager.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+                                                  options: [.skipsHiddenFiles]) else { return }
+        for case let url as URL in walker where url.pathExtension.lowercased() == "pdf" && FileAccess.isFile(url) {
+            skippedLeftoverPDFs += 1
         }
     }
 
-    // MARK: File access (read-only)
-
-    private mutating func matches(project: URL, build: String, student: String, teacher: String) -> Bool {
-        let directory = project.appendingPathComponent("artifacts/\(build)", isDirectory: true)
-        guard hasRealDirectoryChain(project: project, relativePath: "artifacts/\(build)") else { return false }
-        guard let s = hash(directory.appendingPathComponent("student.pdf")), s.rawValue == student.lowercased(),
-              let t = hash(directory.appendingPathComponent("teacher.pdf")), t.rawValue == teacher.lowercased() else { return false }
-        return true
+    /// Non-hidden children, sorted by name. Symlinks are not followed; metadata failures remain as unreadable children.
+    private func list(_ folder: URL) throws -> [Child] {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        return try fileManager.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
+            .filter { !$0.lastPathComponent.hasPrefix(".") }
+            .compactMap { url -> Child? in
+                guard let values = try? metadataReader(url) else {
+                    return Child(url: url, name: url.lastPathComponent, isDirectory: nil)
+                }
+                guard values.isSymbolicLink != true else { return nil }
+                if values.isDirectory == true {
+                    return Child(url: url, name: url.lastPathComponent, isDirectory: true)
+                }
+                if values.isRegularFile == true {
+                    return Child(url: url, name: url.lastPathComponent, isDirectory: false)
+                }
+                return nil
+            }
+            .sorted { $0.name < $1.name }
     }
+}
 
-    private mutating func hash(_ url: URL) -> ContentHash? {
-        if let known = hashes[url.path] { return known }
-        guard isFile(url), let digest = try? ContentHash.digest(fileAt: url) else { return nil }
-        hashes[url.path] = digest
-        return digest
-    }
-
-    private func json(_ url: URL) -> [String: Any]? {
-        guard isFile(url), let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 64 << 20,
-              let data = try? Data(contentsOf: url) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    }
-
-    private func isFile(_ url: URL) -> Bool {
+enum FileAccess {
+    static func isFile(_ url: URL) -> Bool {
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { return false }
         return values.isRegularFile == true && values.isSymbolicLink != true
     }
 
-    private func isDirectory(_ url: URL) -> Bool {
+    static func isDirectory(_ url: URL) -> Bool {
         guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
         return values.isDirectory == true && values.isSymbolicLink != true
-    }
-
-    private func hasRealDirectoryChain(project: URL, relativePath: String) -> Bool {
-        var directory = project
-        for component in relativePath.split(separator: "/") {
-            guard component != ".", component != ".." else { return false }
-            directory.appendPathComponent(String(component), isDirectory: true)
-            guard isDirectory(directory) else { return false }
-        }
-        return true
-    }
-
-    private func relativeDirectory(of file: URL, below project: URL) -> String {
-        let root = project.standardizedFileURL.path + "/"
-        let parent = file.deletingLastPathComponent().standardizedFileURL.path
-        guard parent.hasPrefix(root) else { return ".." }
-        return String(parent.dropFirst(root.count))
-    }
-
-    private static func timestamp(_ value: String?) -> Date? {
-        guard let value else { return nil }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        if let date = formatter.date(from: value) { return date }
-        formatter.formatOptions = [.withFullDate]
-        return formatter.date(from: value)
-    }
-
-    static func isSafeComponent(_ name: String) -> Bool {
-        !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\\") &&
-            !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
     }
 }
 #endif

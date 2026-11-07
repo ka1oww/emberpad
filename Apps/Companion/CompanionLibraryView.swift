@@ -6,14 +6,15 @@ import SwiftUI
 // badge and primary button, exactly as design 5.7 specifies. Adopt a shared token set
 // here if one ever moves somewhere both targets can import. Do not create a second set.
 
-/// The menu-bar window content from design 5.7: header, source folder, subjects with
-/// counts, the not-found list, the Prepare button, the phase-2 iPad placeholder and the
+/// The menu-bar window content from design 5.7: header, the Drive EMBER source folder,
+/// subjects with document counts, the list of PDFs not read this time, the Prepare button, the phase-2 iPad placeholder and the
 /// renewal line. Values in, actions out, so the window can render a synthetic snapshot
 /// (screenshots) as well as the live model without touching the real library.
 struct CompanionLibraryContent: View {
     static let emberRed = Color(red: 178 / 255, green: 58 / 255, blue: 46 / 255)
 
-    let folder: URL
+    /// Nil when no folder was chosen and the Drive EMBER folder was not found.
+    let folder: URL?
     let isSourceAvailable: Bool
     let isPreparing: Bool
     let snapshot: LibrarySnapshot?
@@ -22,13 +23,10 @@ struct CompanionLibraryContent: View {
     let onChooseFolder: () -> Void
     let onPrepare: () -> Void
 
-    /// Finished-pair counts in the canonical subject order.
-    static func subjectCounts(_ snapshot: LibrarySnapshot?) -> [(subject: String, pairs: Int)] {
-        var counts: [String: Int] = [:]
-        for pair in snapshot?.pairs ?? [] {
-            counts[pair.student.entry.subject, default: 0] += 1
-        }
-        return EmberLibrarySource.subjectFolders.map { ($0, counts[$0, default: 0]) }
+    /// Document counts per subject: the fixed Drive EMBER subjects first, then any other subject found.
+    static func subjectCounts(_ snapshot: LibrarySnapshot?) -> [(subject: String, documents: Int)] {
+        let counts = snapshot?.documentCounts ?? [:]
+        return EmberLibrarySource.displayOrder(counts.keys).map { ($0, counts[$0, default: 0]) }
     }
 
     private static let timeFormatter: DateFormatter = {
@@ -76,17 +74,17 @@ struct CompanionLibraryContent: View {
             HStack(spacing: 8) {
                 Image(systemName: "folder")
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(folder.lastPathComponent).font(.system(size: 13, weight: .semibold))
-                    Text(folder.path).font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(folder?.lastPathComponent ?? "Drive EMBER folder").font(.system(size: 13, weight: .semibold))
+                    Text(folder?.path ?? "Google Drive › My Drive › EMBER").font(.system(size: 11)).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
             }
             if !isSourceAvailable {
-                Label("Source folder not found", systemImage: "exclamationmark.triangle")
+                Label("EMBER folder not found", systemImage: "exclamationmark.triangle")
                     .font(.system(size: 12)).foregroundStyle(.red)
             }
             HStack {
-                Button("Choose master folder…", action: onChooseFolder)
+                Button("Choose EMBER folder…", action: onChooseFolder)
                     .buttonStyle(.bordered)
                     .disabled(isPreparing)
                 Button(isPreparing ? "Preparing…" : "Prepare iPad library", action: onPrepare)
@@ -109,11 +107,12 @@ struct CompanionLibraryContent: View {
                 HStack {
                     Text(row.subject).font(.system(size: 13))
                     Spacer()
-                    Text(snapshot == nil ? "—" : "\(row.pairs)").font(.system(size: 13))
-                        .foregroundStyle(row.pairs > 0 ? .primary : .secondary)
+                    Text(snapshot == nil ? "—" : "\(row.documents)").font(.system(size: 13))
+                        .foregroundStyle(row.documents > 0 ? .primary : .secondary)
                 }
             }
             Text(subjectsFooter).font(.system(size: 12)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 4)
             if let message {
                 Text(message).font(.system(size: 12)).foregroundStyle(.secondary)
@@ -124,29 +123,30 @@ struct CompanionLibraryContent: View {
 
     private var subjectsFooter: String {
         guard let snapshot, let scannedAt else {
-            return isPreparing ? "Reading the source folder…" : "Not prepared yet."
+            return isPreparing ? "Reading the EMBER folder…" : "Not prepared yet."
         }
-        return "\(snapshot.manifest.files.count) worksheets · " +
-            "\(snapshot.pairs.count) papers · scanned \(Self.timeFormatter.string(from: scannedAt))"
+        return "\(snapshot.documents.count) documents · \(snapshot.pairCount) pairs · " +
+            "\(snapshot.singleCopyCount) single · \(snapshot.archivedCount) archived\n" +
+            "scanned \(Self.timeFormatter.string(from: scannedAt))"
     }
 
-    // MARK: Not-found list (stays on the Mac)
+    // MARK: Not-read list (stays on the Mac)
 
     private var notFoundSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Not found on this Mac").font(.system(size: 13, weight: .semibold))
+            Text("Not read this time").font(.system(size: 13, weight: .semibold))
             if let snapshot {
-                if snapshot.misses.isEmpty {
-                    Text("Everything with a record finished.").font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                } else {
+                Text(readSummary(snapshot)).font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                if !snapshot.misses.isEmpty {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(Array(snapshot.misses.enumerated()), id: \.offset) { _, miss in
                                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                                     Image(systemName: "exclamationmark.triangle").font(.system(size: 11))
                                         .foregroundStyle(.secondary)
-                                    Text(miss.project).font(.system(size: 12))
+                                    Text(miss.path).font(.system(size: 12))
+                                        .lineLimit(1).truncationMode(.middle)
                                     Spacer()
                                     Text(miss.reason.rawValue).font(.system(size: 11))
                                         .foregroundStyle(.secondary)
@@ -157,11 +157,21 @@ struct CompanionLibraryContent: View {
                     .frame(maxHeight: 120)
                 }
             } else if !isPreparing {
-                Text("Prepare the library to see what is missing.").font(.system(size: 12))
+                Text("Prepare the library to see any PDF that could not be read.").font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
+    }
+
+    private func readSummary(_ snapshot: LibrarySnapshot) -> String {
+        let read = snapshot.documents.count.formatted(IntegerFormatStyle<Int>.number.grouping(.automatic))
+        let skipped = snapshot.skippedLeftoverPDFs.formatted(IntegerFormatStyle<Int>.number.grouping(.automatic))
+        if snapshot.misses.isEmpty {
+            return "All \(read) documents read · \(skipped) build files skipped"
+        }
+        let notRead = snapshot.misses.count.formatted(IntegerFormatStyle<Int>.number.grouping(.automatic))
+        return "\(read) documents read · \(skipped) build files skipped · \(notRead) not read"
     }
 
     // MARK: 4. iPad (phase 2 placeholder)
