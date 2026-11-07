@@ -36,8 +36,8 @@ enum FlattenedExport {
     /// over it. The result has the same page count and page sizes as `source`.
     ///
     /// `drawings` holds `PKDrawing.dataRepresentation()` values so the work can run off the
-    /// main actor. Ink is mapped from the canvas space used on screen (the page's crop box
-    /// size, origin top left) onto the whole output page.
+    /// main actor. Ink is mapped from the canvas space used on screen (the page's displayed
+    /// size, rotation applied, origin top left) onto the whole output page.
     static func render(source: PDFDocument, drawings: [Int: Data], title: String) throws -> Data {
         guard source.pageCount > 0 else { throw FlattenedExportError.noPages }
         var decoded: [Int: PKDrawing] = [:]
@@ -71,11 +71,10 @@ enum FlattenedExport {
                     cg.restoreGState()
 
                     if let drawing = decoded[index], !drawing.strokes.isEmpty {
-                        let canvas = CGRect(origin: .zero, size: cropBox.size)
                         // The canvases are forced light on screen, so ink must not adapt to dark traits here.
                         var image = UIImage()
                         UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-                            image = drawing.image(from: canvas, scale: inkScale)
+                            image = drawing.image(from: pageRect, scale: inkScale)
                         }
                         cg.saveGState()
                         cg.clip(to: pageRect)
