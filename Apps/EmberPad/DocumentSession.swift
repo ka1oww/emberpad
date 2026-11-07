@@ -9,6 +9,8 @@ final class DocumentSession: ObservableObject {
     let record: DocumentRecord
     let pdf: PDFDocument
     let originalURL: URL
+    /// Distinguishes this open from a later reopen of the same document, so cached student-view ink is never reused.
+    let instanceID = UUID()
     private let store: LibraryStore
     private(set) var drawings: [Int: PKDrawing]
     @Published private(set) var saveError: String?
@@ -27,6 +29,8 @@ final class DocumentSession: ObservableObject {
     }
 
     func drawing(on page: Int) -> PKDrawing { drawings[page] ?? PKDrawing() }
+    /// Bumps whenever `page`'s drawing changes in this session; 0 means the drawing it opened with.
+    func inkRevision(on page: Int) -> UInt64 { pageRevisions[page] ?? 0 }
 
     func update(_ drawing: PKDrawing, page: Int) {
         drawings[page] = drawing

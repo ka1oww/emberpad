@@ -7,11 +7,19 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     let session: DocumentSession
     let student: StudentDisplayModel
     let tools: ToolState
-    private let pdfView = PageHitTestPDFView()
+    /// Internal, not private, so the EP-15 external-display screenshot test can scroll and zoom it.
+    let pdfView = PageHitTestPDFView()
     private var canvases: [Int: PKCanvasView] = [:]
     private weak var activeCanvas: PKCanvasView?
     private var pageObserver: NSObjectProtocol?
+    private var viewportObservers: [NSObjectProtocol] = []
+    private var scrollObservation: NSKeyValueObservation?
+    /// Scroll and zoom republish the student viewport at 30 Hz at most.
+    private lazy var viewportThrottle = MirrorThrottle { [weak self] in self?.publishPage() }
     private var currentPage = 0
+    /// Off from the moment the worksheet starts leaving, so a late throttled frame cannot put a page back on the
+    /// student view after the editor has cleared it.
+    private var publishing = true
     private var studentPage = 0
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
@@ -49,12 +57,17 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             self.focus(canvas)
         }
         pdfView.document = session.pdf
-        session.drawingDidChange = { [weak self] page, _ in
-            guard let self, page == self.studentPage else { return }
-            self.publishPage()
+        session.drawingDidChange = { [weak self] _, _ in
+            // Any visible page's committed ink can be on the student view, not only the focused page's.
+            self?.publishPage()
         }
         pageObserver = NotificationCenter.default.addObserver(forName: .PDFViewPageChanged, object: pdfView, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.pageChanged() }
+        }
+        viewportObservers = [Notification.Name.PDFViewVisiblePagesChanged, .PDFViewScaleChanged].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: pdfView, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.viewportThrottle.signal() }
+            }
         }
         let undoTap = UITapGestureRecognizer(target: self, action: #selector(undoGesture))
         undoTap.numberOfTapsRequired = 2; undoTap.numberOfTouchesRequired = 2
@@ -73,10 +86,49 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         if let canvas = canvases[currentPage] { focus(canvas) }
+        observeScrolling()
         publishPage()
     }
 
-    deinit { if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) } }
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        observeScrolling()
+        viewportThrottle.signal() // Rotation and split-view resizes move the visible rect too.
+    }
+
+    /// PDFView scrolls inside its own scroll view. Watching its content offset catches every scroll and zoom frame,
+    /// including deceleration, which the visible-pages and scale notifications miss.
+    private func observeScrolling() {
+        guard scrollObservation == nil, let scrollView = Self.firstScrollView(in: pdfView) else { return }
+        scrollObservation = scrollView.observe(\.contentOffset, options: []) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.viewportThrottle.signal() }
+        }
+    }
+
+    private static func firstScrollView(in view: UIView) -> UIScrollView? {
+        for subview in view.subviews {
+            if let scrollView = subview as? UIScrollView { return scrollView }
+            if let nested = firstScrollView(in: subview) { return nested }
+        }
+        return nil
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        publishing = true
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        publishing = false
+        viewportThrottle.cancel()
+    }
+
+    deinit {
+        if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
+        viewportObservers.forEach(NotificationCenter.default.removeObserver)
+        scrollObservation?.invalidate()
+    }
 
     /// Ink canvases stay light in both themes, so black ink never inverts on the
     /// white page (design 5.2 dark-mode rule). Every canvas is created here.
@@ -90,7 +142,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let index = session.pdf.index(for: page)
         guard index != NSNotFound else { return nil }
         if let existing = canvases[index] { return existing }
-        let canvas = PKCanvasView(frame: CGRect(origin: .zero, size: page.bounds(for: .cropBox).size))
+        let canvas = PKCanvasView(frame: CGRect(origin: .zero, size: page.displayedSize))
         Self.styleCanvas(canvas)
         canvas.isScrollEnabled = false
         canvas.drawingPolicy = .pencilOnly
@@ -167,10 +219,23 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     private func publishPage() {
-        guard let page = session.pdf.page(at: studentPage) else { return }
-        let size = canvases[studentPage]?.bounds.size ?? page.bounds(for: .cropBox).size
-        // A Teacher copy publishes only the private placeholder; the snapshot type refuses its pages.
-        student.publish(session: session, pageIndex: studentPage, canvasSize: size)
+        guard publishing, let page = session.pdf.page(at: studentPage) else { return }
+        let size = canvases[studentPage]?.bounds.size ?? page.displayedSize
+        // A Teacher copy publishes only the private placeholder; the snapshot type refuses its pages in both framings.
+        student.publish(session: session, pageIndex: studentPage, canvasSize: size, viewport: presenterViewport())
+    }
+
+    /// The visible rect and up to two pages under it, measured from the laid-out PDF view. Only geometry leaves here;
+    /// the snapshot fetches the pages and ink from the session itself.
+    private func presenterViewport() -> StudentViewport? {
+        guard pdfView.window != nil, pdfView.bounds.width > 0, pdfView.bounds.height > 0 else { return nil }
+        let layouts = pdfView.visiblePages.compactMap { page -> MirrorPageLayout? in
+            let index = session.pdf.index(for: page)
+            guard index != NSNotFound else { return nil }
+            let crop = page.bounds(for: .cropBox)
+            return MirrorPageLayout(pageIndex: index, viewRect: pdfView.convert(crop, from: page), pageSize: page.displayedSize)
+        }
+        return MirrorGeometry.viewport(viewBounds: pdfView.bounds, layouts: layouts)
     }
 }
 
@@ -191,5 +256,13 @@ final class PageHitTestPDFView: PDFView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if event?.type == .touches { focusCanvas(at: point) }
         return super.hitTest(point, with: event)
+    }
+}
+
+extension PDFPage {
+    /// The crop box size as displayed, with width and height swapped for pages rotated a quarter turn.
+    var displayedSize: CGSize {
+        let size = bounds(for: .cropBox).size
+        return rotation % 180 == 0 ? size : CGSize(width: size.height, height: size.width)
     }
 }
