@@ -233,12 +233,11 @@ extension PDFOverlayPageController {
     /// closes its undo group first; the ink was already drawn, so nothing
     /// here can delay it.
     private func straightenIfHeld(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
-        guard let hold = Self.holdRecognizer(on: canvas), hold.heldAtEnd,
-              canvas.drawing.strokes.count == previousCount + 1 else { return }
-        // A hold applies to the one stroke it ended, whatever that stroke was.
+        guard let hold = Self.holdRecognizer(on: canvas), hold.heldAtEnd else { return }
+        // A hold applies to the one drawing change it ended, whatever that change was.
         hold.consumeHold()
-        guard tools.settings.straightHighlighter, let stroke = canvas.drawing.strokes.last,
-              stroke.ink.inkType == .marker, let straight = StrokeSnap.straightened(stroke) else { return }
+        guard canvas.drawing.strokes.count == previousCount + 1, tools.settings.straightHighlighter,
+              let stroke = canvas.drawing.strokes.last, stroke.ink.inkType == .marker, let straight = StrokeSnap.straightened(stroke) else { return }
         let count = canvas.drawing.strokes.count
         let undoManager = canvas.undoManager
         DispatchQueue.main.async { [weak self] in
