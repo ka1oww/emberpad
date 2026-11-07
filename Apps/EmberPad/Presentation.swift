@@ -202,6 +202,9 @@ final class StudentDisplayModel: ObservableObject {
         guard var live = liveInk else { return }
         live.strokes.expire(now: now())
         setLiveInk(live)
+        if live.strokes.strokes.contains(where: { $0.liftedAt != nil }) {
+            schedule(LiveInkStrokes.commitTimeout) { [weak self] in self?.expireLiveInk() }
+        }
     }
 
     private func setLiveInk(_ value: StudentLiveInk?) {
