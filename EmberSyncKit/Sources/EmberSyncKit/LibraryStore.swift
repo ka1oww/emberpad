@@ -187,6 +187,25 @@ public actor LibraryStore {
         try refreshPairs()
     }
 
+    private struct DeliveryReceipt: Codable {
+        let manifestSHA256: ContentHash
+        let appliedAt: Date
+    }
+    private var deliveryReceiptURL: URL { root.appendingPathComponent(".library-delivery.json") }
+
+    /// The manifest digest of the last library delivery that was applied completely, if any.
+    public func appliedDeliveryDigest() throws -> ContentHash? {
+        guard files.fileExists(atPath: deliveryReceiptURL.path) else { return nil }
+        try Self.requireRegularFile(deliveryReceiptURL)
+        return try ManifestCodec.decoder().decode(DeliveryReceipt.self, from: Data(contentsOf: deliveryReceiptURL)).manifestSHA256
+    }
+
+    /// Records a library delivery as completely applied, so the same delivery is not read and applied again.
+    public func recordAppliedDelivery(_ digest: ContentHash, at date: Date) throws {
+        try ManifestCodec.encoder().encode(DeliveryReceipt(manifestSHA256: digest, appliedAt: date))
+            .write(to: deliveryReceiptURL, options: .atomic)
+    }
+
     public func previousVersions() throws -> [PreviousVersion] {
         let previous = root.appendingPathComponent(".Previous", isDirectory: true)
         guard files.fileExists(atPath: previous.path) else { return [] }

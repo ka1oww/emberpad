@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pure file-format helpers for renew.zsh. No device or account operations."""
 import argparse
+import hashlib
 from datetime import datetime, timezone
 import json
 import os
@@ -85,6 +86,48 @@ def readiness(devices, details, lock, device_id):
     return "ready-locked" if locked else "ready"
 
 
+def outbox_check(folder):
+    """Checks a copied Companion Outbox before delivery: EmberLibrary/manifest.json must be a version-2 manifest,
+    and every PDF it lists that is present under EmberLibrary/files/ must match its size and SHA-256. Unlisted or
+    non-PDF entries are refused. Listed PDFs may be absent (copies carried forward without bytes): the iPad
+    checks every file again and keeps its own copy. Prints "<entries> <present> <absent>"."""
+    library = Path(folder) / "EmberLibrary"
+    manifest_path = library / "manifest.json"
+    if library.is_symlink() or not library.is_dir() or manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("Outbox has no EmberLibrary/manifest.json; prepare the iPad library in the Companion")
+    manifest = json.loads(manifest_path.read_text())
+    if not isinstance(manifest, dict) or manifest.get("version") != 2 or not isinstance(manifest.get("files"), list):
+        raise ValueError("Outbox manifest is not a version-2 manifest")
+    entries = manifest["files"]
+    expected = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Outbox manifest has an invalid entry")
+        digest, size = entry.get("sha256"), entry.get("size")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or not isinstance(size, int):
+            raise ValueError("Outbox manifest has an invalid entry")
+        if expected.get(digest, size) != size:
+            raise ValueError("Outbox manifest lists one hash with two sizes")
+        expected[digest] = size
+    files = library / "files"
+    present = 0
+    if files.exists():
+        if files.is_symlink() or not files.is_dir():
+            raise ValueError("Outbox files folder is not a folder")
+        for item in files.iterdir():
+            digest = item.name[:-4] if item.name.endswith(".pdf") else None
+            if digest not in expected or item.is_symlink() or not item.is_file():
+                raise ValueError(f"Outbox holds an unlisted file: {item.name}")
+            hasher = hashlib.sha256()
+            with item.open("rb") as source:
+                for block in iter(lambda: source.read(1 << 20), b""):
+                    hasher.update(block)
+            if item.stat().st_size != expected[digest] or hasher.hexdigest() != digest:
+                raise ValueError(f"Outbox file does not match its manifest hash: {item.name}")
+            present += 1
+    return f"{len(entries)} {present} {len(expected) - present}"
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -104,6 +147,8 @@ def main():
     ready.add_argument("details")
     ready.add_argument("lock")
     ready.add_argument("device_id")
+    outbox = sub.add_parser("outbox-check")
+    outbox.add_argument("folder")
     args = parser.parse_args()
     now = int(datetime.now(timezone.utc).timestamp())
     if args.command == "expiry":
@@ -123,6 +168,8 @@ def main():
     elif args.command == "readiness":
         inputs = [json.loads(Path(path).read_text()) for path in (args.devices, args.details, args.lock)]
         print(readiness(*inputs, args.device_id))
+    elif args.command == "outbox-check":
+        print(outbox_check(args.folder))
 
 
 if __name__ == "__main__":

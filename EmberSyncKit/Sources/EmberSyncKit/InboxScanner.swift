@@ -10,7 +10,8 @@ public struct InboxItem: Sendable {
 }
 
 public enum InboxScanner {
-    /// Read-only scan. Callers remove a delivery only after durable, validated import succeeds.
+    /// Read-only scan of loose PDFs. Callers remove a delivery only after durable, validated import succeeds.
+    /// The reserved `EmberLibrary` folder holds the library delivery (see `libraryDelivery(in:)`) and is skipped.
     public static func items(in root: URL) throws -> [InboxItem] {
         let files = FileManager.default
         try files.createDirectory(at: root, withIntermediateDirectories: true)
@@ -21,6 +22,7 @@ public enum InboxScanner {
                 let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey])
                 guard values.isSymbolicLink != true else { continue }
                 let path = components + [url.lastPathComponent]
+                if components.isEmpty, url.lastPathComponent == LibraryDelivery.folderName { continue }
                 if values.isDirectory == true { try visit(url, components: path) }
                 else if values.isRegularFile == true, url.pathExtension.lowercased() == "pdf" {
                     let source = try SourcePath(classFolder: path.count > 1 ? path[0] : "Unfiled",
