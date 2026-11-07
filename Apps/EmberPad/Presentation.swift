@@ -5,18 +5,60 @@ import PencilKit
 import EmberSyncKit
 
 /// The external scene receives only this type. It has no answer URL, pairing data or library chrome.
+/// Its only initializer takes the page and drawing from a session whose record is a Student copy, so a Teacher
+/// copy cannot produce one. Private setters keep initializers in other files from filling it any other way.
 struct StudentPageSnapshot {
-    let documentID: UUID
-    let pageIndex: Int
-    let page: PDFPage
-    let drawing: PKDrawing
-    let canvasSize: CGSize
+    private(set) var document: StudentSafeDocument
+    private(set) var pageIndex: Int
+    private(set) var page: PDFPage
+    private(set) var drawing: PKDrawing
+    private(set) var canvasSize: CGSize
+    var documentID: UUID { document.id }
+
+    @MainActor
+    init(session: DocumentSession, pageIndex: Int, canvasSize: CGSize) throws {
+        guard let document = StudentSafeDocument(session.record) else { throw StudentViewError.teacherCopyIsPrivate }
+        guard let page = session.pdf.page(at: pageIndex) else { throw LibraryError.pageOutOfRange }
+        self.document = document
+        self.pageIndex = pageIndex
+        self.page = page
+        drawing = session.drawing(on: pageIndex)
+        self.canvasSize = canvasSize
+    }
+}
+
+enum StudentViewError: Error, Equatable {
+    case teacherCopyIsPrivate
+}
+
+/// What the external scene shows besides Paused. Only `.page` carries pixels, and only a Student copy can fill it.
+enum StudentDisplayContent {
+    case none
+    case teacherCopyPrivate
+    case page(StudentPageSnapshot)
+
+    var snapshot: StudentPageSnapshot? { if case .page(let snapshot) = self { snapshot } else { nil } }
 }
 
 @MainActor
 final class StudentDisplayModel: ObservableObject {
-    @Published var snapshot: StudentPageSnapshot?
+    @Published private(set) var content: StudentDisplayContent = .none
     @Published var paused = true
+    var snapshot: StudentPageSnapshot? { content.snapshot }
+
+    /// Shows the session's page, or the private placeholder when the session is not a Student copy.
+    func publish(session: DocumentSession, pageIndex: Int, canvasSize: CGSize) {
+        do { content = .page(try StudentPageSnapshot(session: session, pageIndex: pageIndex, canvasSize: canvasSize)) }
+        catch StudentViewError.teacherCopyIsPrivate { content = .teacherCopyPrivate }
+        catch { content = .none } // Never leave a stale page from another document or page.
+    }
+
+    /// Called as soon as a document becomes the main page, before any renderer publishes a page.
+    func opened(_ record: DocumentRecord) {
+        content = StudentSafeDocument(record) == nil ? .teacherCopyPrivate : .none
+    }
+
+    func clear() { content = .none }
 }
 
 @MainActor
@@ -40,8 +82,13 @@ struct StudentDisplayView: View {
         ZStack {
             Color.black
             if model.paused { Text("Paused").font(.largeTitle).foregroundStyle(.white) }
-            else if let snapshot = model.snapshot { StudentPageSurface(snapshot: snapshot) }
-            else { Text("No worksheet selected").foregroundStyle(.white) }
+            else {
+                switch model.content {
+                case .page(let snapshot): StudentPageSurface(snapshot: snapshot)
+                case .teacherCopyPrivate: Text("Teacher copy · private").font(.largeTitle).foregroundStyle(.white)
+                case .none: Text("No worksheet selected").foregroundStyle(.white)
+                }
+            }
         }.ignoresSafeArea()
     }
 }
