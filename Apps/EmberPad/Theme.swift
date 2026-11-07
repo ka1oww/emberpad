@@ -98,13 +98,21 @@ enum Theme {
     static let highlighterYellow = ThemeToken.highlighterYellow.color
     static let highlighterGreen = ThemeToken.highlighterGreen.color
     static let highlighterPink = ThemeToken.highlighterPink.color
+    /// Highlighter presets are stored opaque and drawn at this alpha.
     static let highlighterDefaultOpacity: CGFloat = 0.45
-    static let highlighterDefaultColor = ThemeToken.highlighterYellow.uiColor
-        .withAlphaComponent(highlighterDefaultOpacity)
 
-    static let fountainDefaultWidth: CGFloat = 2
+    // MARK: - Toolbar strip presets (design 5.4)
 
-    static let highlighterDefaultWidth: CGFloat = 18
+    /// The three pen thickness dots; the middle one is the default.
+    static let penWidths: [CGFloat] = [1.5, 2.5, 4]
+    static let penDefaultWidthIndex = 1
+    static let highlighterWidths: [CGFloat] = [12, 18, 26]
+    static let highlighterDefaultWidthIndex = 1
+    /// Partial-eraser sizes; the whole-stroke eraser has no size.
+    static let eraserSizes: [CGFloat] = [8, 16, 32]
+    static let eraserDefaultSizeIndex = 1
+    /// The toast capsule: `#1C1C1E` at 88% in both themes (design 5.4).
+    static let toastBackground = Color(.sRGB, red: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, opacity: 0.88)
 
     // MARK: - Type (SF Pro for UI, New York serif for titles)
 
