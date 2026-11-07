@@ -413,8 +413,10 @@ private struct LibraryCardCell: View {
         .buttonStyle(.plain)
         .contextMenu {
             if library.showingArchived {
-                Button("Unarchive", systemImage: "arrow.uturn.backward") {
-                    Task { await library.unarchiveDocument(record.id) }
+                if record.status == .archived {
+                    Button("Unarchive", systemImage: "arrow.uturn.backward") {
+                        Task { await library.unarchiveDocument(record.id) }
+                    }
                 }
             } else {
                 Button("Archive", systemImage: "archivebox") {
