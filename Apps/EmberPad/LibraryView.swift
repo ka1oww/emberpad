@@ -5,7 +5,10 @@ import EmberSyncKit
 struct LibraryView: View {
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
+    @ObservedObject var pairing: PairingController
     @State private var showImport = false
+    @State private var showPairing = false
+    @State private var confirmForget = false
 
     var body: some View {
         NavigationStack {
@@ -31,7 +34,15 @@ struct LibraryView: View {
                 Section {
                     NavigationLink("Archived") { DocumentListView(library: library, presentation: presentation, className: nil) }
                     if let last = library.lastInboxImport { Text("Inbox checked \(last.formatted(date: .abbreviated, time: .shortened))").font(.footnote) }
-                    Text("Automatic Mac sync is planned. Worksheets imported here are available offline.").font(.footnote).foregroundStyle(.secondary)
+                    if let paired = pairing.paired {
+                        Text("Paired with your Mac (\(paired.shortID)) on \(paired.pairedAt.formatted(date: .abbreviated, time: .shortened)). Automatic sync arrives in a later build.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else {
+                        Text("Automatic Mac sync is planned. Worksheets imported here are available offline.").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    if let error = pairing.errorMessage, !showPairing {
+                        Text(error).font(.footnote).foregroundStyle(.red)
+                    }
                 }
 #if DEBUG
                 // EP-03 probe entry. Compiled out of Release; release behaviour unchanged.
@@ -44,10 +55,31 @@ struct LibraryView: View {
             .toolbar {
                 Button("Import from Files", systemImage: "square.and.arrow.down") { showImport = true }
                     .disabled(library.isImporting)
-                Button("File Inbox", systemImage: "tray") { Task { await library.fileInbox() } }.disabled(library.isImporting)
+                // Tap files the Inbox; the menu also holds pairing (design 5.6: the iPad scans from this menu).
+                Menu {
+                    Button("File Inbox", systemImage: "tray") { Task { await library.fileInbox() } }
+                        .disabled(library.isImporting)
+                    if pairing.paired == nil {
+                        Button("Pair with Mac…", systemImage: "qrcode.viewfinder") { showPairing = true }
+                    } else {
+                        Button("Pair with a different Mac…", systemImage: "qrcode.viewfinder") { showPairing = true }
+                        Button("Forget Mac…", systemImage: "xmark.circle", role: .destructive) { confirmForget = true }
+                    }
+                } label: {
+                    Label("File Inbox", systemImage: "tray")
+                } primaryAction: {
+                    guard !library.isImporting else { return }
+                    Task { await library.fileInbox() }
+                }
             }
             .refreshable { await library.fileInbox() }
             .sheet(isPresented: $showImport) { ImportWorksheetView(library: library) }
+            .sheet(isPresented: $showPairing) { PairingScannerSheet(pairing: pairing, presentation: presentation) }
+            .confirmationDialog("Forget this Mac?", isPresented: $confirmForget, titleVisibility: .visible) {
+                Button("Forget Mac", role: .destructive) { pairing.forget() }
+            } message: {
+                Text("The pairing secret is deleted from this iPad. Also choose Forget iPad in EmberPad Companion, then pair again with a new code.")
+            }
             .task { await library.refresh() }
         }
         .tint(Theme.tint)
