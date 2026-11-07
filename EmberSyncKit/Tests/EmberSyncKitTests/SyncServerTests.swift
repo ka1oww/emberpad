@@ -44,6 +44,30 @@ struct SyncServerTests {
         #expect(power.changes == [true, false])
     }
 
+    @Test(.timeLimit(.minutes(1))) func theSleepAssertionIsReleasedWhileAnIdleConnectionStaysOpen() async throws {
+        let fixture = try OutboxFixture()
+        defer { fixture.remove() }
+        try fixture.tree.write("EMBER CHEMISTRY/TYS PAPERS/Synthetic Paper 2.pdf", String(repeating: "synthetic page ", count: 200_000))
+        _ = try fixture.prepare()
+        let pairing = try PairingCredential.generate()
+        let power = RecordingPowerGuard()
+        // Longer than the one-second connection tick, so a tick that renewed the release would starve it.
+        var configuration = RunningServer.configuration
+        configuration.powerReleaseDelay = .milliseconds(2500)
+        let server = try await RunningServer.start(pairing, provider: OutboxContentProvider(outbox: fixture.outbox), power: power,
+                                                   configuration: configuration)
+        defer { server.stop() }
+
+        let client = try await TestSyncClient.connect(port: server.port, pairing: pairing)
+        let manifest = try await client.manifest()
+        _ = try await client.fetchAll(manifest)
+        // The connection stays open and idle: its tick must not keep renewing the release.
+        let status = try await server.waitFor { $0.connectedPeers == 1 && !$0.isKeepingAwake }
+        #expect(status.connectedPeers == 1)
+        #expect(power.changes == [true, false])
+        await client.close()
+    }
+
     @Test(.timeLimit(.minutes(1))) func aNewPrepareIsServedWithoutRestartingTheServer() async throws {
         let fixture = try OutboxFixture()
         defer { fixture.remove() }
