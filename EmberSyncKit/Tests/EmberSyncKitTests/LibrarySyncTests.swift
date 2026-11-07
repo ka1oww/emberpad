@@ -4,7 +4,7 @@ import Testing
 @testable import EmberSyncKit
 
 /// EP-24: the iPad's sync download against a minimal in-test server built on the EP-21 `WireServerSession`
-/// (EP-23's real Companion server is tested against this client once both exist). Every byte is synthetic.
+/// (`SyncServerTests` runs this client against the real Companion server). Every byte is synthetic.
 @Suite(.serialized)
 struct LibrarySyncTests {
     struct Harness {
@@ -245,7 +245,7 @@ final class ProgressLog: @unchecked Sendable {
 }
 
 /// A minimal sync server for tests: a TLS-PSK listener whose connections are served by `serveLoopback`, the
-/// EP-21 server session driver. EP-23's Companion server replaces it in the end-to-end test.
+/// EP-21 server session driver. `SyncServerTests` uses the real Companion server instead.
 final class SyncTestServer: @unchecked Sendable {
     private let listener: NWListener
     let port: NWEndpoint.Port
