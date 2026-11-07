@@ -221,7 +221,7 @@ final class StudentPageDrawingView: UIView {
             let frame = MirrorGeometry.map(item.frame, from: scene.visibleRect, to: local)
             page.isHidden = false; ink.isHidden = false
             page.frame = frame; ink.frame = frame
-            let pageSize = item.page.bounds(for: .cropBox).size
+            let pageSize = item.page.displayedSize
             let scale = MirrorGeometry.rasterScale(pageSize: pageSize, displayedPoints: frame.width,
                                                    screenScale: traitCollection.displayScale)
             page.contents = cache.image(for: .init(documentID: snapshot.documentID, pageIndex: item.pageIndex, kind: .page, scale: scale)) {

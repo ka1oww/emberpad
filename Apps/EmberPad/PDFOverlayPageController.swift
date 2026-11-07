@@ -233,7 +233,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             let index = session.pdf.index(for: page)
             guard index != NSNotFound else { return nil }
             let crop = page.bounds(for: .cropBox)
-            return MirrorPageLayout(pageIndex: index, viewRect: pdfView.convert(crop, from: page), pageSize: crop.size)
+            return MirrorPageLayout(pageIndex: index, viewRect: pdfView.convert(crop, from: page), pageSize: page.displayedSize)
         }
         return MirrorGeometry.viewport(viewBounds: pdfView.bounds, layouts: layouts)
     }
@@ -256,5 +256,13 @@ final class PageHitTestPDFView: PDFView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if event?.type == .touches { focusCanvas(at: point) }
         return super.hitTest(point, with: event)
+    }
+}
+
+extension PDFPage {
+    /// The crop box size as displayed, with width and height swapped for pages rotated a quarter turn.
+    var displayedSize: CGSize {
+        let size = bounds(for: .cropBox).size
+        return rotation % 180 == 0 ? size : CGSize(width: size.height, height: size.width)
     }
 }
