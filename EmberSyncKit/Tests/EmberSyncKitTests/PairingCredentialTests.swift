@@ -153,6 +153,24 @@ struct PairingKeychainTests {
         #expect(try keychain.load() == nil)
     }
 
+    @Test func savingOverADamagedItemReplacesItSoThePairIsRecoverable() throws {
+        let keychain = scratchKeychain()
+        defer { try? keychain.delete() }
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychain.service,
+            kSecAttrAccount as String: PairingKeychain.account,
+            kSecValueData as String: Data("not a pairing".utf8),
+        ]
+        #expect(SecItemAdd(add as CFDictionary, nil) == errSecSuccess)
+        #expect(throws: PairingError.corruptRecord) { try keychain.load() }
+        let fresh = try PairingCredential.generate()
+        try keychain.save(fresh)
+        let loaded = try #require(try keychain.load())
+        #expect(loaded.serviceID == fresh.serviceID)
+        #expect(loaded.secret == fresh.secret)
+    }
+
     @Test func itemIsNeverSynchronised() throws {
         let keychain = scratchKeychain()
         defer { try? keychain.delete() }
