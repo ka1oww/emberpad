@@ -95,6 +95,27 @@ final class FlattenedExportTests: XCTestCase {
         XCTAssertEqual(output.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String, "Synthetic export")
     }
 
+    func testInkLandsInDisplayedPositionOnRotatedPage() throws {
+        let source = try XCTUnwrap(PDFDocument(data: fixturePDF()))
+        let page = try XCTUnwrap(source.page(at: 1))
+        page.rotation = 90
+        let displayed = CGSize(width: 792, height: 612)
+        let ink: [Int: Data] = [1: redInk(on: displayed).dataRepresentation()]
+
+        let output = try XCTUnwrap(PDFDocument(data: try FlattenedExport.render(source: source, drawings: ink, title: "Rotated")))
+        let outPage = try XCTUnwrap(output.page(at: 1))
+        XCTAssertEqual(outPage.bounds(for: .cropBox).size, displayed)
+
+        let image = outPage.thumbnail(of: displayed, for: .cropBox)
+        let cg = try XCTUnwrap(image.cgImage)
+        let bytes = try XCTUnwrap(cg.dataProvider?.data.flatMap { CFDataGetBytePtr($0) })
+        let bpp = cg.bitsPerPixel / 8
+        let p = bytes + Int(displayed.height * 0.7) * cg.bytesPerRow + Int(displayed.width * 0.5) * bpp
+        let channels = [Int(p[0]), Int(p[1]), Int(p[2])]
+        XCTAssertGreaterThan(channels.max() ?? 0, 180)
+        XCTAssertEqual(channels.filter { $0 < 90 }.count, 2, "ink sits where it was drawn on screen")
+    }
+
     func testRendersWithoutInkAndIgnoresOutOfRangePages() throws {
         let source = try XCTUnwrap(PDFDocument(data: fixturePDF()))
         let stray = redInk(on: CGSize(width: 595, height: 842)).dataRepresentation()
