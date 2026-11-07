@@ -3,7 +3,7 @@ import PDFKit
 import PencilKit
 
 @MainActor
-final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @preconcurrency PDFPageOverlayViewProvider, PKCanvasViewDelegate, UIPencilInteractionDelegate {
+final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @preconcurrency PDFPageOverlayViewProvider, PKCanvasViewDelegate, UIPencilInteractionDelegate, UIGestureRecognizerDelegate {
     let session: DocumentSession
     let student: StudentDisplayModel
     let tools: ToolState
@@ -16,6 +16,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var scrollObservation: NSKeyValueObservation?
     /// Scroll and zoom republish the student viewport at 30 Hz at most.
     private lazy var viewportThrottle = MirrorThrottle { [weak self] in self?.publishPage() }
+    /// EP-30: observes Pencil strokes beside PencilKit to draw them live on the student view. Internal for tests.
+    let liveInk = LiveInkRecognizer()
+    /// The page and style of the stroke `liveInk` is tracking, fixed at pen-down.
+    private var liveStroke: (page: Int, style: LiveInkStyle)?
     private var currentPage = 0
     /// Off from the moment the worksheet starts leaving, so a late throttled frame cannot put a page back on the
     /// student view after the editor has cleared it.
@@ -83,6 +87,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let pencil = UIPencilInteraction()
         pencil.delegate = self
         view.addInteraction(pencil)
+        // On the PDF view, an ancestor of every page canvas, so one recogniser sees every page's Pencil touches.
+        liveInk.strokeTarget = { [weak self] touch in self?.liveInkCanvas(for: touch) }
+        liveInk.onStroke = { [weak self] event in self?.liveInkEvent(event) }
+        liveInk.delegate = self
+        pdfView.addGestureRecognizer(liveInk)
         publishPage()
         onPageChange?(currentPage)
     }
@@ -126,6 +135,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         super.viewWillDisappear(animated)
         publishing = false
         viewportThrottle.cancel()
+        liveStroke = nil
+        student.cancelLiveStroke()
     }
 
     deinit {
@@ -230,6 +241,45 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let size = canvases[studentPage]?.bounds.size ?? page.displayedSize
         // A Teacher copy publishes only the private placeholder; the snapshot type refuses its pages in both framings.
         student.publish(session: session, pageIndex: studentPage, canvasSize: size, viewport: presenterViewport())
+    }
+
+    // MARK: Live ink (EP-30)
+
+    /// The live-ink recogniser only observes, so it runs beside every other recogniser, PencilKit's included.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        gestureRecognizer === liveInk || otherGestureRecognizer === liveInk
+    }
+
+    /// The canvas a Pencil touch will ink, or nil when it will not: the hit-tested page is not focused, or the tool is
+    /// an eraser or the lasso. Touch type is already filtered by the recogniser, so fingers never get here.
+    private func liveInkCanvas(for touch: UITouch) -> UIView? {
+        liveStroke = nil
+        guard publishing, let canvas = activeCanvas, canvas.drawingGestureRecognizer.isEnabled,
+              canvas.bounds.contains(touch.location(in: canvas)),
+              let page = canvases.first(where: { $0.value === canvas })?.key,
+              let style = LiveInkStyle(tool: canvas.tool) else { return nil }
+        liveStroke = (page, style)
+        return canvas
+    }
+
+    /// Samples arrive in the canvas's coordinates, which are the page's ink space.
+    private func liveInkEvent(_ event: LiveInkRecognizer.Event) {
+        switch event {
+        case .began(let points):
+            guard let liveStroke else { return }
+            student.beginLiveStroke(session: session, pageIndex: liveStroke.page, style: liveStroke.style, points: points)
+        case .moved(let points, let predicted):
+            guard liveStroke != nil else { return }
+            student.extendLiveStroke(points: points, predicted: predicted)
+        case .ended(let points):
+            guard liveStroke != nil else { return }
+            liveStroke = nil
+            student.endLiveStroke(session: session, points: points)
+        case .cancelled:
+            liveStroke = nil
+            student.cancelLiveStroke()
+        }
     }
 
     /// The visible rect and up to two pages under it, measured from the laid-out PDF view. Only geometry leaves here;
