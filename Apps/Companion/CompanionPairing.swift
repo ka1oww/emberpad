@@ -41,7 +41,7 @@ final class CompanionPairingModel: ObservableObject {
     func pairIPad() {
         do {
             let credential: PairingCredential
-            if let existing = try keychain.load() {
+            if let existing = try loadTreatingCorruptAsAbsent() {
                 credential = existing
             } else {
                 credential = try PairingCredential.generate()
@@ -64,6 +64,14 @@ final class CompanionPairingModel: ObservableObject {
             message = "Forgotten. Also choose Forget Mac on the iPad, then pair again."
         } catch {
             message = error.localizedDescription
+        }
+    }
+
+    private func loadTreatingCorruptAsAbsent() throws -> PairingCredential? {
+        do {
+            return try keychain.load()
+        } catch PairingError.corruptRecord {
+            return nil
         }
     }
 
