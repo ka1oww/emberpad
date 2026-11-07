@@ -12,4 +12,6 @@
     <key>LSUIElement</key><true/>
     <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSLocalNetworkUsageDescription</key><string>Ember Companion lets EmberPad find your Mac over the local network to check the connection and, in a later version, sync worksheets.</string>
+    <key>NSBonjourServices</key><array><string>_emberws._tcp</string></array>
 </dict></plist>

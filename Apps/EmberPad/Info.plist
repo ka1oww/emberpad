@@ -27,6 +27,8 @@
         <key>UIColorName</key><string>bg</string>
     </dict>
     <key>NSCameraUsageDescription</key><string>EmberPad uses the camera only to scan the pairing code that EmberPad Companion shows on your Mac.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>EmberPad finds the Ember Companion on your Mac over the local network to check the connection and, in a later version, sync worksheets.</string>
+    <key>NSBonjourServices</key><array><string>_emberws._tcp</string></array>
     <key>UIFileSharingEnabled</key><true/>
     <key>LSSupportsOpeningDocumentsInPlace</key><true/>
     <key>UISupportedInterfaceOrientations</key><array>

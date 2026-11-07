@@ -50,8 +50,11 @@ final class DeviceChecksTests: XCTestCase {
     func testEvaluatorPassFail() {
         let passing = DeviceChecksEvaluator.results(snapshot: sampleSnapshot(), logWritable: true, testPDFOK: true, pencilReadable: true)
         XCTAssertEqual(passing.map(\.title),
-                       ["External display", "Scene capture state", "Main scene active", "Check log", "Test PDF", "Apple Pencil tap action"])
-        XCTAssertTrue(passing.allSatisfy(\.passed))
+                       ["External display", "Scene capture state", "Main scene active", "Check log", "Test PDF",
+                        "Apple Pencil tap action", "Peer-to-peer hello"])
+        XCTAssertTrue(passing.filter { $0.title != "Peer-to-peer hello" }.allSatisfy(\.passed))
+        XCTAssertEqual(passing.last?.passed, false, "the hello row fails until a run completes")
+        XCTAssertEqual(passing.last?.detail, "Not run yet")
         let offline = DeviceChecksSnapshot(captureState: "inactive", externalSceneCount: 0,
                                            mainSceneActive: false, screenCount: 1, screenCaptured: false)
         let failing = DeviceChecksEvaluator.results(

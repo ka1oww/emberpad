@@ -8,11 +8,11 @@ import PencilKit
 /// Device diagnostics and a separate debug-only scribble recorder. Diagnostic
 /// snapshots are appended to `Documents/device-checks.log` when they change;
 /// recorded scribble samples are exported separately as JSON.
-/// EP-04 adds one more section here (peer-to-peer); add it as a new `Section`
-/// below without touching the existing ones.
+/// EP-04's peer-to-peer hello is the last section (`DeviceChecksPeerHello.swift`).
 struct DeviceChecksView: View {
     @ObservedObject var presentation: PresentationState
     @ObservedObject private var externalTest = DeviceChecksExternalTest.shared
+    @StateObject private var peerHello = DeviceChecksPeerHelloModel()
     @State private var captureState = UISceneCaptureState.unspecified
     @State private var pencilLabel = "Reading…"
     @State private var logWritable = true
@@ -116,7 +116,7 @@ struct DeviceChecksView: View {
                     }
                 }
             }
-            // EP-04 (peer-to-peer) adds one more Section here.
+            DeviceChecksPeerHelloSection(model: peerHello)
         }
         .navigationTitle("Device checks")
         .onAppear {
@@ -125,6 +125,7 @@ struct DeviceChecksView: View {
             appendSnapshot(force: true)
         }
         .onChange(of: snapshot) { _, _ in appendSnapshot() }
+        .onDisappear { peerHello.stopBrowsing() }
         .sheet(item: $scribbleExportURL) { url in
             DeviceChecksExportPicker(url: url).ignoresSafeArea()
         }
@@ -147,7 +148,8 @@ struct DeviceChecksView: View {
 
     private var passFailRows: [DeviceCheckResult] {
         DeviceChecksEvaluator.results(
-            snapshot: snapshot, logWritable: logWritable, testPDFOK: testPDFOK, pencilReadable: true)
+            snapshot: snapshot, logWritable: logWritable, testPDFOK: testPDFOK, pencilReadable: true,
+            peerHello: peerHello.lastReport)
     }
 
     private func appendSnapshot(force: Bool = false) {
@@ -176,7 +178,7 @@ struct DeviceChecksView: View {
     }
 }
 
-private struct LabeledValue: View {
+struct LabeledValue: View {
     let label: String
     let value: String
     var body: some View {
