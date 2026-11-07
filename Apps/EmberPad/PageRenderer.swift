@@ -5,6 +5,8 @@ import PencilKit
 @MainActor
 protocol WorksheetPageRenderer: AnyObject {
     var viewController: UIViewController { get }
+    /// Called on the main actor whenever the page under the viewport centre changes.
+    var onPageChange: ((Int) -> Void)? { get set }
     func undo()
     func redo()
     func select(_ tool: WorksheetTool)
@@ -37,6 +39,114 @@ struct PageRendererHost: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
 }
 
+/// Which look the nav-bar share pill takes (design 5.2). Pure mapping, so tests
+/// cover every state without a scene.
+enum SharePillState: Equatable {
+    case notSharing
+    case sharing
+    case captured
+    case paused
+
+    static func current(captureActive: Bool, externalSceneCount: Int, mainSceneActive: Bool) -> SharePillState {
+        if !mainSceneActive { return .paused }
+        if captureActive, externalSceneCount == 0 { return .captured }
+        if externalSceneCount > 0 { return .sharing }
+        return .notSharing
+    }
+
+    var accessibilityText: String {
+        switch self {
+        case .notSharing: "Not sharing"
+        case .sharing: "Sharing. Students see: worksheet only"
+        case .captured: "Screen captured. Answers hidden"
+        case .paused: "Students see: Paused"
+        }
+    }
+}
+
+/// The nav-bar share pill. Tapping it opens the More menu's Sharing section.
+struct SharePillLabel: View {
+    let state: SharePillState
+    /// Portrait shortens the sharing pill to "Sharing" (design 5.2).
+    var short = false
+
+    var body: some View {
+        Text(title)
+            .font(Theme.meta)
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(background, in: Capsule())
+            .foregroundStyle(foreground)
+    }
+
+    private var title: String {
+        switch state {
+        case .notSharing: "Not sharing"
+        case .sharing: short ? "Sharing" : "● Students see: worksheet only"
+        case .captured: "● Screen captured · answers hidden"
+        case .paused: "Students see: Paused"
+        }
+    }
+
+    private var background: Color {
+        switch state {
+        case .notSharing, .paused: Theme.surface2
+        case .sharing: Theme.okSoft
+        case .captured: Theme.danger
+        }
+    }
+
+    private var foreground: Color {
+        switch state {
+        case .notSharing, .paused: Theme.text2
+        case .sharing: Theme.ok
+        case .captured: .white
+        }
+    }
+}
+
+/// The Sharing section shared by the share pill menu and the More menu.
+/// Mirror-mode switching arrives with EP-15, so both rows are disabled placeholders.
+struct WorksheetSharingRows: View {
+    var body: some View {
+        Section("Sharing") {
+            Button("Mirror Presenter Page (follow my view)") {}.disabled(true)
+            Button("Mirror Full Page") {}.disabled(true)
+        }
+    }
+}
+
+private struct PhaseTag: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(Theme.pageMeta)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Theme.surface2, in: Capsule())
+            .foregroundStyle(Theme.text3)
+    }
+}
+
+/// Page number and save state for the nav bar and the page pill.
+@MainActor
+final class PageChromeState: ObservableObject {
+    @Published private(set) var currentPage = 0
+    @Published private(set) var pagePillVisible = false
+    private var pillTask: Task<Void, Never>?
+
+    func notePageChange(_ page: Int) {
+        currentPage = page
+        pagePillVisible = true
+        pillTask?.cancel()
+        pillTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            self?.pagePillVisible = false
+        }
+    }
+
+    func cancel() { pillTask?.cancel() }
+}
+
 struct EditorScreen: View {
     let documentID: UUID
     @ObservedObject var library: LibraryController
@@ -44,44 +154,97 @@ struct EditorScreen: View {
     @State private var session: DocumentSession?
     @State private var renderer: (any WorksheetPageRenderer)?
     @State private var errorMessage: String?
+    @StateObject private var chrome = PageChromeState()
+    @State private var teacherCardOpen = true
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    private var pillState: SharePillState {
+        SharePillState.current(captureActive: presentation.captureActive,
+                               externalSceneCount: presentation.externalSceneCount,
+                               mainSceneActive: presentation.mainSceneActive)
+    }
+
+    /// iPad landscape keeps the full sharing copy; portrait and iPhone shorten it.
+    private var shortPill: Bool { !(horizontalSizeClass == .regular && verticalSizeClass == .compact) }
 
     var body: some View {
         VStack(spacing: 0) {
             if presentation.captureActive && presentation.externalSceneCount == 0 {
-                Text("Main screen capture detected. Private answers are hidden.").foregroundStyle(.red).padding(8)
+                CaptureLeakBanner()
             }
-            if let session { SaveStatusView(session: session) }
-            if let renderer {
-                HStack(spacing: 0) {
-                    PageRendererHost(renderer: renderer)
-                    // Pairing and answer annotation policy await the teacher. This stays unset in the base.
-                    if let url = presentation.privateAnswerURL {
-                        PrivateAnswerPane(url: url, hidden: presentation.policy.hidePrivateContent)
-                            .frame(maxWidth: 320)
+            if let session { InkSaveBanner(session: session) }
+            ZStack(alignment: .bottom) {
+                if let renderer {
+                    HStack(spacing: 0) {
+                        PageRendererHost(renderer: renderer)
+                        // Pairing and answer annotation policy await the teacher. This stays unset in the base.
+                        if teacherCardOpen, let url = presentation.privateAnswerURL {
+                            PrivateAnswerPane(url: url, hidden: presentation.policy.hidePrivateContent)
+                                .frame(maxWidth: 320)
+                        }
                     }
+                } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
+                else { ProgressView("Opening worksheet") }
+                if chrome.pagePillVisible, let session, session.pdf.pageCount > 0 {
+                    PagePill(current: chrome.currentPage, total: session.pdf.pageCount)
                 }
-            } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
-            else { ProgressView("Opening worksheet") }
+            }
         }
-        .navigationTitle(session?.record.title ?? "Worksheet")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                if let session { EditorTitleBlock(session: session, currentPage: chrome.currentPage) }
+                else { Text("Worksheet").font(Theme.documentTitle).foregroundStyle(Theme.text) }
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Menu {
+                    WorksheetSharingRows()
+                } label: {
+                    SharePillLabel(state: pillState, short: shortPill)
+                }
+                .accessibilityLabel("Sharing: \(pillState.accessibilityText)")
+                Button {
+                    teacherCardOpen.toggle()
+                } label: {
+                    Image(systemName: "book")
+                        .imageScale(.medium)
+                        .padding(6)
+                        .background(teacherCardOpen ? Theme.accentSoft : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .accessibilityLabel(teacherCardOpen ? "Hide Teacher copy" : "Show Teacher copy")
                 Button("Undo", systemImage: "arrow.uturn.backward") { renderer?.undo() }
                 Button("Redo", systemImage: "arrow.uturn.forward") { renderer?.redo() }
+                // Kept until EP-12 replaces it with the GoodNotes-style toolbar strip.
                 Menu("Tools", systemImage: "pencil.tip") {
                     ForEach(WorksheetTool.allCases, id: \.self) { tool in Button(tool.rawValue) { renderer?.select(tool) } }
                 }
+                Menu {
+                    WorksheetSharingRows()
+                    Button {} label: {
+                        HStack { Text("Record lesson"); Spacer(); PhaseTag(text: "Phase 3") }
+                    }.disabled(true)
+                    Button {} label: {
+                        HStack { Text("Export flattened PDF"); Spacer(); PhaseTag(text: "Phase 4") }
+                    }.disabled(true)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("More options")
             }
         }
         .task {
             do {
                 let opened = try await library.open(documentID)
                 session = opened
-                renderer = PageRendererFactory.make(session: opened, student: presentation.student)
+                let made = PageRendererFactory.make(session: opened, student: presentation.student)
+                made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
+                renderer = made
             } catch { errorMessage = error.localizedDescription }
         }
         .onDisappear {
+            chrome.cancel()
             presentation.student.snapshot = nil
             session?.drawingDidChange = nil
             Task { do { try await library.close(documentID) } catch { library.errorMessage = error.localizedDescription } }
@@ -89,15 +252,67 @@ struct EditorScreen: View {
     }
 }
 
-private struct SaveStatusView: View {
+private struct EditorTitleBlock: View {
+    @ObservedObject var session: DocumentSession
+    let currentPage: Int
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(session.record.title)
+                .font(Theme.documentTitle)
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+            Text("Page \(currentPage + 1) of \(session.pdf.pageCount) · \(session.saveError == nil && !session.hasUnsavedInk ? "saved" : "not saved")")
+                .font(Theme.pageMeta)
+                .foregroundStyle(Theme.text2)
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct CaptureLeakBanner: View {
+    var body: some View {
+        Text("The whole iPad screen is being captured. Answers are hidden. Share with AirPlay Screen Mirroring or an HDMI adapter instead.")
+            .font(Theme.meta)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.danger)
+    }
+}
+
+private struct InkSaveBanner: View {
     @ObservedObject var session: DocumentSession
     var body: some View {
         if let error = session.saveError {
-            HStack {
-                Text("Ink has not saved: " + error).foregroundStyle(.red)
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                Text("Ink has not saved: " + error + ". Your ink is still on screen.")
+                    .lineLimit(2)
+                Spacer()
                 Button("Retry") { Task { try? await session.flush() } }
-            }.font(.footnote).padding(8)
+            }
+            .font(Theme.meta)
+            .foregroundStyle(Theme.warn)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.warnSoft)
         }
+    }
+}
+
+private struct PagePill: View {
+    let current: Int
+    let total: Int
+
+    var body: some View {
+        Text("\(current + 1) / \(total)")
+            .font(.system(.footnote, design: .default).weight(.semibold))
+            .foregroundStyle(Theme.text)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(.thinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Theme.line, lineWidth: Theme.hairlineWidth))
+            .padding(.bottom, 20)
     }
 }
 

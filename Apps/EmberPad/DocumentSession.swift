@@ -14,11 +14,12 @@ final class DocumentSession: ObservableObject {
     @Published private(set) var saveError: String?
     @Published private(set) var revision: UInt64 = 0
     private var pageRevisions: [Int: UInt64] = [:]
-    private var dirty = Set<Int>()
+    @Published private var dirty = Set<Int>()
     private var debounce: Task<Void, Never>?
     private var inFlight: Task<Void, Error>?
     private var inFlightID: UUID?
     var drawingDidChange: ((Int, PKDrawing) -> Void)?
+    var hasUnsavedInk: Bool { !dirty.isEmpty }
 
     init(record: DocumentRecord, pdf: PDFDocument, originalURL: URL, drawings: [Int: PKDrawing], store: LibraryStore) {
         self.record = record; self.pdf = pdf; self.originalURL = originalURL

@@ -1,6 +1,6 @@
 # EmberPad
 
-Base code for a personal offline iPad teaching app. The Ember House colour tokens, reusable type styles, original app and Companion artwork, and branded launch background are in place, but production in-app screen styling and the teacher's on-device decisions are still pending. This is a development scaffold, not yet a classroom-ready release.
+Base code for a personal offline iPad teaching app. The Ember House colour tokens, reusable type styles, original app and Companion artwork, and branded launch background are in place, along with the initial worksheet chrome; the remaining tool presentation and the teacher's on-device decisions are still pending. This is a development scaffold, not yet a classroom-ready release.
 
 ## Layout
 
@@ -88,15 +88,15 @@ Flow control is per transfer credit: the server sends only bytes the client has 
 
 ## Page and presentation seams
 
-`WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. A provisional vertical layout enables the spike; it is not the teacher's final navigation choice.
+`WorksheetPageRenderer`/`PageRendererFactory` isolate option A (`PDFView` with a `PKCanvasView` overlay per page) from a later option B. `DocumentSession` and the storage layout survive that replacement. The worksheet scrolls continuously (vertical, 16 pt page gaps with shadows on the canvas token); every ink canvas is forced to the light style so black ink never inverts in dark mode.
 
-Theme tokens are defined in `Apps/EmberPad/Theme.swift`; the app chrome uses light/dark color sets in `Apps/EmberPad/Assets.xcassets`, while ink colors stay fixed for the white worksheet page. The current fountain-pen default is black, and the marker default is translucent yellow. See the [light](docs/screenshots/theme-tokens-light.png) and [dark](docs/screenshots/theme-tokens-dark.png) token previews. Production in-app screen styling remains future work.
+Theme tokens are defined in `Apps/EmberPad/Theme.swift`; the app chrome uses light/dark color sets in `Apps/EmberPad/Assets.xcassets`, while ink colors stay fixed for the white worksheet page. The current fountain-pen default is black, and the marker default is translucent yellow. See the [light](docs/screenshots/theme-tokens-light.png) and [dark](docs/screenshots/theme-tokens-dark.png) token previews. The editor nav bar (serif title with page/save caption, share pill, Teacher-copy toggle, undo/redo, More menu), the capture-leak and ink-not-saved banners, and the page pill use those tokens; the GoodNotes-style toolbar strip and the floating Teacher card are later packages.
 
 The original worksheet-and-pen AppIcon and `bg`-coloured iOS launch screen, plus the Companion's monochrome menu-bar glyph and window badge, are documented with their vector sources and raster exporters in the [iPad](Apps/EmberPad/Brand.Sources/README.md) and [Companion](Apps/Companion/Brand.Sources/README.md) source notes. See the [home-screen icon screenshot](docs/screenshots/home-screen-icon.png).
 
 The iOS 18+ system picker requests fountain pen, marker, partial and stroke erasers, and lasso. The Tools menu provides the exact tools on 17.5 too, where the legacy picker cannot be restricted. Worksheet drawing is Pencil-only; fingers pan/zoom. Undo/redo buttons and multi-finger double-taps route to the active canvas. The system picker owns Apple Pencil double-tap preferences. Validate its two eraser items and touch/undo behavior on the actual iPad before relying on it.
 
-The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`. Its model accepts only a worksheet page and committed drawing. It shows a neutral **Paused** view while the main scene is inactive. The base follows the current page in full-page mode; in-progress strokes, follow-zoom and external-scene recording are future work.
+The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`. Its model accepts only a worksheet page and committed drawing. It shows a neutral **Paused** view while the main scene is inactive. Editor chrome follows the viewport-centered page, while the student snapshot follows the focused canvas and its ink; the snapshot is rendered at full-page scale. In-progress strokes, follow-zoom and external-scene recording are future work.
 
 Debug builds expose **Device checks** in the library's Debug section, with pass/fail results for the scene, log, PDF and Pencil checks. The probe appends scene and capture snapshots to `Documents/device-checks.log`, provides a runtime-generated synthetic writing-trial PDF, and can replace the external student scene with a solid-colour, role-labelled test pattern. Its scribble recorder accepts Pencil or touch input, labels each saved drawing `erase` or `keep`, and exports the collected stroke samples as versioned JSON through Files. Samples are held in recorder state and are not persisted unless exported; they are not added to the device-check log or uploaded. These controls are compiled out of Release builds.
 
@@ -110,8 +110,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
 - **Must resolve before first classroom use:** Teacher copies are identified by a version-2 manifest's role, but nothing yet keeps them off the student view: opening any PDF while an external display is connected mirrors it to the student view. Do not open answer PDFs while sharing.
 - External-display sharing/recording method and capture tests.
-- Scroll versus page navigation, production in-app screen styling and tool presentation.
-- Joint planning before phase 2+: Bonjour/TLS-PSK pairing, iCloud/Drive, live ink, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
+- Joint planning before phase 2+: Bonjour/TLS-PSK pairing and wire framing, iCloud/Drive, live ink, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
 No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.
