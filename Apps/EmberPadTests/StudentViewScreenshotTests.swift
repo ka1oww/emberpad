@@ -52,7 +52,7 @@ final class StudentViewScreenshotTests: XCTestCase {
         student.update(Self.ink([CGPoint(x: 90, y: 700), CGPoint(x: 300, y: 760), CGPoint(x: 520, y: 690)]), page: 0)
         student.update(Self.ink([CGPoint(x: 80, y: 150), CGPoint(x: 260, y: 120), CGPoint(x: 460, y: 170)]), page: 1)
 
-        let controller = PDFOverlayPageController(session: student, student: presentation.student)
+        let controller = PDFOverlayPageController(session: student, student: presentation.student, tools: Self.isolatedTools())
         let window = UIWindow(windowScene: main)
         window.rootViewController = controller
         window.isHidden = false
@@ -96,7 +96,7 @@ final class StudentViewScreenshotTests: XCTestCase {
 
         // The same chain with a Teacher copy shows only the placeholder, in both framings.
         let teacher = try StudentMirrorFixture.session(.teacher, pages: 2, root: root.appendingPathComponent("teacher"))
-        let teacherController = PDFOverlayPageController(session: teacher, student: presentation.student)
+        let teacherController = PDFOverlayPageController(session: teacher, student: presentation.student, tools: Self.isolatedTools())
         presentation.student.opened(teacher.record)
         window.rootViewController = teacherController
         spin(0.8)
@@ -129,6 +129,11 @@ final class StudentViewScreenshotTests: XCTestCase {
 
     private func spin(_ seconds: TimeInterval) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    /// Tool choices from a throwaway defaults suite, so tests never touch the app's.
+    private static func isolatedTools() -> ToolState {
+        ToolState(defaults: UserDefaults(suiteName: "EmberPadTests.StudentView.\(UUID().uuidString)")!)
     }
 
     private static func ink(_ points: [CGPoint]) -> PKDrawing {

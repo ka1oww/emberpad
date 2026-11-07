@@ -213,6 +213,22 @@ final class StudentMirrorTests: XCTestCase {
         XCTAssertFalse(isRed(cropped, x: 75, y: 75))
     }
 
+    func testRotatedPageIsRasterisedInDisplayedOrientation() throws {
+        let data = UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: letter)).pdfData { context in
+            context.beginPage()
+            UIColor.red.setFill(); UIRectFill(CGRect(x: 100, y: 100, width: 50, height: 50))
+        }
+        let page = try XCTUnwrap(PDFDocument(data: data)?.page(at: 0))
+        page.rotation = 90
+        XCTAssertEqual(page.displayedSize, CGSize(width: 792, height: 612))
+        let image = try XCTUnwrap(StudentPageDrawingView.rasterise(page, size: page.displayedSize, scale: 1))
+        XCTAssertEqual(image.width, 792)
+        XCTAssertEqual(image.height, 612)
+        // A quarter turn clockwise carries the top-left marker to the top right.
+        XCTAssertTrue(isRed(image, x: 792 - 125, y: 125), "The marker follows the page rotation")
+        XCTAssertFalse(isRed(image, x: 125, y: 125))
+    }
+
     // MARK: Snapshot and privacy in both framings
 
     func testSnapshotCarriesTheViewportPagesFromItsOwnSession() throws {
