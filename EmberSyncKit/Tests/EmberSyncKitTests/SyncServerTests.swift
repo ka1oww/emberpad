@@ -44,6 +44,29 @@ struct SyncServerTests {
         #expect(power.changes == [true, false])
     }
 
+    /// The end-to-end acceptance with EP-24's real client code: `LibrarySyncDownloader` over a real TLS-PSK
+    /// `NetworkWireTransport` against the real `SyncServer`, then filed into a real `LibraryStore`.
+    @Test(.timeLimit(.minutes(1))) func theRealIPadClientSyncsTheOutboxIntoItsLibrary() async throws {
+        let fixture = try OutboxFixture()
+        let ipad = temporaryRoot()
+        defer { fixture.remove(); try? FileManager.default.removeItem(at: ipad) }
+        let snapshot = try fixture.prepare()
+        let pairing = try PairingCredential.generate()
+        let server = try await RunningServer.start(pairing, provider: OutboxContentProvider(outbox: fixture.outbox))
+        defer { server.stop() }
+
+        let store = try LibraryStore(root: ipad.appendingPathComponent("Library", isDirectory: true))
+        let folder = LibrarySyncFolder(root: ipad.appendingPathComponent("Sync", isDirectory: true))
+        let transport = try await NetworkWireTransport.connect(to: .hostPort(host: "127.0.0.1", port: server.port),
+                                                               using: RunningServer.clientParameters(pairing))
+        let download = try await LibrarySyncDownloader(folder: folder).download(over: transport, local: { try await store.documents() })
+        #expect(download.isComplete)
+        #expect(download.filesDownloaded == snapshot.manifest.files.count)
+        let outcome = try await LibraryDeliveryApplier.applyNewest(inbox: nil, sync: folder, to: store, now: fixtureDate, pageCount: { _ in 1 })
+        #expect(outcome.route == .sync)
+        #expect(outcome.report?.imported == snapshot.manifest.files.count)
+    }
+
     @Test(.timeLimit(.minutes(1))) func theSleepAssertionIsReleasedWhileAnIdleConnectionStaysOpen() async throws {
         let fixture = try OutboxFixture()
         defer { fixture.remove() }

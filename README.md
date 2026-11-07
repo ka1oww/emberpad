@@ -119,6 +119,7 @@ While a transfer is in progress the server holds an IOKit `PreventUserIdleSystem
 `SyncServerTests` run the real server on loopback with a real TLS-PSK `NWConnection`. The Outbox comes from the real Prepare path over a synthetic Drive EMBER tree, and the client is a small one built on EP-21's `WireClientSession`. The tests cover:
 
 - the paired client fetches the manifest and every file, byte for byte, on window grants;
+- the iPad's real `LibrarySyncDownloader` syncs the Outbox over the TLS-PSK connection and files it into a real library;
 - a new Prepare is served without a restart, and an unknown hash is not found;
 - wrong keys, another pairing, plain TCP and certificate TLS get no sync frame;
 - a silent peer, connections over the limit and stop are all handled;
