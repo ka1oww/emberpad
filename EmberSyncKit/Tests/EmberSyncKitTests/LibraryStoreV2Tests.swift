@@ -102,6 +102,28 @@ struct LibraryStoreV2Tests {
         #expect(try await reopened.document(teacher.id).pairedDocumentID == student.id)
     }
 
+    @Test func retryingUnarchiveRefreshesPairsForAnAlreadyRestoredRecord() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LibraryStore(root: root)
+        let student = try await importEntry(publishedEntry("paper-1", .student), into: store)
+        let teacher = try await importEntry(publishedEntry("paper-1", .teacher), into: store)
+
+        try await store.archive(documentID: student.id)
+        try await store.unarchive(documentID: student.id)
+
+        var teacherRecord = try await store.document(teacher.id)
+        teacherRecord.pairedDocumentID = nil
+        try ManifestCodec.encoder().encode(teacherRecord)
+            .write(to: root.appendingPathComponent(teacher.id.uuidString + "/doc.json"))
+
+        try await store.unarchive(documentID: student.id)
+
+        #expect(try await store.document(student.id).status == .current)
+        #expect(try await store.document(student.id).pairedDocumentID == teacher.id)
+        #expect(try await store.document(teacher.id).pairedDocumentID == student.id)
+    }
+
     @Test func teacherCopyRefusesInkAndChangedTeacherReplacesInPlace() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
