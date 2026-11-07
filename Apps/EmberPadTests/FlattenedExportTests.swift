@@ -99,7 +99,10 @@ final class FlattenedExportTests: XCTestCase {
         let source = try XCTUnwrap(PDFDocument(data: fixturePDF()))
         let page = try XCTUnwrap(source.page(at: 1))
         page.rotation = 90
-        let displayed = CGSize(width: 792, height: 612)
+        // Quarter-turn pages display with width and height swapped; derive from the real page box.
+        let box = page.bounds(for: .cropBox).size
+        let displayed = CGSize(width: box.height, height: box.width)
+        XCTAssertNotEqual(box.width, box.height)
         let ink: [Int: Data] = [1: redInk(on: displayed).dataRepresentation()]
 
         let output = try XCTUnwrap(PDFDocument(data: try FlattenedExport.render(source: source, drawings: ink, title: "Rotated")))
