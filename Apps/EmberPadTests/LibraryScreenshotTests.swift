@@ -121,6 +121,10 @@ final class LibraryScreenshotTests: XCTestCase {
             library: library,
             presentation: presentation ?? PresentationState(),
             pairing: PairingController(),
+            sync: SyncClient(library: library,
+                             folder: LibrarySyncFolder(root: FileManager.default.temporaryDirectory
+                                 .appendingPathComponent("EmberPadShotSync-" + UUID().uuidString, isDirectory: true)),
+                             credential: { nil }, defaults: UserDefaults(suiteName: "EmberPadShot-" + UUID().uuidString)!),
             signingExpiryDate: expiry,
             thumbnailCache: thumbnails
         ).environment(\.colorScheme, scheme)
