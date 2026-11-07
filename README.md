@@ -100,6 +100,10 @@ The external scene uses `UIWindowSceneSessionRoleExternalDisplayNonInteractive`.
 
 Debug builds expose **Device checks** in the library's Debug section, with pass/fail results for the scene, log, PDF and Pencil checks. The probe appends scene and capture snapshots to `Documents/device-checks.log`, provides a runtime-generated synthetic writing-trial PDF, and can replace the external student scene with a solid-colour, role-labelled test pattern. Its scribble recorder accepts Pencil or touch input, labels each saved drawing `erase` or `keep`, and exports the collected stroke samples as versioned JSON through Files. Samples are held in recorder state and are not persisted unless exported; they are not added to the device-check log or uploaded. These controls are compiled out of Release builds.
 
+`sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. No pairing policy is implemented and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
+
+The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or less, red below 24 hours, unknown when absent/malformed (normal for unsigned Simulator builds). This parses only a reminder, not a signature or security decision. The current display reports Inbox delivery time, not a fabricated network sync time.
+
 ### Peer-to-peer hello (Debug only)
 
 The Device checks screen's **Peer-to-peer hello** section and the Companion window's **Peer-to-peer hello (debug)** section are used to check that the Mac and iPad can talk with neither joined to a network. The proof is a successful on-device run while neither device is joined to a network. The Companion's **Start** button opens an `NWListener` advertising `_emberws._tcp` as `EmberPad Companion (debug)`. The iPad browses for it, then **Echo and time 50 MB** connects, checks a 64-byte echo and sends 50,000,000 synthetic bytes. The Companion acknowledges the byte count and SHA-256, and the screen reports decimal MB/s plus the path interface Network.framework reports for each connection; this does not prove peer-to-peer Wi-Fi was used. Results go to the pass/fail list and `Documents/device-checks.log`. The listener, browser and every connection set `includePeerToPeer`. Keep Wi-Fi on on both devices; neither needs to join a network. Both Info.plists declare `NSLocalNetworkUsageDescription` and `NSBonjourServices`, so each app asks for Local Network access the first time; if it is denied, the screens say so. There is no pairing, key or TLS (that is EP-22): any device in range can connect to a running Debug listener, so start it only for the check. The framing, server, browser and client live in `EmberSyncKit/Sources/EmberSyncKit/PeerHello*.swift` under `#if DEBUG`. A Release build contains none of them and does not link `Network.framework`.
@@ -110,10 +114,6 @@ The Device checks screen's **Peer-to-peer hello** section and the Companion wind
 EMBERPAD_PEER_HELLO_PORT=N swift test --package-path EmberSyncKit --filter liveCompanion   # 127.0.0.1
 EMBERPAD_PEER_HELLO_BROWSE=1 swift test --package-path EmberSyncKit --filter liveCompanion # via Bonjour
 ```
-
-`sceneCaptureState` masks the private-answer seam when the main scene is captured without an external scene, and whenever inactive. No pairing policy is implemented and no private-answer URL is assigned. This is a guard skeleton, not a privacy guarantee. AirPlay/HDMI, QuickTime, recording and capture-trait behavior must be checked with the teacher. Leaving the app can restore system mirroring; stay in EmberPad while sharing. There are no private UIKit capture-hiding tricks or iOS 27 APIs.
-
-The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or less, red below 24 hours, unknown when absent/malformed (normal for unsigned Simulator builds). This parses only a reminder, not a signature or security decision. The current display reports Inbox delivery time, not a fabricated network sync time.
 
 ## Open items for the teacher
 
