@@ -307,6 +307,93 @@ final class CircleLassoTests: XCTestCase {
         XCTAssertFalse(undo.canRedo)
     }
 
+    func testLongPressOnALiftedLoopSelectsTheInkInsideIt() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let undo = Self.undoManager(controller)
+        var now: TimeInterval = 1_000
+        controller.inkSelection.clock = { now }
+        let word = Self.penStroke(Self.row(from: 270, to: 330, y: 300))
+        let elsewhere = Self.penStroke(Self.row(from: 40, to: 200, y: 600))
+        let loop = Self.penStroke(Self.circle(center: CGPoint(x: 300, y: 300), radius: 70, degrees: 350))
+        Self.commit(PKDrawing(strokes: [word, elsewhere]), on: canvas, controller, undo: undo)
+        // Drawn and lifted without a hold: it stays as ink, as before.
+        Self.commit(PKDrawing(strokes: [word, elsewhere, loop]), on: canvas, controller, undo: undo)
+        await Self.settle()
+        XCTAssertEqual(canvas.drawing.strokes.count, 3)
+        XCTAssertNil(controller.inkSelection.selection)
+
+        // A press inside the loop, away from its line, is not on the loop.
+        XCTAssertFalse(controller.circleLassoPress(on: canvas, at: CGPoint(x: 300, y: 300)))
+        now += 2
+        // A press on the loop's line (its right-hand side, 6 pt off) selects.
+        XCTAssertTrue(controller.circleLassoPress(on: canvas, at: CGPoint(x: 376, y: 300)))
+        XCTAssertEqual(canvas.drawing.strokes.count, 2, "the loop is not kept as ink")
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 2)
+        XCTAssertEqual(controller.inkSelection.selection?.indices, [0])
+        XCTAssertEqual(controller.inkSelection.selection?.box, SelectionBox(around: [word]))
+        XCTAssertEqual(controller.tools.toast?.text, "Circle to lasso · selected")
+        XCTAssertEqual(controller.tools.current, .pen)
+        XCTAssertFalse(undo.canRedo, "the loop never comes back on redo")
+        undo.undo()
+        XCTAssertTrue(canvas.drawing.strokes.isEmpty, "the next undo takes back the ink before the loop")
+        XCTAssertFalse(undo.canUndo)
+        XCTAssertFalse(controller.circleLassoPress(on: canvas, at: CGPoint(x: 376, y: 300)), "a loop selects once")
+    }
+
+    func testLongPressesThatAreNotOnAFreshLoopLeaveTheInk() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let undo = Self.undoManager(controller)
+        var now: TimeInterval = 1_000
+        controller.inkSelection.clock = { now }
+        let word = Self.penStroke(Self.row(from: 270, to: 330, y: 300))
+        let loop = Self.penStroke(Self.circle(center: CGPoint(x: 300, y: 300), radius: 70, degrees: 350))
+        let onLine = CGPoint(x: 370, y: 300)
+        Self.commit(PKDrawing(strokes: [word]), on: canvas, controller, undo: undo)
+        Self.commit(PKDrawing(strokes: [word, loop]), on: canvas, controller, undo: undo)
+
+        // Too late.
+        now += InkSelectionController.loopPressWindow + 0.1
+        XCTAssertFalse(controller.circleLassoPress(on: canvas, at: onLine))
+        // Too far from the line.
+        now -= 1
+        XCTAssertFalse(controller.circleLassoPress(on: canvas, at: CGPoint(x: 370 + InkSelectionController.loopPressRadius + 2, y: 300)))
+        // Not with the eraser or the lasso.
+        for tool in [WorksheetTool.eraser, .lasso] {
+            controller.tools.select(tool)
+            XCTAssertFalse(controller.circleLassoPress(on: canvas, at: onLine), "\(tool)")
+        }
+        controller.tools.select(.pen)
+        // Not with the switch off.
+        controller.tools.setCircleToLasso(false)
+        XCTAssertFalse(controller.circleLassoPress(on: canvas, at: onLine))
+        controller.tools.setCircleToLasso(true)
+        // Not once more ink follows the loop.
+        let after = Self.penStroke(Self.row(from: 40, to: 200, y: 600))
+        Self.commit(PKDrawing(strokes: [word, loop, after]), on: canvas, controller, undo: undo)
+        XCTAssertFalse(controller.circleLassoPress(on: canvas, at: onLine))
+        // Not a loop round nothing, nor an open stroke.
+        let emptyLoop = Self.penStroke(Self.circle(center: CGPoint(x: 300, y: 650), radius: 40, degrees: 350))
+        Self.commit(PKDrawing(strokes: [word, loop, after, emptyLoop]), on: canvas, controller, undo: undo)
+        XCTAssertFalse(controller.circleLassoPress(on: canvas, at: CGPoint(x: 340, y: 650)))
+        let openC = Self.penStroke(Self.circle(center: CGPoint(x: 300, y: 300), radius: 90, degrees: 250))
+        Self.commit(PKDrawing(strokes: [word, loop, after, emptyLoop, openC]), on: canvas, controller, undo: undo)
+        XCTAssertFalse(controller.circleLassoPress(on: canvas, at: CGPoint(x: 390, y: 300)))
+
+        XCTAssertNil(controller.inkSelection.selection)
+        XCTAssertEqual(canvas.drawing.strokes.count, 5, "every stroke is kept as drawn")
+    }
+
+    func testDistanceToAStrokesLine() {
+        let path = [CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 0), CGPoint(x: 100, y: 100)]
+        XCTAssertEqual(LassoGeometry.distance(from: CGPoint(x: 50, y: 10), toPath: path), 10, accuracy: 1e-9)
+        XCTAssertEqual(LassoGeometry.distance(from: CGPoint(x: 110, y: 50), toPath: path), 10, accuracy: 1e-9)
+        XCTAssertEqual(LassoGeometry.distance(from: CGPoint(x: -3, y: -4), toPath: path), 5, accuracy: 1e-9)
+        XCTAssertEqual(LassoGeometry.distance(from: CGPoint(x: 3, y: 4), toPath: [.zero]), 5, accuracy: 1e-9)
+        XCTAssertEqual(LassoGeometry.distance(from: .zero, toPath: []), .infinity)
+    }
+
     // MARK: - Selection edits on the canvas
 
     func testMoveResizeAndRotateAreOneUndoStepEach() async throws {
@@ -419,6 +506,123 @@ final class CircleLassoTests: XCTestCase {
         XCTAssertEqual(canvas.drawing.strokes.count, 2, "copy leaves the page alone")
         XCTAssertNotNil(controller.inkSelection.selection, "and keeps the selection")
         XCTAssertEqual(controller.tools.toast?.text, "Copied")
+    }
+
+    func testCutIsCopyAndDeleteInOneUndoStep() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let undo = Self.undoManager(controller)
+        let pasteboard = try Self.pasteboard(for: controller)
+        defer { UIPasteboard.remove(withName: pasteboard.name) }
+        let word = Self.penStroke(Self.row(from: 270, to: 330, y: 300))
+        let elsewhere = Self.penStroke(Self.row(from: 40, to: 200, y: 600))
+        Self.commit(PKDrawing(strokes: [word, elsewhere]), on: canvas, controller)
+        controller.inkSelection.select(page: 0, lasso: Self.circle(center: CGPoint(x: 300, y: 300), radius: 70, degrees: 359))
+
+        controller.inkSelection.cutSelection(undoManager: undo)
+        let copied = try PKDrawing(data: try XCTUnwrap(pasteboard.data(forPasteboardType: InkSelectionController.pasteboardType)))
+        XCTAssertEqual(copied.strokes.first?.path.count, word.path.count)
+        XCTAssertEqual(canvas.drawing.strokes.count, 1)
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
+        XCTAssertEqual(canvas.drawing.strokes.first?.path.count, elsewhere.path.count, "only the selection goes")
+        XCTAssertNil(controller.inkSelection.selection)
+        XCTAssertEqual(controller.tools.toast?.text, "Cut")
+        XCTAssertEqual(undo.undoActionName, "Cut")
+        undo.undo()
+        XCTAssertEqual(canvas.drawing.strokes.count, 2)
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 2)
+        XCTAssertFalse(undo.canUndo, "one step")
+        XCTAssertTrue(controller.inkSelection.canPaste, "the pasteboard keeps the ink after undo")
+    }
+
+    func testPasteAddsTheCopiedInkAtTheTouchPointInOneUndoStep() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let undo = Self.undoManager(controller)
+        let pasteboard = try Self.pasteboard(for: controller)
+        defer { UIPasteboard.remove(withName: pasteboard.name) }
+        XCTAssertFalse(controller.inkSelection.canPaste)
+        XCTAssertFalse(controller.inkSelection.paste(page: 0, at: CGPoint(x: 100, y: 100), undoManager: undo), "nothing copied")
+        pasteboard.setData(Data("not ink".utf8), forPasteboardType: InkSelectionController.pasteboardType)
+        XCTAssertFalse(controller.inkSelection.paste(page: 0, at: CGPoint(x: 100, y: 100), undoManager: undo), "unreadable data")
+        XCTAssertFalse(undo.canUndo)
+
+        let word = Self.penStroke(Self.row(from: 270, to: 330, y: 300))
+        Self.commit(PKDrawing(strokes: [word]), on: canvas, controller)
+        controller.inkSelection.select(page: 0, lasso: Self.circle(center: CGPoint(x: 300, y: 300), radius: 70, degrees: 359))
+        controller.inkSelection.copySelection()
+        XCTAssertTrue(controller.inkSelection.canPaste)
+
+        let point = CGPoint(x: 200, y: 500)
+        XCTAssertTrue(controller.inkSelection.paste(page: 0, at: point, undoManager: undo))
+        XCTAssertEqual(undo.undoActionName, "Paste")
+        XCTAssertEqual(canvas.drawing.strokes.count, 2)
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 2)
+        let pasted = canvas.drawing.strokes[1].renderBounds
+        XCTAssertEqual(pasted.midX, point.x, accuracy: 0.5, "centred on the touch")
+        XCTAssertEqual(pasted.midY, point.y, accuracy: 0.5)
+        XCTAssertEqual(canvas.drawing.strokes[0].transform, .identity, "the original stays")
+        XCTAssertEqual(controller.inkSelection.selection?.indices, [1], "the pasted ink is selected")
+        XCTAssertEqual(controller.tools.toast?.text, "Pasted")
+
+        // Near the page's edge, the ink is kept on the page.
+        XCTAssertTrue(controller.inkSelection.paste(page: 0, at: CGPoint(x: 590, y: 2), undoManager: undo))
+        let edge = canvas.drawing.strokes[2].renderBounds
+        XCTAssertLessThanOrEqual(edge.maxX, canvas.bounds.maxX + 0.5)
+        XCTAssertGreaterThanOrEqual(edge.minY, canvas.bounds.minY - 0.5)
+
+        undo.undo()
+        undo.undo()
+        XCTAssertEqual(canvas.drawing.strokes.count, 1)
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
+        XCTAssertFalse(undo.canUndo, "each paste is one step")
+    }
+
+    func testLongPressPasteMenuPastesWhereThePageWasPressed() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let undo = Self.undoManager(controller)
+        let pasteboard = try Self.pasteboard(for: controller)
+        defer { UIPasteboard.remove(withName: pasteboard.name) }
+        let menu = controller.inkSelection.pasteMenu
+        XCTAssertEqual(menu.longPress.allowedTouchTypes, [NSNumber(value: UITouch.TouchType.direct.rawValue)], "a finger long-press")
+        XCTAssertFalse(menu.longPress.cancelsTouchesInView)
+        XCTAssertTrue(controller.pdfView.gestureRecognizers?.contains(menu.longPress) ?? false)
+        // The pages view and the canvas share coordinates here: the canvas is not laid out in the PDF view.
+        XCTAssertFalse(menu.present(at: CGPoint(x: 200, y: 500)), "no Paste without copied ink")
+
+        let word = Self.penStroke(Self.row(from: 270, to: 330, y: 300))
+        Self.commit(PKDrawing(strokes: [word]), on: canvas, controller)
+        controller.inkSelection.select(page: 0, lasso: Self.circle(center: CGPoint(x: 300, y: 300), radius: 70, degrees: 359))
+        controller.inkSelection.copySelection()
+        XCTAssertFalse(menu.present(at: CGPoint(x: -50, y: 500)), "no Paste off the pages")
+        XCTAssertTrue(menu.present(at: CGPoint(x: 200, y: 500)))
+        XCTAssertNil(controller.inkSelection.selection, "opening the menu drops the old selection")
+        menu.performPaste()
+        XCTAssertEqual(undo.undoActionName, "Paste")
+        XCTAssertEqual(canvas.drawing.strokes.count, 2)
+        XCTAssertEqual(canvas.drawing.strokes[1].renderBounds.midX, 200, accuracy: 0.5)
+        XCTAssertEqual(canvas.drawing.strokes[1].renderBounds.midY, 500, accuracy: 0.5)
+        menu.performPaste()
+        XCTAssertEqual(canvas.drawing.strokes.count, 2, "one menu, one paste")
+    }
+
+    func testPastedInkStaysOnThePageWhereItFits() {
+        let clip = PKDrawing(strokes: [Self.penStroke(Self.row(from: 0, to: 100, y: 0))])
+        let ink = clip.bounds
+        let page = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let base = PKDrawing(strokes: [Self.penStroke(Self.row(from: 0, to: 10, y: 10))])
+        let (middle, indices) = SelectionEdit.pasted(clip, into: base, at: CGPoint(x: 200, y: 150), page: page)
+        XCTAssertEqual(indices, [1])
+        XCTAssertEqual(middle.strokes[1].renderBounds.midX, 200, accuracy: 1e-6)
+        XCTAssertEqual(middle.strokes[1].renderBounds.midY, 150, accuracy: 1e-6)
+        let (corner, _) = SelectionEdit.pasted(clip, into: base, at: CGPoint(x: 0, y: 0), page: page)
+        XCTAssertEqual(corner.strokes[1].renderBounds.minX, 0, accuracy: 1e-6)
+        XCTAssertEqual(corner.strokes[1].renderBounds.minY, 0, accuracy: 1e-6)
+        let narrow = CGRect(x: 0, y: 0, width: ink.width / 2, height: 300)
+        let (wide, _) = SelectionEdit.pasted(clip, into: base, at: CGPoint(x: 10, y: 150), page: narrow)
+        XCTAssertEqual(wide.strokes[1].renderBounds.midX, 10, accuracy: 1e-6, "too wide to fit: centred as asked")
+        XCTAssertEqual(SelectionEdit.pasted(PKDrawing(), into: base, at: .zero, page: page).indices, [])
     }
 
     func testOtherChangesDropTheSelection() async throws {
@@ -544,6 +748,58 @@ final class CircleLassoTests: XCTestCase {
         add(attachment)
     }
 
+    func testEditMenuLeavesTheRotateHandleClear() {
+        let screen = CGRect(x: 0, y: 0, width: 800, height: 1000)
+        let box = CGRect(x: 200, y: 300, width: 200, height: 100)
+        let handle = CGPoint(x: 300, y: 300 - SelectionOverlayView.rotateHandleDistance)
+        let above = SelectionOverlayView.menuPlacement(box: box, rotateHandle: handle, in: screen)
+        XCTAssertFalse(above.below)
+        let reach = SelectionOverlayView.handleHitRadius
+        XCTAssertEqual(above.keepClear.minY, handle.y - reach, "above every touch that grabs the handle")
+        XCTAssertLessThanOrEqual(above.keepClear.minY,
+                                 box.minY - SelectionOverlayView.rotateHandleDistance - SelectionOverlayView.handleRadius - 8)
+        XCTAssertEqual(above.sourcePoint, CGPoint(x: 300, y: above.keepClear.minY))
+        XCTAssertTrue(above.keepClear.contains(box))
+
+        // Near the top of the screen there is no room above, so the menu goes below the box.
+        let high = box.offsetBy(dx: 0, dy: -240)
+        let below = SelectionOverlayView.menuPlacement(box: high, rotateHandle: CGPoint(x: 300, y: high.minY - 30), in: screen)
+        XCTAssertTrue(below.below)
+        XCTAssertEqual(below.sourcePoint, CGPoint(x: 300, y: high.maxY))
+    }
+
+    func testRotateHandleRotatesWhileTheMenuShows() async throws {
+        let (window, canvas, overlay) = Self.hostOverlay(inScene: true)
+        defer { overlay.hide(); window.isHidden = true }
+        var menuUsed: [String] = []
+        overlay.menuActions = {
+            ["Cut", "Copy", "Duplicate", "Delete"].map { title in SelectionAction(title: title, symbol: "circle") { menuUsed.append(title) } }
+        }
+        var ended: (CGAffineTransform, SelectionDrag)?
+        overlay.onDragEnded = { ended = ($0, $1) }
+        let box = SelectionBox(rect: CGRect(x: 100, y: 100, width: 200, height: 100))
+        overlay.show(box, on: canvas, presentMenu: true)
+        for _ in 0..<40 where !overlay.menuVisible { await Self.pause(0.05) }
+        XCTAssertTrue(overlay.menuVisible, "the menu is showing")
+
+        // The canvas sits at (50, 80), so the box's top centre is (250, 180) and the handle 30 pt above it.
+        let handle = CGPoint(x: 250, y: 180 - SelectionOverlayView.rotateHandleDistance)
+        let placement = try XCTUnwrap(overlay.menuPlacement)
+        let reach = SelectionOverlayView.handleHitRadius
+        XCTAssertTrue(placement.keepClear.contains(CGRect(x: handle.x - reach, y: handle.y - reach, width: 2 * reach, height: 2 * reach)),
+                      "the menu lays itself out outside this rectangle, so it never covers the handle")
+        XCTAssertTrue(overlay.hitTest(handle, with: nil) === overlay)
+        XCTAssertEqual(overlay.beginDrag(at: handle, to: handle), .rotate)
+        // A quarter turn about the box's centre (250, 230): from straight above to straight right.
+        let right = CGPoint(x: 250 + 50, y: 230)
+        overlay.continueDrag(to: right)
+        overlay.endDrag(at: right)
+        let (delta, drag) = try XCTUnwrap(ended)
+        XCTAssertEqual(drag, .rotate)
+        XCTAssertEqual(atan2(delta.b, delta.a), .pi / 2, accuracy: 1e-6)
+        XCTAssertEqual(menuUsed, [], "no menu item ran, so nothing was duplicated")
+    }
+
     // MARK: - Fixtures
 
     static func circle(center: CGPoint, radius: CGFloat, degrees: CGFloat, count: Int = 72) -> [CGPoint] {
@@ -629,20 +885,33 @@ final class CircleLassoTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 
+    private static func pause(_ seconds: TimeInterval) async {
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+    }
+
+    private static func pasteboard(for controller: PDFOverlayPageController) throws -> UIPasteboard {
+        let pasteboard = try XCTUnwrap(UIPasteboard(name: UIPasteboard.Name("EmberPadTests.\(UUID().uuidString)"), create: true))
+        controller.inkSelection.pasteboard = pasteboard
+        return pasteboard
+    }
+
     private static func settle() async {
         await withCheckedContinuation { continuation in
             DispatchQueue.main.async { continuation.resume() }
         }
     }
 
-    private static func hostOverlay() -> (UIWindow, PKCanvasView, SelectionOverlayView) {
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 600, height: 560))
+    /// `inScene` puts the window in the host app's scene and makes it key, which the edit menu needs to show.
+    private static func hostOverlay(inScene: Bool = false) -> (UIWindow, PKCanvasView, SelectionOverlayView) {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = inScene && scene != nil ? UIWindow(windowScene: scene!) : UIWindow()
+        window.frame = CGRect(x: 0, y: 0, width: 600, height: 560)
         window.overrideUserInterfaceStyle = .light
         let root = UIViewController()
         root.overrideUserInterfaceStyle = .light
         root.view.backgroundColor = .emberCanvas
         window.rootViewController = root
-        window.isHidden = false
+        if inScene { window.makeKeyAndVisible() } else { window.isHidden = false }
         let canvas = PKCanvasView(frame: CGRect(x: 50, y: 80, width: 500, height: 460))
         PDFOverlayPageController.styleCanvas(canvas)
         canvas.isScrollEnabled = false

@@ -90,6 +90,19 @@ enum LassoGeometry {
     static func selectedIndices(in drawing: PKDrawing, lasso: [CGPoint]) -> [Int] {
         selectedIndices(of: drawing.strokes.map(drawingPoints(of:)), in: lasso)
     }
+
+    /// How far `point` is from the line through `path` (the line itself, not
+    /// its inside); infinite for no points.
+    static func distance(from point: CGPoint, toPath path: [CGPoint]) -> CGFloat {
+        guard let first = path.first else { return .infinity }
+        var nearest = hypot(point.x - first.x, point.y - first.y)
+        for (a, b) in zip(path, path.dropFirst()) {
+            let dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy
+            let t = length > 0 ? min(max(((point.x - a.x) * dx + (point.y - a.y) * dy) / length, 0), 1) : 0
+            nearest = min(nearest, hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy)))
+        }
+        return nearest
+    }
 }
 
 /// The selection's box: a rectangle (`rect`, in the box's own space) placed
@@ -224,6 +237,25 @@ enum SelectionEdit {
     static func duplicated(_ drawing: PKDrawing, indices: [Int]) -> (drawing: PKDrawing, indices: [Int]) {
         let offset = CGAffineTransform(translationX: duplicateOffset, y: duplicateOffset)
         let copies = strokes(of: drawing, at: indices).map { stroke -> PKStroke in
+            var copy = stroke
+            copy.transform = stroke.transform.concatenating(offset)
+            return copy
+        }
+        let start = drawing.strokes.count
+        return (PKDrawing(strokes: drawing.strokes + copies), Array(start..<(start + copies.count)))
+    }
+
+    /// `drawing` with every stroke of `clip` added on top, moved so the clip's
+    /// ink is centred on `point` and, where it fits, wholly inside `page`;
+    /// plus the added strokes' indices.
+    static func pasted(_ clip: PKDrawing, into drawing: PKDrawing, at point: CGPoint, page: CGRect) -> (drawing: PKDrawing, indices: [Int]) {
+        let ink = clip.bounds
+        guard !clip.strokes.isEmpty, !ink.isNull, ink.width.isFinite, ink.height.isFinite else { return (drawing, []) }
+        var x = point.x - ink.width / 2, y = point.y - ink.height / 2
+        if ink.width <= page.width { x = min(max(x, page.minX), page.maxX - ink.width) }
+        if ink.height <= page.height { y = min(max(y, page.minY), page.maxY - ink.height) }
+        let offset = CGAffineTransform(translationX: x - ink.minX, y: y - ink.minY)
+        let copies = clip.strokes.map { stroke -> PKStroke in
             var copy = stroke
             copy.transform = stroke.transform.concatenating(offset)
             return copy

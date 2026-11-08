@@ -324,7 +324,10 @@ extension PDFOverlayPageController {
     /// only reports holds and never touches the ink path (design 6.4).
     private func makeHoldRecognizer() -> HoldRecognizer {
         let hold = HoldRecognizer()
-        hold.onHold = { [weak self] in self?.updateHoldGuide($0) }
+        hold.onHold = { [weak self] hold in
+            guard let self, !self.circleLassoPress(hold) else { return }
+            self.updateHoldGuide(hold)
+        }
         hold.onMoveAfterHold = { [weak self] in self?.updateHoldGuide($0) }
         hold.onEnd = { [weak self] _ in self?.holdGuide.removeFromSuperlayer() }
         return hold
@@ -359,6 +362,40 @@ extension PDFOverlayPageController {
         CATransaction.commit()
     }
 
+    /// How far a Pencil may drift from where it touched down and still be a long-press, in points.
+    static let pressSlop: CGFloat = 6
+
+    /// A Pencil hold that has stayed where it touched down is a long-press:
+    /// on the closed loop just lifted, it turns the loop into a selection.
+    private func circleLassoPress(_ hold: HoldRecognizer) -> Bool {
+        guard let canvas = hold.view as? PKCanvasView, let start = hold.startLocation, let current = hold.currentLocation,
+              hypot(current.x - start.x, current.y - start.y) <= Self.pressSlop else { return false }
+        guard circleLassoPress(on: canvas, at: start) else { return false }
+        hold.consumeHold()
+        return true
+    }
+
+    /// Circle to lasso, GoodNotes style: a Pencil long-press at `point` on a
+    /// closed fountain-pen loop lifted moments ago selects the ink inside it.
+    /// The press's own stroke is cancelled before PencilKit commits it, so it
+    /// leaves no dot, and the loop goes as it does after a hold at its end.
+    /// Returns whether it selected.
+    @discardableResult
+    func circleLassoPress(on canvas: PKCanvasView, at point: CGPoint) -> Bool {
+        guard tools.current == .pen || tools.current == .highlighter,
+              let page = canvases.first(where: { $0.value === canvas })?.key,
+              let count = inkSelection.liftedLoopUnderPress(page: page, at: point) else { return false }
+        if canvas.drawingGestureRecognizer.isEnabled {
+            // Toggling the recogniser cancels the stroke in flight, which PencilKit then discards.
+            canvas.drawingGestureRecognizer.isEnabled = false
+            canvas.drawingGestureRecognizer.isEnabled = true
+        }
+        liveStroke = nil
+        student.cancelLiveStroke()
+        let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
+        return inkSelection.lassoNewestStroke(page: page, strokeCount: count, undoManager: undoManager)
+    }
+
     private static func holdRecognizer(on canvas: PKCanvasView) -> HoldRecognizer? {
         canvas.gestureRecognizers?.lazy.compactMap { $0 as? HoldRecognizer }.first
     }
@@ -369,7 +406,13 @@ extension PDFOverlayPageController {
     /// closes its undo group first; the ink was already drawn, so nothing
     /// here can delay it.
     private func straightenIfHeld(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
-        guard let hold = Self.holdRecognizer(on: canvas), hold.heldAtEnd else { return }
+        guard let hold = Self.holdRecognizer(on: canvas), hold.heldAtEnd else {
+            // Lifted without a hold: a closed loop can still be long-pressed into a selection.
+            if canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last {
+                inkSelection.noteLiftedStroke(stroke, page: page, strokeCount: canvas.drawing.strokes.count)
+            }
+            return
+        }
         // A hold applies to the one drawing change it ended, whatever that change was.
         hold.consumeHold()
         if canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last, inkSelection.isLassoLoop(stroke) {
