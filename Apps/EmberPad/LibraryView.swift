@@ -368,33 +368,6 @@ struct LibraryView: View {
     }
 }
 
-/// The library sidebar footer from design 5.6: **Sync now** and the sync status pinned to the bottom above a
-/// hairline, in the footer's quiet footnote style. The paired iPad scans the Mac's code from the File Inbox
-/// menu or from the not-paired row's button, both opening `PairingScannerSheet` (EP-22).
-struct SyncFooter: View {
-    @ObservedObject var sync: SyncClient
-    let paired: PairingController.Paired?
-    var onPair: () -> Void = {}
-
-    var body: some View {
-        Group {
-            if paired != nil {
-                SyncFooterContent(status: status, onSync: { sync.sync() }, onPair: onPair)
-            } else {
-                SyncFooterContent(status: status, onSync: nil, onPair: onPair)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Theme.surface2)
-        .overlay(alignment: .top) { Divider().opacity(0.6) }
-    }
-
-    private var status: SyncFooterStatus {
-        SyncFooterStatus(paired: paired, phase: sync.phase, lastSynced: sync.lastSynced, notice: sync.notice)
-    }
-}
-
 /// The footer's rows, worked out from values so it renders from synthetic fixtures too (screenshot tests)
 /// as well as the live client. Sync now always matches the paired state: shown only when a pairing exists.
 struct SyncFooterContent: View {
