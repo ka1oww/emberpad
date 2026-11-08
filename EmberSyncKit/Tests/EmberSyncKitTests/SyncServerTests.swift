@@ -20,7 +20,11 @@ struct SyncServerTests {
         let snapshot = try fixture.prepare()
         let pairing = try PairingCredential.generate()
         let power = RecordingPowerGuard()
-        let server = try await RunningServer.start(pairing, provider: OutboxContentProvider(outbox: fixture.outbox), power: power)
+        // Longer than any gap between the client's requests, so a slow runner cannot release and re-hold mid-sync.
+        var configuration = RunningServer.configuration
+        configuration.powerReleaseDelay = .seconds(1)
+        let server = try await RunningServer.start(pairing, provider: OutboxContentProvider(outbox: fixture.outbox), power: power,
+                                                   configuration: configuration)
         defer { server.stop() }
 
         let client = try await TestSyncClient.connect(port: server.port, pairing: pairing)
