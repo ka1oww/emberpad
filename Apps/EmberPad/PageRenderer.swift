@@ -241,6 +241,12 @@ struct EditorScreen: View {
                         }
                     }
                     .disabled(session?.record.role != .student || flattenedExport.isExporting)
+                    Button {
+                        flattenedExport.export(documentID, page: chrome.currentPage, library: library)
+                    } label: {
+                        Text("Export This Page")
+                    }
+                    .disabled(session?.record.role != .student || flattenedExport.isExporting)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }

@@ -48,6 +48,8 @@ The library sidebar groups non-archived Student worksheets by subject and shows 
 
 **Export flattened PDF** (worksheet More menu and a card's long-press menu) renders every page of a Student copy with its committed ink into a new PDF and opens the system share sheet. Ink for an open worksheet is taken from memory, so strokes still waiting for the one-second save are included. The export reads the stored PDF and drawings but never writes to them; it is built in a temporary folder that is removed when the share sheet closes. Teacher copies cannot be exported. Pages keep their original size; ink is rasterised at 3x over the vector page, so text stays sharp. Rotated pages (90 or 270 degrees) are exported at their displayed size, so ink lines up with what you saw on screen. See the [exported page](docs/screenshots/export-flattened-page.png) and the [entry-point composite](docs/screenshots/export-entry-points-light.png) (a static layout of the menu labels beside the real card, not an on-device capture).
 
+**Export This Page** (worksheet More menu, beside Export flattened PDF) does the same for only the page in view: a one-page PDF named `<title> p<N> (annotated).pdf`, with the same renderer, ink flattening, read-only guarantees and Student-copy-only rule. Ink saved on other pages is not read. See the Simulator captures of the [More menu](docs/screenshots/export-this-page-menu.png) and the [share sheet](docs/screenshots/export-this-page-share-sheet.png), and the [exported page](docs/screenshots/export-this-page-output.png), all from a synthetic worksheet.
+
 Each document version has its own `Application Support/Library/<UUID>/` folder:
 
 ```text
