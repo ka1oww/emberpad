@@ -279,8 +279,34 @@ final class SyncClientTests: XCTestCase {
     func testAMacThatIsNotFoundLeavesANoticeAndChangesNothing() async throws {
         let sync = try client(connect: { _ in throw LibrarySyncConnectError.macNotFound })
         await syncOnce(sync)
-        XCTAssertEqual(sync.notice, LibrarySyncConnectError.macNotFound.errorDescription)
+        XCTAssertEqual(sync.notice, SyncClient.notice(for: LibrarySyncConnectError.macNotFound))
         XCTAssertNil(sync.lastSynced)
+        let documents = try await store.documents()
+        XCTAssertTrue(documents.isEmpty)
+    }
+
+    /// EP-25 error copy: plain, short. A Mac that refused the connection names pairing again with a new
+    /// code, because the usual cause is that the Mac forgot or re-paired this iPad.
+    func testErrorCopyIsPlainShortCopy() {
+        XCTAssertEqual(SyncClient.notice(for: LibrarySyncConnectError.macNotFound),
+                       "Your Mac was not found nearby. Open EmberPad Companion on the Mac, then try Sync now.")
+        XCTAssertEqual(SyncClient.notice(for: NetworkWireTransportError.connectFailed("reset")),
+                       "The Mac refused this pairing. If the Companion forgot this iPad, pair again with a new code.")
+        XCTAssertEqual(SyncClient.notice(for: NetworkWireTransportError.connectTimedOut),
+                       "The Mac did not answer in time. Keep the iPad near the Mac, then try Sync now.")
+        let stackError = LibrarySyncError.manifestUnavailable(.notFound)
+        XCTAssertEqual(SyncClient.notice(for: stackError), stackError.errorDescription)
+    }
+
+    /// The pairing itself failing before sync starts keeps the Keychain error's plain copy.
+    func testAPairingStoreErrorKeepsItsPlainCopy() async throws {
+        let sync = SyncClient(library: library, folder: folder,
+                              credential: { throw PairingError.corruptRecord },
+                              connect: { _ in try await self.mac.connect() })
+        mac.publish([("sheet-1", 1)], generatedAt: generatedAt)
+        await syncOnce(sync)
+        XCTAssertEqual(sync.notice, SyncClient.notice(for: PairingError.corruptRecord))
+        XCTAssertEqual(sync.phase, .idle)
         let documents = try await store.documents()
         XCTAssertTrue(documents.isEmpty)
     }

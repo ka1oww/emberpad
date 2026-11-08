@@ -156,11 +156,12 @@ struct LibraryView: View {
             } else {
                 Text("Inbox not checked yet")
             }
-            if let paired = pairing.paired {
-                SyncStatusRow(sync: sync, paired: paired)
-            } else {
-                Text("Automatic Mac sync starts once you pair with your Mac.")
-            }
+            SyncFooterContent(
+                status: SyncFooterStatus(paired: pairing.paired, phase: sync.phase,
+                                         lastSynced: sync.lastSynced, notice: sync.notice,
+                                         lastBackedUp: sync.lastBackedUp, backupNotice: sync.backupNotice),
+                onSync: pairing.paired == nil ? nil : { sync.sync() },
+                onPair: { showPairing = true })
             SigningFooterLine(expiry: signingExpiryDate)
         }
         .font(Theme.meta)
@@ -368,54 +369,104 @@ struct LibraryView: View {
     }
 }
 
-/// The minimal EP-24 sync hook: what sync is doing, when it last finished, and **Sync now**. The full sync and
-/// pairing screen is EP-25.
-private struct SyncStatusRow: View {
-    @ObservedObject var sync: SyncClient
-    let paired: PairingController.Paired
+/// The footer's rows, worked out from values so it renders from synthetic fixtures too (screenshot tests)
+/// as well as the live client. Sync now always matches the paired state: shown only when a pairing exists.
+struct SyncFooterContent: View {
+    let status: SyncFooterStatus
+    var onSync: (() -> Void)?
+    var onPair: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                status
+            HStack(spacing: 10) {
+                Label(status.phaseText ?? "Mac sync", systemImage: status.phaseSymbol)
+                    .font(Theme.meta)
+                    .foregroundStyle(Theme.text2)
                 Spacer()
-                Button("Sync now") { sync.sync() }
-                    .disabled(sync.isSyncing)
-            }
-            if case .downloading(let progress) = sync.phase, progress.filesTotal > 0 {
-                ProgressView(value: progress.fraction)
-            }
-            Group {
-                if let last = sync.lastSynced {
-                    Text("Last synced \(last.formatted(date: .abbreviated, time: .shortened)) with your Mac (\(paired.shortID)).")
+                if let onSync {
+                    Button("Sync now", action: onSync)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(Theme.accent)
+                        .disabled(status.isBusy)
                 } else {
-                    Text("Paired with your Mac (\(paired.shortID)). Not synced yet.")
+                    Button("Pair with Mac…", action: onPair)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(Theme.accent)
                 }
             }
-            .font(.footnote).foregroundStyle(.secondary)
-            if let notice = sync.notice, !sync.isSyncing {
-                Text(notice).font(.footnote).foregroundStyle(.red)
+            .accessibilityElement(children: .combine)
+            if let fraction = status.stepFraction {
+                ProgressView(value: fraction)
+                    .tint(Theme.accent)
+                    .accessibilityLabel("Sync progress")
+            }
+            if let last = status.lastSyncedLine {
+                Text(last).font(Theme.meta).foregroundStyle(Theme.text2)
+            }
+            if let notice = status.notice {
+                Text(notice).font(Theme.meta).foregroundStyle(Theme.danger)
             }
             // EP-33: the ink backup has its own line, so it never reads as a failed sync.
-            if let backedUp = sync.lastBackedUp {
-                Text("Ink backed up to your Mac \(backedUp.formatted(date: .abbreviated, time: .shortened)).")
-                    .foregroundStyle(Theme.text3)
-            }
-            if let notice = sync.backupNotice, !sync.isSyncing {
-                Text(notice).foregroundStyle(Theme.text3)
+            if let backup = status.backupLine {
+                Text(backup).font(Theme.meta).foregroundStyle(Theme.text3)
             }
         }
     }
+}
 
-    @ViewBuilder private var status: some View {
-        switch sync.phase {
-        case .idle: Label("Mac sync", systemImage: "arrow.triangle.2.circlepath")
-        case .connecting: Label("Looking for your Mac…", systemImage: "wifi")
+/// Everything the sync footer shows, worked out from values so it renders from synthetic fixtures too
+/// (screenshot tests) as well as the live client.
+struct SyncFooterStatus {
+    let paired: PairingController.Paired?
+    /// The symbol and short line for what sync is doing right now, or nil while idle and unpaired.
+    let phaseText: String?
+    let phaseSymbol: String
+    let stepFraction: Double?
+    /// The last completed sync, or the paired-but-never-synced line.
+    let lastSyncedLine: String?
+    /// Plain short error copy for what the last sync could not do: Mac not found, a pairing that no longer
+    /// matches, or a transfer that did not finish.
+    let notice: String?
+    /// EP-33: the ink backup's own line (last backup, or why it did not finish), so it never reads as a failed sync.
+    let backupLine: String?
+    let isBusy: Bool
+
+    init(paired: PairingController.Paired?, phase: SyncClient.Phase, lastSynced: Date?, notice: String?,
+         lastBackedUp: Date? = nil, backupNotice: String? = nil) {
+        self.paired = paired
+        if case .idle = phase { isBusy = false } else { isBusy = true }
+        if case .idle = phase { self.notice = notice } else { self.notice = nil }
+        if let backupNotice, case .idle = phase {
+            backupLine = backupNotice
+        } else if let lastBackedUp {
+            backupLine = "Ink backed up to your Mac \(lastBackedUp.formatted(date: .abbreviated, time: .shortened))."
+        } else {
+            backupLine = nil
+        }
+        lastSyncedLine = paired.map { SyncClient.lastSyncedCopy(synced: lastSynced, shortID: $0.shortID) }
+        switch phase {
+        case .idle:
+            phaseText = paired == nil ? nil : "Mac sync"
+            phaseSymbol = "arrow.triangle.2.circlepath"
+            stepFraction = nil
+        case .connecting:
+            phaseText = "Looking for your Mac…"
+            phaseSymbol = "wifi"
+            stepFraction = nil
         case .downloading(let progress):
-            Label(progress.filesTotal == 0 ? "Checking the library…" : "Receiving \(min(progress.filesDone + 1, progress.filesTotal)) of \(progress.filesTotal)",
-                  systemImage: "arrow.down.circle")
-        case .filing: Label("Filing worksheets…", systemImage: "tray.and.arrow.down")
-        case .backingUp: Label("Backing up ink to your Mac…", systemImage: "arrow.up.circle")
+            phaseText = progress.filesTotal == 0 ? "Checking the library…" : "Receiving \(min(progress.filesDone + 1, progress.filesTotal)) of \(progress.filesTotal)"
+            phaseSymbol = "arrow.down.circle"
+            stepFraction = progress.filesTotal == 0 ? nil : progress.fraction
+        case .filing:
+            phaseText = "Filing worksheets…"
+            phaseSymbol = "tray.and.arrow.down"
+            stepFraction = nil
+        case .backingUp:
+            phaseText = "Backing up ink to your Mac…"
+            phaseSymbol = "arrow.up.circle"
+            stepFraction = nil
         }
     }
 }
