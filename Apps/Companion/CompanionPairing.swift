@@ -138,7 +138,7 @@ struct PairingCodeView: View {
     var body: some View {
         VStack(spacing: 14) {
             Text("Pair iPad").font(.system(size: 15, weight: .semibold))
-            Text("On the iPad, open EmberPad, tap **Pair with Mac…** at the bottom of the library and scan this code.")
+            Text("On the iPad, open EmberPad, scan this code from the pairing screen (**Pair with Mac…**, or **Pair with a different Mac…** in the File Inbox menu if already paired).")
                 .font(.system(size: 12)).multilineTextAlignment(.center).foregroundStyle(.secondary)
             if let image = PairingQRCode.image(for: payload) {
                 Image(nsImage: image)
