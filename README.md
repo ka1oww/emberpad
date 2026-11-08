@@ -8,9 +8,9 @@ Base code for a personal offline iPad teaching app. The Ember House colour token
 | --- | --- |
 | `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; local package dependency |
 | `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink, student-display scene, the pairing-code scanner and the Mac sync client |
-| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, phase-2 placeholders; its sync server is EP-23; only the Debug-only peer-to-peer hello listener today |
+| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, the sync server and its header status line, an Open at login switch, and a renewal placeholder, plus the Debug-only peer-to-peer hello listener |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
-| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, the Debug-only peer-to-peer hello framing and transport, pairing credentials with their Keychain store and TLS-PSK connection parameters, the iPad's Bonjour connector and sync download, and tests |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, the Debug-only peer-to-peer hello framing and transport, pairing credentials with their Keychain store and TLS-PSK connection parameters, the macOS sync server, the iPad's Bonjour connector and sync download, and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script with its optional Outbox delivery, format helpers, disabled example config and LaunchAgent template |
 
@@ -104,7 +104,26 @@ Flow control is per transfer credit: the server sends only bytes the client has 
 
 Each side keeps the pairing only as one generic-password Keychain item (this-device-only on iPad, never synchronised). It is never stored in UserDefaults or files. Descriptions and reflection print `<redacted>` in place of the secret, and the app UI shows only the service id's first six characters and the date. **Forget iPad** on the Mac and **Forget Mac…** on the iPad each delete their own item. Once the Mac forgets, the old secret is useless: any new pairing has a fresh secret and service id. Pairing again overwrites the item, and **Pair iPad…** on the Mac treats an unreadable (corrupt) item as absent and replaces it with a fresh pairing.
 
-`PairingTLS.parameters(for:)` is the only source of connection parameters for sync, and the Mac listener and iPad client use the same parameters. They set up TCP inside TLS 1.2 with a single PSK cipher suite (`TLS_PSK_WITH_AES_128_GCM_SHA256`) and peer-to-peer Wi-Fi on. The key is HKDF-SHA256 of the secret, bound to the service id; the PSK identity names the pairing, never the secret. The Bonjour type is `_embersync._tcp` and the instance name is the service id. Loopback tests over real sockets show the paired peer connects and negotiates that suite. A wrong key, a peer from another pairing, plain TCP, certificate TLS and a server with the wrong key all fail the handshake, and nothing they send reaches the server's reader. The Keychain store is tested against the real macOS Keychain under throwaway service names. The iPad app tests use an in-memory store, because the unsigned Simulator host has no Keychain entitlement. The iPad browses and connects as described below (the Debug-only hello below is separate). The Companion's listener is EP-23 and is not built yet, so for now the Mac cannot tell whether the code was scanned.
+`PairingTLS.parameters(for:)` is the only source of connection parameters for sync, and the Mac listener and iPad client use the same parameters. They set up TCP inside TLS 1.2 with a single PSK cipher suite (`TLS_PSK_WITH_AES_128_GCM_SHA256`) and peer-to-peer Wi-Fi on. The key is HKDF-SHA256 of the secret, bound to the service id; the PSK identity names the pairing, never the secret. The Bonjour type is `_embersync._tcp` and the instance name is the service id. Loopback tests over real sockets show the paired peer connects and negotiates that suite. A wrong key, a peer from another pairing, plain TCP, certificate TLS and a server with the wrong key all fail the handshake, and nothing they send reaches the server's reader. The Keychain store is tested against the real macOS Keychain under throwaway service names. The iPad app tests use an in-memory store, because the unsigned Simulator host has no Keychain entitlement. The Companion now listens (the sync server below); the iPad client (below) connects to it, so the Mac cannot tell whether the code was scanned until that iPad first syncs.
+
+### Sync server
+
+`SyncServer` in EmberSyncKit (macOS only) is the Companion's side of sync. While a pairing exists the Companion runs one: an `NWListener` on `PairingTLS.parameters(for:)`, so every connection uses the pairing's TLS pre-shared key and peer-to-peer Wi-Fi is on. That lets the iPad reach the Mac at home and at a venue with no shared Wi-Fi. It advertises the pairing's service id as `_embersync._tcp` over Bonjour, which needs the Companion's `NSLocalNetworkUsageDescription` and `NSBonjourServices` keys. A peer without this pairing's key fails the TLS handshake and never reaches the sync protocol. A connection that does not finish the handshake within 10 seconds is dropped, and at most four connections are open at once. **Forget iPad** stops the server at once; pairing again starts it with the new key. A failed listener retries by itself after five seconds.
+
+Each connection runs one `WireServerSession` over `OutboxContentProvider`, which serves the Outbox's `manifest.json` and `files/<sha256>.pdf` by content hash. The manifest is read afresh for every request, so a new **Prepare iPad library** is served without a restart. Before **Prepare** has run, a manifest request gets `unavailable`. A file is opened with `O_NOFOLLOW` and must be a plain file, and it is read through that one descriptor for the whole transfer. The driver stops reading from the peer while 512 KiB of replies are still queued, and pulls file data only below that mark, so a slow iPad cannot make the Mac buffer the library.
+
+While a transfer is in progress the server holds an IOKit `PreventUserIdleSystemSleep` assertion named "EmberPad Companion is sending the library to the iPad". It lets go two seconds after the last transfer ends, and on stop. The display may still sleep. The Companion header shows the server's status line: for example "Serving 16 documents · iPad synced 07:58", "Sending 2 files to the iPad", or "Sync unavailable · retrying". The iPad row adds the last sync time.
+
+**Open at login** in the iPad section uses `SMAppService.mainApp`. It is off until you turn it on, and the Companion never registers itself. If macOS cannot find this copy of the app the switch is disabled, and if registering fails (for example in an unsigned build run from a build folder) the reason shows under it.
+
+`SyncServerTests` run the real server on loopback with a real TLS-PSK `NWConnection`. The Outbox comes from the real Prepare path over a synthetic Drive EMBER tree, and the client is a small one built on EP-21's `WireClientSession`. The tests cover:
+
+- the paired client fetches the manifest and every file, byte for byte, on window grants;
+- the iPad's real `LibrarySyncDownloader` syncs the Outbox over the TLS-PSK connection and files it into a real library;
+- a new Prepare is served without a restart, and an unknown hash is not found;
+- wrong keys, another pairing, plain TCP and certificate TLS get no sync frame;
+- a silent peer, connections over the limit and stop are all handled;
+- the power guard is held only while sending, and the real assertion shows in `IOPMCopyAssertionsByProcess`.
 
 ### Sync client (iPad)
 
@@ -114,7 +133,7 @@ Once paired, EmberPad syncs on launch, on every return to the foreground and on 
 
 The download is then filed by `LibraryDeliveryApplier.applyNewest`, the one manifest path for both routes: of the Inbox copy and the sync download it applies the one with the newer `generatedAt` (sync on a tie) and never the older one in the same check. The applied-delivery receipt now records the manifest's `generatedAt`, so an older manifest arriving later by either route is skipped as superseded instead of archiving papers the newer one added. All the Inbox rules above hold: ink is saved first, an inked copy gets an **Updated** version beside it, an open worksheet waits, and a cut-short sync files what arrived and archives nothing. After a complete apply the downloaded PDFs are removed, since the library holds them. **Last synced** is recorded only when the whole download arrived and the library holds a manifest at least that new.
 
-The EmberSyncKit tests run EP-16's ink-safety tests over both routes, and run the client against a minimal in-test server built on `WireServerSession`, in memory and over real TLS-PSK loopback sockets. Bonjour browsing against an advertised in-test server runs only with `EMBERPAD_BONJOUR_TESTS=1`, because it uses the local network. The iPad tests drive `SyncClient` through `LibraryController` with synthetic PDFs. The end-to-end test against the Companion server (EP-23) is added once that server exists.
+The EmberSyncKit tests run EP-16's ink-safety tests over both routes, and run the client against a minimal in-test server built on `WireServerSession`, in memory and over real TLS-PSK loopback sockets. Bonjour browsing against an advertised in-test server runs only with `EMBERPAD_BONJOUR_TESTS=1`, because it uses the local network. The iPad tests drive `SyncClient` through `LibraryController` with synthetic PDFs.
 
 ## Page and presentation seams
 
@@ -157,7 +176,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
 - External-display sharing/recording method and capture tests; Mirror Presenter Page smoothness, memory and framing on the iPad and MacBook.
 - Live-ink latency from Pencil to the MacBook, and the look of the uniform provisional stroke against the committed one, on the iPad.
-- Joint planning before phase 2+: the Companion's sync server, iCloud/Drive, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
+- Joint planning before phase 2+: iCloud/Drive, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
 No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.

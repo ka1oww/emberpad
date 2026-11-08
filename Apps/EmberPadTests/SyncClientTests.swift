@@ -3,8 +3,8 @@ import UIKit
 import EmberSyncKit
 @testable import EmberPad
 
-/// EP-24, iPad side: `SyncClient` against a minimal in-test server built on the EP-21 `WireServerSession` (EP-23's
-/// Companion server is not part of this build). The download is filed through `LibraryController.fileInbox`, the
+/// EP-24, iPad side: `SyncClient` against a minimal in-test server built on the EP-21 `WireServerSession` (the
+/// real Companion server is covered by `SyncServerTests`). The download is filed through `LibraryController.fileInbox`, the
 /// Inbox path, so EP-16's ink rules are checked here through sync: inked worksheets get a new version beside
 /// them, open worksheets wait, and nothing is archived from a cut-short sync. Every PDF and name is synthetic.
 @MainActor
