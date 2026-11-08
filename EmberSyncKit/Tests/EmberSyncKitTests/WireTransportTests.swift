@@ -5,9 +5,10 @@ import Testing
 /// Serves one connection: answers control frames, then sends DATA while any transfer has credit. A frozen server
 /// completes the handshake and then reads but never answers or sends again.
 @discardableResult
-func serveLoopback(_ transport: any WireTransport, provider: TestProvider, limits: WireLimits = .standard,
+func serveLoopback(_ transport: any WireTransport, provider: TestProvider, putReceiver: (any WirePutReceiver)? = nil,
+                   limits: WireLimits = .standard, versions: ClosedRange<UInt16> = WireProtocol.supportedVersions,
                    frozenAfterHello: Bool = false) async -> WireServerSession.Phase {
-    var session = WireServerSession(provider: provider, limits: limits, now: .now)
+    var session = WireServerSession(provider: provider, putReceiver: putReceiver, limits: limits, versions: versions, now: .now)
     do {
         connection: while let bytes = try await transport.receive() {
             var input = bytes
@@ -168,7 +169,7 @@ struct WireTransportTests {
         while finished.count < 2 {
             try await client.run { if case .completed = $0 { true } else { false } }
             for case .completed(let id, _, _) in client.events { finished.insert(id) }
-            try #require(client.session.phase == .ready(version: 1))
+            try #require(client.session.phase == .ready(version: 2))
         }
         #expect(client.files[bigID] == big)
         #expect(client.files[smallID] == small)

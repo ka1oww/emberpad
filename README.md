@@ -7,10 +7,10 @@ Base code for a personal offline iPad teaching app. The Ember House colour token
 | Path | Responsibility |
 | --- | --- |
 | `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS unit-test bundle and inert `resign` aggregate target; local package dependency |
-| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink, student-display scene, the pairing-code scanner and the Mac sync client |
-| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, the sync server and its header status line, an Open at login switch, and a renewal placeholder, plus the Debug-only peer-to-peer hello listener |
+| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink, student-display scene, the pairing-code scanner and the Mac sync client with its one-way ink backup |
+| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, the sync server and its header status line, the ink backup folder, an Open at login switch, and a renewal placeholder, plus the Debug-only peer-to-peer hello listener |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
-| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, the Debug-only peer-to-peer hello framing and transport, pairing credentials with their Keychain store and TLS-PSK connection parameters, the macOS sync server, the iPad's Bonjour connector and sync download, and tests |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, the Debug-only peer-to-peer hello framing and transport, pairing credentials with their Keychain store and TLS-PSK connection parameters, the macOS sync server and ink backup folder, the iPad's Bonjour connector, sync download and ink backup, and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script with its optional Outbox delivery, format helpers, disabled example config and LaunchAgent template |
 
@@ -57,7 +57,7 @@ page-0.drawing          # zero-based PDF page, native PKDrawing.dataRepresentati
 page-1.drawing
 ```
 
-The app's `DocumentSession` owns every page drawing and updates from `canvasViewDrawingDidChange`, independently of overlays. It saves about one second after changes and flushes on editor exit and backgrounding. Save errors stay visible; corrupt saved ink never silently becomes an empty drawing. Storage uses Documents/Application Support, with no reliance on Caches. Deleting the app still deletes this data; backup is a later phase.
+The app's `DocumentSession` owns every page drawing and updates from `canvasViewDrawingDidChange`, independently of overlays. It saves about one second after changes and flushes on editor exit and backgrounding. Save errors stay visible; corrupt saved ink never silently becomes an empty drawing. Storage uses Documents/Application Support, with no reliance on Caches. Deleting the app still deletes this data; the ink backup below keeps a copy of every inked Student worksheet on the paired Mac.
 
 Same path and checksum is a replay. New bytes without ink replace the current copy while retaining the prior folder in hidden `.Previous` for 30 days. New bytes with ink create an **Updated** copy and mark the annotated one **Older version**; ink never moves to new bytes. An open, uninked worksheet is pinned: changed deliveries wait until the editor closes so an old canvas cannot write onto a replacement PDF. Recheck Inbox after closing it. Previous-version pruning is an explicit store operation; the base keeps versions conservatively until that maintenance path is wired.
 
@@ -94,7 +94,9 @@ The optional delivery in `resign/renew.zsh` copies the Outbox into the iPad's `D
 
 `Wire*.swift` in EmberSyncKit is the private protocol a later transport carries between the Mac (server) and the iPad (client). It opens no connection itself: `WireClientSession` and `WireServerSession` are pure state machines that take received bytes and the current time and return frames to send and events, so a driver moves bytes and calls `tick` on a timer. The server emits at most one frame per `receive` call; send that frame, then call `receive(Data(), now:)` while `hasPendingInput` is true before reading more transport bytes. This bounds response generation for coalesced requests while preserving the transport's backpressure. `InMemoryWireTransport` is an in-process pair with bounded buffers for tests; it opens no socket.
 
-A frame is a 1-byte type, a 4-byte big-endian payload length and the payload. The client sends HELLO (magic `EMBR`, version range, role, largest chunk and manifest it accepts) and the server answers HELLO with the highest common version. The client then sends GET-MANIFEST (answered by MANIFEST, the `ManifestCodec` JSON) and GET by SHA-256 with initial credit (answered by DATA chunks at explicit offsets and a final END with the total length). Each request has a strictly increasing client-chosen id and gets exactly one terminal frame: MANIFEST, END or a request ERROR (not found, cancelled, stalled, busy, manifest too large, unavailable).
+A frame is a 1-byte type, a 4-byte big-endian payload length and the payload. The client sends HELLO (magic `EMBR`, version range, role, largest chunk and manifest it accepts) and the server answers HELLO with the highest common version. The client then sends GET-MANIFEST (answered by MANIFEST, the `ManifestCodec` JSON) and GET by SHA-256 with initial credit (answered by DATA chunks at explicit offsets and a final END with the total length). Each request has a strictly increasing client-chosen id and gets exactly one terminal frame: MANIFEST, END, PUT_DONE or a request ERROR (not found, cancelled, stalled, busy, manifest too large, unavailable, rejected, storage failed, integrity failed).
+
+Version 2 adds one upload, PUT, used only by the ink backup and only from the iPad to the Mac. PUT announces a size, a SHA-256 and up to 4 KiB of JSON metadata; the Mac answers PUT_DONE "already held", or grants PUT_WINDOW credit, and the iPad sends PUT_DATA at explicit offsets within that credit and then PUT_END. The Mac hashes as bytes arrive and answers PUT_DONE only once the size and SHA-256 match and the copy is stored. A PUT is at most 256 MiB. Both peers still offer version 1: a version-1 peer never receives a PUT frame, because the iPad sends PUT only when version 2 was negotiated, and a session at version 1 treats one as a protocol violation. PUT never travels Mac to iPad, and PUT_WINDOW and PUT_DONE never travel iPad to Mac.
 
 Flow control is per transfer credit: the server sends only bytes the client has granted, chunked to the smaller of both peers' limits and round-robin across transfers. The client grants WINDOW increments only as the app reports bytes written, so a slow writer holds at most one window. The client checks every chunk's offset and credit, hashes the bytes as they arrive and reports a completed file only when the size and SHA-256 both match. CANCEL fails a request at once and discards its late bytes until the server acknowledges. A transfer with credit outstanding and no progress stalls on the client; one the client leaves without credit is dropped by the server. Unknown, out-of-direction and oversized frames are rejected from their headers before their payloads are buffered; malformed payloads are rejected when decoded. These violations close the session with a protocol-violation ERROR. Every length is bounded: chunks to 1 MiB, manifests to 32 MiB and credit to 16 MiB per transfer; concurrent requests are limited by `WireLimits`.
 
@@ -125,6 +127,8 @@ While a transfer is in progress the server holds an IOKit `PreventUserIdleSystem
 - a silent peer, connections over the limit and stop are all handled;
 - the power guard is held only while sending, and the real assertion shows in `IOPMCopyAssertionsByProcess`.
 
+`InkBackupTests` also run EP-24's real `LibrarySyncDownloader` end to end against this server (see Ink backup to the Mac below).
+
 ### Sync client (iPad)
 
 Once paired, EmberPad syncs on launch, on every return to the foreground and on **Sync now** (in the library's Mac sync row and in the **File Inbox** menu). `LibrarySyncConnector` browses Bonjour for `_embersync._tcp` with peer-to-peer Wi-Fi on, takes only the instance named by the pairing's service id, and connects with `PairingTLS.parameters(for:)`, so a Mac without the pairing's key never gets a byte. The app declares `NSLocalNetworkUsageDescription` and `NSBonjourServices`; no entitlement is needed. A Mac not seen within 8 seconds is reported as not found, with nothing changed. Networking is foreground-only: leaving the app cancels the sync, and nothing runs while the iPad is not paired.
@@ -134,6 +138,45 @@ Once paired, EmberPad syncs on launch, on every return to the foreground and on 
 The download is then filed by `LibraryDeliveryApplier.applyNewest`, the one manifest path for both routes: of the Inbox copy and the sync download it applies the one with the newer `generatedAt` (sync on a tie) and never the older one in the same check. The applied-delivery receipt now records the manifest's `generatedAt`, so an older manifest arriving later by either route is skipped as superseded instead of archiving papers the newer one added. All the Inbox rules above hold: ink is saved first, an inked copy gets an **Updated** version beside it, an open worksheet waits, and a cut-short sync files what arrived and archives nothing. After a complete apply the downloaded PDFs are removed, since the library holds them. **Last synced** is recorded only when the whole download arrived and the library holds a manifest at least that new.
 
 The EmberSyncKit tests run EP-16's ink-safety tests over both routes, and run the client against a minimal in-test server built on `WireServerSession`, in memory and over real TLS-PSK loopback sockets. Bonjour browsing against an advertised in-test server runs only with `EMBERPAD_BONJOUR_TESTS=1`, because it uses the local network. The iPad tests drive `SyncClient` through `LibraryController` with synthetic PDFs.
+
+### Ink backup to the Mac
+
+On each sync, once the library download is filed and **Last synced** recorded, the iPad backs up its ink to the paired Mac over the same TLS-PSK connection (EP-33). It sends every Student worksheet whose ink changed since the Mac last confirmed a copy, as two files: an `.emberink` package (every inked page's PencilKit drawing, restorable as editable ink) and a flattened PDF (the same rendering as **Export flattened PDF**). Open worksheets are saved first; the backup only ever reads the library. The iPad remembers what the Mac confirmed in `Application Support/Backup/ledger.json`, per pairing, so pairing a new Mac sends everything again, and anything that did not reach the Mac is sent on the next sync. The sidebar's Mac sync line shows "Backing up ink to your Mac…" while it runs, then when the ink was last backed up and, on its own line, why a backup did not finish. A backup failure never fails, slows or undoes the library sync: a refused or failed copy, a dropped connection or leaving the app stops only the backup. A Companion from before EP-33 still syncs the library; the iPad asks for it to be updated. Nothing is ever sent back: the Mac never sends a backup to the iPad or changes its ink. Restoring inside the app is not part of this package.
+
+On the Mac, the Companion's iPad section shows the **Ink backup** folder, when the last backup arrived, **Choose backup folder…** and **Show in Finder**. The folder defaults to `~/Library/Application Support/EmberPad/Ink Backup`. A folder inside Google Drive or any `~/Library/CloudStorage` folder, inside `~/Documents/Ember Projects` or inside the Outbox is refused (symlinks are resolved first), and a saved folder that later fails that check falls back to the default with a note. Changing the folder keeps earlier copies where they are. Copies are kept by subject and paper:
+
+```text
+Ink Backup/<Subject>/<Paper>/2026-11-06 19.42.10 ink 1A2B3C4D.emberink
+Ink Backup/<Subject>/<Paper>/2026-11-06 19.42.10 annotated 1A2B3C4D.pdf
+Ink Backup/<Subject>/<Paper>/.backup-index.json
+```
+
+`<Paper>` is the paper key without its subject (`Unit 1 - Paper 2`), or the title for a loose import; the time is when the copy arrived; the last part is the start of the iPad document id. Every copy is kept: nothing is overwritten or deleted, and a copy identical to the newest one of the same document and kind is answered "already held" instead of being kept twice. Each copy is written to a private file under `.incoming`, checked against its announced size and SHA-256, flushed to disk and only then linked into place under a name that cannot replace an existing file, so the folder never shows a partial copy. `.backup-index.json` lists every copy with its document id, title, SHA-256, size and arrival time. Names from the iPad are cleaned into single folder names and can never point outside the folder.
+
+`InkBackupTests` cover the frames and version gating, PUT sessions (credit, already held, a hash mismatch, a storage failure, cancel and a stall), the folder (versions kept, nothing overwritten, cleaned names, no partial copy, refused locations), the ink package and the ledger, and loopback syncs: in memory, and over the real `SyncServer` with TLS-PSK sockets, with the real `LibrarySyncDownloader`. They show the upload, a new version on each ink change, a connection lost partway through a copy leaving the library sync whole and the rest sent next time, a copy the Mac fails or refuses, an older Mac, and an older iPad. The iPad tests drive `SyncClient` with real PencilKit drawings.
+
+#### Restore drill
+
+Run this drill once on a spare synthetic worksheet before relying on the backup, and again after any EmberPad update.
+
+1. **Read the ink at once.** On the Mac, open the newest `annotated` PDF for the worksheet in Preview (Companion › **Show in Finder**, then the subject and paper folder). It needs nothing from EmberPad. To have it on the iPad as a read-only page, AirDrop it and **Import from Files**; its ink is part of the page and cannot be edited.
+2. **Get the worksheet back.** Reinstall EmberPad, pair again and sync, so the library downloads the PDF again. It gets a new document id.
+3. **Unpack the editable ink.** In the same folder, decode the newest `.emberink` file into page drawings:
+
+   ```sh
+   python3 - "<the .emberink file>" "$HOME/Desktop/restored-ink" <<'PY'
+   import base64, json, pathlib, sys
+   package = json.loads(pathlib.Path(sys.argv[1]).read_text())
+   assert package["format"] == "emberpad.ink/1"
+   out = pathlib.Path(sys.argv[2]); out.mkdir(exist_ok=True)
+   for page in package["pages"]:
+       (out / f"page-{page['page']}.drawing").write_bytes(base64.b64decode(page["drawing"]))
+   print(package["title"], "- drawn on the PDF with SHA-256", package["pdfSHA256"])
+   PY
+   ```
+
+4. **Check it is the same PDF.** The printed SHA-256 must equal `shasum -a 256` of the worksheet's PDF in the Outbox (`~/Library/Application Support/EmberPad/Outbox/files/<sha256>.pdf`). If the paper was revised since, the ink belongs to the older version: use the flattened PDF instead.
+5. **Put the ink back.** With EmberPad closed, use Xcode › Window › Devices and Simulators › EmberPad › Download Container, copy the `page-<n>.drawing` files into `AppData/Library/Application Support/Library/<new document id>/` (the folder whose `doc.json` names that worksheet), then Replace Container. Open the worksheet: the ink is editable again, and the next stroke saves it as usual.
 
 ## Page and presentation seams
 
@@ -176,7 +219,7 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
 - External-display sharing/recording method and capture tests; Mirror Presenter Page smoothness, memory and framing on the iPad and MacBook.
 - Live-ink latency from Pencil to the MacBook, and the look of the uniform provisional stroke against the committed one, on the iPad.
-- Joint planning before phase 2+: iCloud/Drive, external-scene recording, scribble detection, library backup/export, lasso/eraser extras, and any Ember publish hook.
+- Joint planning before phase 2+: iCloud/Drive, external-scene recording, scribble detection, in-app restore of backed-up ink, library export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
 No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.

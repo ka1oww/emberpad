@@ -41,6 +41,24 @@ public enum WireCodec {
         case .error(let id, let code):
             payload.appendBigEndian(id?.rawValue ?? 0)
             payload.appendBigEndian(code.rawValue)
+        case .put(let id, let size, let hash, let metadata):
+            payload.appendBigEndian(id.rawValue)
+            payload.appendBigEndian(size)
+            payload += hash.wireBytes
+            payload += metadata
+        case .putData(let id, let offset, let bytes):
+            payload.appendBigEndian(id.rawValue)
+            payload.appendBigEndian(offset)
+            payload += bytes
+        case .putWindow(let id, let increment):
+            payload.appendBigEndian(id.rawValue)
+            payload.appendBigEndian(increment)
+        case .putEnd(let id, let totalBytes):
+            payload.appendBigEndian(id.rawValue)
+            payload.appendBigEndian(totalBytes)
+        case .putDone(let id, let alreadyHeld):
+            payload.appendBigEndian(id.rawValue)
+            payload.append(alreadyHeld ? 1 : 0)
         }
         precondition(payload.count <= Int(UInt32.max), "Wire payloads are bounded far below 4 GiB")
         out.append(message.type.rawValue)
@@ -208,6 +226,11 @@ public struct WireFrameDecoder: Sendable {
         case .window: 8...8
         case .end: 12...12
         case .error: 6...6
+        case .put: 45...(44 + WireProtocol.maxPutMetadataBytes)
+        case .putData: 13...(12 + maxChunkBytes)
+        case .putWindow: 8...8
+        case .putEnd: 12...12
+        case .putDone: 5...5
         }
     }
 
@@ -252,6 +275,28 @@ public struct WireFrameDecoder: Sendable {
             let id = WireRequestID(rawValue: reader.uint32())
             guard let code = WireErrorCode(rawValue: reader.uint16()) else { throw .malformedPayload(type) }
             return .error(id, code)
+        case .put:
+            let id = try requestID()
+            let size = reader.uint64()
+            guard let hash = ContentHash(wireBytes: reader.bytes(32)) else { throw .malformedPayload(type) }
+            return .put(id, size: size, hash: hash, metadata: Data(reader.rest()))
+        case .putData:
+            let id = try requestID()
+            return .putData(id, offset: reader.uint64(), bytes: Data(reader.rest()))
+        case .putWindow:
+            let id = try requestID()
+            let increment = reader.uint32()
+            guard increment > 0 else { throw .malformedPayload(type) }
+            return .putWindow(id, increment: increment)
+        case .putEnd:
+            return try .putEnd(requestID(), totalBytes: reader.uint64())
+        case .putDone:
+            let id = try requestID()
+            switch reader.uint8() {
+            case 0: return .putDone(id, alreadyHeld: false)
+            case 1: return .putDone(id, alreadyHeld: true)
+            default: throw .malformedPayload(type)
+            }
         }
     }
 }

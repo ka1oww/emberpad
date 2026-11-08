@@ -346,9 +346,11 @@ struct RunningServer {
         return parameters
     }
 
-    static func start(_ pairing: PairingCredential, provider: any WireContentProvider, power: (any SyncPowerGuard)? = nil,
+    static func start(_ pairing: PairingCredential, provider: any WireContentProvider, putReceiver: (any WirePutReceiver)? = nil,
+                      power: (any SyncPowerGuard)? = nil,
                       configuration: SyncServer.Configuration = RunningServer.configuration) async throws -> RunningServer {
-        let server = SyncServer(credential: pairing, provider: provider, configuration: configuration, powerGuard: power ?? RecordingPowerGuard())
+        let server = SyncServer(credential: pairing, provider: provider, putReceiver: putReceiver, configuration: configuration,
+                                powerGuard: power ?? RecordingPowerGuard())
         server.start()
         let running = RunningServer(server: server, port: .any)
         let status = try await running.waitFor { if case .listening = $0.state { true } else { false } }

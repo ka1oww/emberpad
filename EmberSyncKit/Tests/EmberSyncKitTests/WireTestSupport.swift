@@ -53,7 +53,7 @@ func be64(_ value: UInt64) -> [UInt8] { withUnsafeBytes(of: value.bigEndian, Arr
 /// A raw frame with a correct length header, for hand-built bad payloads.
 func rawFrame(_ type: UInt8, _ payload: [UInt8]) -> Data { Data([type] + be32(UInt32(payload.count)) + payload) }
 
-func rawHello(role: UInt8, versions: (UInt16, UInt16) = (1, 1), chunk: UInt32 = 65_536, manifest: UInt32 = 8_388_608,
+func rawHello(role: UInt8, versions: (UInt16, UInt16) = (1, 2), chunk: UInt32 = 65_536, manifest: UInt32 = 8_388_608,
               magic: [UInt8] = WireProtocol.magic) -> Data {
     rawFrame(WireMessageType.hello.rawValue, magic + be16(versions.0) + be16(versions.1) + [role] + be32(chunk) + be32(manifest))
 }
@@ -74,13 +74,16 @@ struct SessionPair {
     var client: WireClientSession
     var server: WireServerSession
 
-    init(provider: TestProvider, clientLimits: WireLimits = .standard, serverLimits: WireLimits = .standard) {
-        client = WireClientSession(limits: clientLimits)
-        server = WireServerSession(provider: provider, limits: serverLimits, now: wireT0)
+    init(provider: TestProvider, putReceiver: (any WirePutReceiver)? = nil, clientLimits: WireLimits = .standard,
+         serverLimits: WireLimits = .standard, clientVersions: ClosedRange<UInt16> = WireProtocol.supportedVersions,
+         serverVersions: ClosedRange<UInt16> = WireProtocol.supportedVersions) {
+        client = WireClientSession(limits: clientLimits, versions: clientVersions)
+        server = WireServerSession(provider: provider, putReceiver: putReceiver, limits: serverLimits, versions: serverVersions, now: wireT0)
         let hello = server.receive(client.start(now: wireT0).bytes, now: wireT0)
         let ready = client.receive(hello.bytes, now: wireT0)
-        #expect(hello.events == [.ready(version: 1)])
-        #expect(ready.events == [.ready(version: 1)])
+        let version = min(clientVersions.upperBound, serverVersions.upperBound)
+        #expect(hello.events == [.ready(version: version)])
+        #expect(ready.events == [.ready(version: version)])
     }
 
     mutating func toServer(_ out: WireClientOutput, at now: ContinuousClock.Instant = wireT0) -> WireServerOutput {

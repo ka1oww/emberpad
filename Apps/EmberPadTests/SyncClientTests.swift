@@ -1,5 +1,7 @@
 import XCTest
 import UIKit
+import PencilKit
+import PDFKit
 import EmberSyncKit
 @testable import EmberPad
 
@@ -30,11 +32,24 @@ final class SyncClientTests: XCTestCase {
         try? FileManager.default.removeItem(at: base)
     }
 
-    private func client(paired: Bool = true, connect: SyncClient.Connector? = nil) throws -> SyncClient {
-        let credential = try PairingCredential.generate()
+    private lazy var credential = try! PairingCredential.generate()
+
+    private func client(paired: Bool = true, backup: Bool = false, connect: SyncClient.Connector? = nil) throws -> SyncClient {
+        let credential = self.credential
         let mac = self.mac!
         return SyncClient(library: library, folder: folder, credential: { paired ? credential : nil },
-                          connect: connect ?? { _ in try await mac.connect() }, defaults: defaults)
+                          connect: connect ?? { _ in try await mac.connect() }, defaults: defaults,
+                          backupLedger: backup ? base.appendingPathComponent("Backup/ledger.json") : nil)
+    }
+
+    /// A real PencilKit drawing with one synthetic stroke, so the flattened copy has ink to draw.
+    private func drawing(_ x: CGFloat) -> Data {
+        let points = [PKStrokePoint(location: CGPoint(x: x, y: 40), timeOffset: 0, size: CGSize(width: 4, height: 4),
+                                    opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2),
+                      PKStrokePoint(location: CGPoint(x: x + 60, y: 90), timeOffset: 0.1, size: CGSize(width: 4, height: 4),
+                                    opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)]
+        let stroke = PKStroke(ink: PKInk(.pen, color: .black), path: PKStrokePath(controlPoints: points, creationDate: Date(timeIntervalSince1970: 0)))
+        return PKDrawing(strokes: [stroke]).dataRepresentation()
     }
 
     private func syncOnce(_ sync: SyncClient) async {
@@ -175,6 +190,92 @@ final class SyncClientTests: XCTestCase {
         XCTAssertTrue(services.contains(PeerHello.serviceType))
     }
 
+    // MARK: EP-33 ink backup
+
+    func testChangedInkIsBackedUpToTheMacAfterTheLibraryIsFiled() async throws {
+        mac.publish([("sheet-1", 2), ("sheet-2", 1)], generatedAt: generatedAt)
+        mac.backups = SyntheticBackupFolder()
+        let sync = try client(backup: true)
+        await syncOnce(sync)
+        // No ink yet, so nothing to send, and the backup is up to date.
+        XCTAssertEqual(mac.backups?.received.count, 0)
+        XCTAssertNotNil(sync.lastBackedUp)
+        let synced = try await current()
+        let sheet = try XCTUnwrap(synced.first { $0.title == "Synthetic sheet-1" })
+        let ink = drawing(20)
+        try await store.saveDrawing(ink, documentID: sheet.id, page: 1, hasInk: true)
+
+        await syncOnce(sync)
+        let received = try XCTUnwrap(mac.backups?.received)
+        XCTAssertEqual(received.map(\.header.kind), [.ink, .flattened])
+        XCTAssertEqual(received.map(\.header.documentID), [sheet.id, sheet.id])
+        XCTAssertEqual(received[0].header.subject, "Synthetic Subject")
+        let package = try InkPackage.decode(received[0].bytes)
+        XCTAssertEqual(package.pages.map(\.page), [1])
+        XCTAssertEqual(package.pages.first?.drawing, ink)
+        XCTAssertEqual(package.pdfSHA256, sheet.source.sha256)
+        let flattened = try XCTUnwrap(PDFDocument(data: received[1].bytes))
+        XCTAssertEqual(flattened.pageCount, 2)
+        XCTAssertNil(sync.notice)
+        XCTAssertNil(sync.backupNotice)
+        XCTAssertNotNil(sync.lastSynced)
+        // The backup only read the ink.
+        let kept = try await store.drawing(documentID: sheet.id, page: 1)
+        XCTAssertEqual(kept, ink)
+
+        // Unchanged ink is not sent again; changed ink is.
+        await syncOnce(sync)
+        XCTAssertEqual(mac.backups?.received.count, 2)
+        try await store.saveDrawing(drawing(80), documentID: sheet.id, page: 1, hasInk: true)
+        await syncOnce(sync)
+        XCTAssertEqual(mac.backups?.received.count, 4)
+    }
+
+    func testABackupTheMacCannotTakeNeverFailsTheSyncAndIsRetried() async throws {
+        mac.publish([("sheet-1", 1)], generatedAt: generatedAt)
+        let sync = try client(backup: true)
+        await syncOnce(sync)
+        let synced = try await current()
+        let sheet = try XCTUnwrap(synced.first)
+        try await store.saveDrawing(drawing(30), documentID: sheet.id, page: 0, hasInk: true)
+        let backedUpBefore = sync.lastBackedUp
+
+        // This Mac has no backup folder: both copies are refused, and the library sync is still a success.
+        mac.publish([("sheet-1", 1), ("sheet-2", 1)], generatedAt: generatedAt.addingTimeInterval(60))
+        await syncOnce(sync)
+        let titles = Set(try await current().map(\.title))
+        XCTAssertEqual(titles, ["Synthetic sheet-1", "Synthetic sheet-2"])
+        XCTAssertNil(sync.notice)
+        XCTAssertNotNil(sync.lastSynced)
+        XCTAssertNotNil(sync.backupNotice)
+        XCTAssertEqual(sync.lastBackedUp, backedUpBefore)
+
+        mac.backups = SyntheticBackupFolder()
+        await syncOnce(sync)
+        XCTAssertEqual(mac.backups?.received.map(\.header.kind), [.ink, .flattened])
+        XCTAssertNil(sync.backupNotice)
+        XCTAssertNotEqual(sync.lastBackedUp, backedUpBefore)
+    }
+
+    func testAnOlderCompanionStillSyncsAndIsAskedToUpdate() async throws {
+        mac.publish([("sheet-1", 1)], generatedAt: generatedAt)
+        mac.backups = SyntheticBackupFolder()
+        mac.versions = 1...1
+        let sync = try client(backup: true)
+        await syncOnce(sync)
+        let synced = try await current()
+        let sheet = try XCTUnwrap(synced.first)
+        try await store.saveDrawing(drawing(30), documentID: sheet.id, page: 0, hasInk: true)
+        mac.publish([("sheet-1", 1), ("sheet-2", 1)], generatedAt: generatedAt.addingTimeInterval(60))
+        await syncOnce(sync)
+        let count = try await current().count
+        XCTAssertEqual(count, 2)
+        XCTAssertNil(sync.notice)
+        XCTAssertEqual(sync.backupNotice, SyncClient.notice(for: { var r = InkBackupReport(); r.skipped = .macTooOld; return r }(), unrendered: 0))
+        XCTAssertEqual(mac.backups?.received.count, 0)
+        XCTAssertNil(sync.lastBackedUp)
+    }
+
     func testAMacThatIsNotFoundLeavesANoticeAndChangesNothing() async throws {
         let sync = try client(connect: { _ in throw LibrarySyncConnectError.macNotFound })
         await syncOnce(sync)
@@ -194,8 +295,20 @@ final class SyntheticMac: @unchecked Sendable {
     private var byName: [String: ContentHash] = [:]
     private var built: [String: Data] = [:]
     private var connectionCount = 0
+    private var backupFolder: SyntheticBackupFolder?
+    private var versionRange = WireProtocol.supportedVersions
 
     var connections: Int { lock.withLock { connectionCount } }
+    /// Where this Mac keeps PUT backups; nil plays a Companion with no backup folder (every PUT is refused).
+    var backups: SyntheticBackupFolder? {
+        get { lock.withLock { backupFolder } }
+        set { lock.withLock { backupFolder = newValue } }
+    }
+    /// Protocol versions this Mac speaks; `1...1` plays a Companion from before the backup.
+    var versions: ClosedRange<UInt16> {
+        get { lock.withLock { versionRange } }
+        set { lock.withLock { versionRange = newValue } }
+    }
 
     /// Publishes papers by name with a page count; the same name and page count always gives the same bytes.
     func publish(_ papers: [(name: String, pages: Int)], generatedAt: Date) {
@@ -225,12 +338,12 @@ final class SyntheticMac: @unchecked Sendable {
     func withhold(_ name: String?) { lock.withLock { withheld = name.flatMap { byName[$0] } } }
 
     func connect() async throws -> any WireTransport {
-        let provider = lock.withLock {
+        let (provider, receiver, versions) = lock.withLock {
             connectionCount += 1
-            return Provider(manifestValue: manifest, files: files.filter { $0.key != withheld })
+            return (Provider(manifestValue: manifest, files: files.filter { $0.key != withheld }), backupFolder, versionRange)
         }
         let (client, server) = InMemoryWireTransport.pair()
-        Task { await Self.serve(server, provider: provider) }
+        Task { await Self.serve(server, provider: provider, putReceiver: receiver, versions: versions) }
         return client
     }
 
@@ -246,8 +359,9 @@ final class SyntheticMac: @unchecked Sendable {
     }
 
     /// The EP-21 server driver: answer each frame, then send DATA while any transfer has credit.
-    static func serve(_ transport: any WireTransport, provider: Provider) async {
-        var session = WireServerSession(provider: provider, now: .now)
+    static func serve(_ transport: any WireTransport, provider: Provider, putReceiver: (any WirePutReceiver)? = nil,
+                      versions: ClosedRange<UInt16> = WireProtocol.supportedVersions) async {
+        var session = WireServerSession(provider: provider, putReceiver: putReceiver, versions: versions, now: .now)
         do {
             connection: while let bytes = try await transport.receive() {
                 var input = bytes
@@ -272,5 +386,37 @@ final class SyntheticMac: @unchecked Sendable {
                 ("Synthetic \(name) page \(page)" as NSString).draw(at: CGPoint(x: 20, y: 20), withAttributes: [.font: UIFont.systemFont(ofSize: 12)])
             }
         }
+    }
+}
+
+/// The Mac's backup folder for these tests, in memory: every PUT it stores, in order.
+final class SyntheticBackupFolder: WirePutReceiver, @unchecked Sendable {
+    struct Received { let header: InkBackupHeader; let bytes: Data }
+    private let lock = NSLock()
+    private var items: [Received] = []
+
+    var received: [Received] { lock.withLock { items } }
+
+    func begin(metadata: Data, size: UInt64, hash: ContentHash) throws -> (any WirePutSink)? {
+        guard let header = try? InkBackupHeader.decode(metadata) else { throw WirePutRefusal.rejected }
+        return Sink(folder: self, header: header)
+    }
+
+    fileprivate func keep(_ item: Received) { lock.withLock { items.append(item) } }
+
+    private final class Sink: WirePutSink, @unchecked Sendable {
+        let folder: SyntheticBackupFolder
+        let header: InkBackupHeader
+        var bytes = Data()
+        init(folder: SyntheticBackupFolder, header: InkBackupHeader) {
+            self.folder = folder
+            self.header = header
+        }
+        func write(_ chunk: Data) throws { bytes += chunk }
+        func commit() throws -> Bool {
+            folder.keep(Received(header: header, bytes: bytes))
+            return true
+        }
+        func abort() {}
     }
 }

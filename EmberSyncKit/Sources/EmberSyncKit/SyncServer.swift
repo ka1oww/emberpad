@@ -135,6 +135,8 @@ public struct SyncServerStatus: Equatable, Sendable {
     public var connectedPeers = 0
     /// File transfers in progress across every connection.
     public var activeTransfers = 0
+    /// Ink backup copies being received across every connection.
+    public var activeUploads = 0
     /// True while the power assertion is held.
     public var isKeepingAwake = false
     /// When a paired iPad last took the manifest and every file it asked for, then disconnected.
@@ -145,6 +147,12 @@ public struct SyncServerStatus: Equatable, Sendable {
     public var sessionsStarted = 0
     /// Connections closed before a sync byte was read: a wrong key, no TLS, too slow, or over the connection limit.
     public var connectionsRefused = 0
+    /// Ink backup copies (EP-33) kept as new versions since the server started.
+    public var backupsStored = 0
+    /// Ink backup copies that failed since the server started; the iPad offers them again on its next sync.
+    public var backupsFailed = 0
+    /// When the last ink backup copy was stored or found already held.
+    public var lastBackupAt: Date?
 
     public init() {}
 }
@@ -189,6 +197,9 @@ public struct SyncStatusLine: Equatable, Sendable {
             if status.activeTransfers > 0 {
                 let files = status.activeTransfers
                 text = "Sending \(files) file\(files == 1 ? "" : "s") to the iPad"
+                tone = .active
+            } else if status.activeUploads > 0 {
+                text = "Backing up the iPad's ink"
                 tone = .active
             } else if status.connectedPeers > 0 {
                 text = "\(serving) · iPad connected"
@@ -247,6 +258,8 @@ public final class SyncServer: @unchecked Sendable {
     let configuration: Configuration
     private let credential: PairingCredential
     let provider: any WireContentProvider
+    /// Where version-2 PUTs (the iPad's ink backup) are kept; nil answers every PUT with `rejected`.
+    let putReceiver: (any WirePutReceiver)?
     private let powerGuard: (any SyncPowerGuard)?
     private let onStatus: @Sendable (SyncServerStatus) -> Void
     let queue = DispatchQueue(label: "EmberSyncKit.SyncServer")
@@ -262,12 +275,13 @@ public final class SyncServer: @unchecked Sendable {
     private var published: SyncServerStatus?
 
     public init(
-        credential: PairingCredential, provider: any WireContentProvider, configuration: Configuration = Configuration(),
-        powerGuard: (any SyncPowerGuard)? = SystemSleepAssertion(),
+        credential: PairingCredential, provider: any WireContentProvider, putReceiver: (any WirePutReceiver)? = nil,
+        configuration: Configuration = Configuration(), powerGuard: (any SyncPowerGuard)? = SystemSleepAssertion(),
         onStatus: @escaping @Sendable (SyncServerStatus) -> Void = { _ in }
     ) {
         self.credential = credential
         self.provider = provider
+        self.putReceiver = putReceiver
         self.configuration = configuration
         self.powerGuard = powerGuard
         self.onStatus = onStatus
@@ -388,10 +402,25 @@ public final class SyncServer: @unchecked Sendable {
 
     func fileServed() { current.filesServed += 1 }
 
+    func backupFinished(_ outcome: WirePutOutcome) {
+        switch outcome {
+        case .stored:
+            current.backupsStored += 1
+            current.lastBackupAt = Date()
+        case .alreadyHeld:
+            current.lastBackupAt = Date()
+        case .failed(.cancelled):
+            break
+        case .failed:
+            current.backupsFailed += 1
+        }
+    }
+
     /// Recount connections and transfers, hold or schedule the release of the power assertion, and publish.
     func activityChanged() {
         current.connectedPeers = connections.values.filter(\.isReady).count
         current.activeTransfers = connections.values.reduce(0) { $0 + $1.activeTransfers }
+        current.activeUploads = connections.values.reduce(0) { $0 + $1.activeUploads }
         if connections.values.contains(where: \.isSending) {
             setPower(true)
         } else if powerHeld, !powerReleasePending {
@@ -440,6 +469,7 @@ final class SyncConnection: @unchecked Sendable {
     private let queue: DispatchQueue
     private let configuration: SyncServer.Configuration
     private let provider: any WireContentProvider
+    private let putReceiver: (any WirePutReceiver)?
     private var session: WireServerSession?
     private var tick: DispatchSourceTimer?
     private var inFlightBytes = 0
@@ -457,12 +487,15 @@ final class SyncConnection: @unchecked Sendable {
         queue = server.queue
         configuration = server.configuration
         provider = server.provider
+        putReceiver = server.putReceiver
     }
 
     var isReady: Bool { session != nil && !finished }
     var activeTransfers: Int { finished ? 0 : session?.activeTransfers ?? 0 }
-    /// A file transfer is open or library bytes are still queued: the power assertion should be held.
-    var isSending: Bool { !finished && (activeTransfers > 0 || contentInFlight > 0) }
+    var activeUploads: Int { finished ? 0 : session?.activeUploads ?? 0 }
+    /// A file transfer is open, library bytes are still queued, or an ink backup is arriving: the power assertion
+    /// should be held.
+    var isSending: Bool { !finished && (activeTransfers > 0 || contentInFlight > 0 || activeUploads > 0) }
 
     func start() {
         connection.stateUpdateHandler = { [weak self] state in self?.handle(state) }
@@ -482,7 +515,7 @@ final class SyncConnection: @unchecked Sendable {
         switch state {
         case .ready:
             guard session == nil, !finished else { return }
-            session = WireServerSession(provider: provider, limits: configuration.limits, now: .now)
+            session = WireServerSession(provider: provider, putReceiver: putReceiver, limits: configuration.limits, now: .now)
             startTicking()
             server?.connectionBecameReady(self)
             receiveNext()
@@ -540,7 +573,7 @@ final class SyncConnection: @unchecked Sendable {
             let out = session.receive(input, now: .now)
             input = Data()
             self.session = session
-            send(out.outbound, close: out.closeTransport)
+            send(out)
             guard !closing else { return server?.activityChanged() ?? () }
         } while session.hasPendingInput
         pump()
@@ -553,7 +586,7 @@ final class SyncConnection: @unchecked Sendable {
         while !closing, inFlightBytes < configuration.sendHighWater, var session, session.hasPendingData {
             let out = session.pull(now: .now, maxFrames: 8)
             self.session = session
-            send(out.outbound, close: out.closeTransport)
+            send(out)
         }
         server?.activityChanged()
     }
@@ -565,14 +598,24 @@ final class SyncConnection: @unchecked Sendable {
             guard let self, !closing, !finished, var session else { return }
             let out = session.tick(now: .now)
             self.session = session
-            send(out.outbound, close: out.closeTransport)
+            send(out)
             pump()
         }
         tick = timer
         timer.resume()
     }
 
-    private func send(_ frames: [WireMessage], close: Bool) {
+    private func send(_ out: WireServerOutput) {
+        // A backup PUT's outcome is its own: a failed backup never makes the library sync count as failed.
+        var puts = Set<WireRequestID>()
+        for case .put(let id, let outcome) in out.events {
+            puts.insert(id)
+            server?.backupFinished(outcome)
+        }
+        send(out.outbound, close: out.closeTransport, puts: puts)
+    }
+
+    private func send(_ frames: [WireMessage], close: Bool, puts: Set<WireRequestID> = []) {
         var carriesContent = false
         for frame in frames {
             switch frame {
@@ -583,7 +626,7 @@ final class SyncConnection: @unchecked Sendable {
                 carriesContent = true
             case .end:
                 server?.fileServed()
-            case .error(.some, let code) where code != .cancelled:
+            case .error(.some(let id), let code) where code != .cancelled && !puts.contains(id):
                 failedRequests += 1
             default:
                 break
