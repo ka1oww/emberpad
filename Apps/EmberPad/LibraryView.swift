@@ -388,6 +388,7 @@ struct SyncFooterContent: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         .tint(Theme.accent)
+                        .disabled(status.isBusy)
                 } else {
                     Button("Pair with Mac…", action: onPair)
                         .buttonStyle(.bordered)
@@ -430,11 +431,13 @@ struct SyncFooterStatus {
     let notice: String?
     /// EP-33: the ink backup's own line (last backup, or why it did not finish), so it never reads as a failed sync.
     let backupLine: String?
+    let isBusy: Bool
 
     init(paired: PairingController.Paired?, phase: SyncClient.Phase, lastSynced: Date?, notice: String?,
          lastBackedUp: Date? = nil, backupNotice: String? = nil) {
         self.paired = paired
-        self.notice = notice
+        if case .idle = phase { isBusy = false } else { isBusy = true }
+        if case .idle = phase { self.notice = notice } else { self.notice = nil }
         if let backupNotice, case .idle = phase {
             backupLine = backupNotice
         } else if let lastBackedUp {
