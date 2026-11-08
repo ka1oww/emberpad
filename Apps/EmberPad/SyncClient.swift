@@ -64,10 +64,8 @@ final class SyncClient: ObservableObject {
     /// system's own description. No networking behaviour changes.
     nonisolated static func notice(for error: Error) -> String? {
         switch error {
-        case LibrarySyncConnectError.macNotFound:
-            return LibrarySyncConnectError.macNotFound.errorDescription
         case is LibrarySyncConnectError:
-            return "EmberPad could not look for your Mac. Check that Local Network access is on for EmberPad in Settings."
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         case NetworkWireTransportError.connectFailed:
             return "The Mac refused this pairing. If the Companion forgot this iPad, pair again with a new code."
         case NetworkWireTransportError.connectTimedOut:
