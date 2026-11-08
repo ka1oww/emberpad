@@ -11,65 +11,155 @@ final class TeacherCopyCardTests: XCTestCase {
     private let landscape = CGSize(width: 1180, height: 700)
     private let portrait = CGSize(width: 820, height: 1000)
 
-    // MARK: Geometry
+    // MARK: Geometry (Slide Over style panel)
 
-    func testCardSizeFollowsOrientationAndMinimum() {
-        let wide = TeacherCopyCardGeometry.size(in: landscape)
-        XCTAssertEqual(wide.width, 380)
-        XCTAssertEqual(wide.height, 700 * 0.66, accuracy: 0.001)
-        let tall = TeacherCopyCardGeometry.size(in: portrait)
-        XCTAssertEqual(tall.width, 380)
-        XCTAssertEqual(tall.height, 1000 * 0.52, accuracy: 0.001)
-        // 66% of 500 is 330, below the 360 pt minimum.
-        XCTAssertEqual(TeacherCopyCardGeometry.size(in: CGSize(width: 1000, height: 500)).height, 360)
+    func testPanelIsTallAndDocksInsetAgainstEitherEdge() {
+        for container in [landscape, portrait] {
+            let size = TeacherCopyCardGeometry.size(in: container)
+            XCTAssertEqual(size, CGSize(width: 380, height: container.height - 32))
+            XCTAssertEqual(TeacherCopyCardGeometry.origin(for: .leading, panelSize: size, in: container), CGPoint(x: 16, y: 16))
+            XCTAssertEqual(TeacherCopyCardGeometry.origin(for: .trailing, panelSize: size, in: container),
+                           CGPoint(x: container.width - 380 - 16, y: 16))
+        }
     }
 
-    func testCardNeverExceedsTheBodyMinusItsInset() {
+    func testPanelNeverExceedsTheBodyMinusItsInset() {
         let tiny = TeacherCopyCardGeometry.size(in: CGSize(width: 300, height: 380))
         XCTAssertLessThanOrEqual(tiny.width, 300 - 32)
         XCTAssertLessThanOrEqual(tiny.height, 380 - 32)
     }
 
-    func testCornersRestSixteenPointsFromTheEdges() {
+    func testDraggingIsHorizontalAndCanLeaveEitherEdge() {
         let size = TeacherCopyCardGeometry.size(in: landscape)
-        XCTAssertEqual(TeacherCopyCardGeometry.origin(for: .topLeading, cardSize: size, in: landscape), CGPoint(x: 16, y: 16))
-        XCTAssertEqual(TeacherCopyCardGeometry.origin(for: .topTrailing, cardSize: size, in: landscape),
-                       CGPoint(x: 1180 - 380 - 16, y: 16))
-        XCTAssertEqual(TeacherCopyCardGeometry.origin(for: .bottomLeading, cardSize: size, in: landscape),
-                       CGPoint(x: 16, y: 700 - size.height - 16))
-        XCTAssertEqual(TeacherCopyCardGeometry.origin(for: .bottomTrailing, cardSize: size, in: landscape),
-                       CGPoint(x: 1180 - 380 - 16, y: 700 - size.height - 16))
+        XCTAssertEqual(TeacherCopyCardGeometry.draggedX(side: .trailing, translation: 100, panelSize: size, in: landscape),
+                       1180 - 380 - 16 + 100)
+        XCTAssertEqual(TeacherCopyCardGeometry.draggedX(side: .trailing, translation: 9000, panelSize: size, in: landscape), 1180)
+        XCTAssertEqual(TeacherCopyCardGeometry.draggedX(side: .leading, translation: -9000, panelSize: size, in: landscape), -380)
     }
 
-    func testDraggingIsClampedInsideTheBody() {
-        let size = TeacherCopyCardGeometry.size(in: landscape)
-        XCTAssertEqual(TeacherCopyCardGeometry.clamp(CGPoint(x: -500, y: -500), cardSize: size, in: landscape), CGPoint(x: 16, y: 16))
-        let far = TeacherCopyCardGeometry.clamp(CGPoint(x: 9000, y: 9000), cardSize: size, in: landscape)
-        XCTAssertEqual(far, TeacherCopyCardGeometry.origin(for: .bottomTrailing, cardSize: size, in: landscape))
-        let inside = CGPoint(x: 300, y: 100)
-        XCTAssertEqual(TeacherCopyCardGeometry.clamp(inside, cardSize: size, in: landscape), inside)
-    }
-
-    func testReleaseSnapsToTheNearestCorner() {
+    func testDraggingOffItsEdgeHidesThePanel() {
         for container in [landscape, portrait] {
             let size = TeacherCopyCardGeometry.size(in: container)
-            for corner in TeacherCopyCardCorner.allCases {
-                let origin = TeacherCopyCardGeometry.origin(for: corner, cardSize: size, in: container)
-                // Released a little off the corner, towards the middle, it returns to the same corner.
-                let nudged = CGPoint(x: origin.x + (corner.isTrailing ? -40 : 40), y: origin.y + (corner.isBottom ? -40 : 40))
-                XCTAssertEqual(TeacherCopyCardGeometry.nearestCorner(toOrigin: nudged, cardSize: size, in: container), corner)
+            for side in TeacherCopyPanelSide.allCases {
+                let far = 200 * side.outward, near = 60 * side.outward
+                XCTAssertEqual(TeacherCopyCardGeometry.release(side: side, translation: far, predictedTranslation: far,
+                                                               panelSize: size, in: container), .hide)
+                XCTAssertEqual(TeacherCopyCardGeometry.release(side: side, translation: near, predictedTranslation: near,
+                                                               panelSize: size, in: container), .dock(side),
+                               "A short drag springs back")
+                XCTAssertEqual(TeacherCopyCardGeometry.release(side: side, translation: near, predictedTranslation: 400 * side.outward,
+                                                               panelSize: size, in: container), .hide, "A flick off the edge hides it")
             }
         }
     }
 
-    func testOrientationComesFromTheBodyShape() {
-        XCTAssertEqual(TeacherCopyCardOrientation(containerSize: landscape), .landscape)
-        XCTAssertEqual(TeacherCopyCardOrientation(containerSize: portrait), .portrait)
+    func testDraggingAcrossTheMiddleMovesItToTheOtherSide() {
+        let size = TeacherCopyCardGeometry.size(in: landscape)
+        XCTAssertEqual(TeacherCopyCardGeometry.release(side: .trailing, translation: -700, predictedTranslation: -750,
+                                                       panelSize: size, in: landscape), .dock(.leading))
+        XCTAssertEqual(TeacherCopyCardGeometry.release(side: .leading, translation: 700, predictedTranslation: 750,
+                                                       panelSize: size, in: landscape), .dock(.trailing))
+        XCTAssertEqual(TeacherCopyCardGeometry.release(side: .trailing, translation: -200, predictedTranslation: -220,
+                                                       panelSize: size, in: landscape), .dock(.trailing))
     }
 
-    func testCornerRawValuesAreStableForSceneStorage() {
-        XCTAssertEqual(TeacherCopyCardCorner.allCases.map(\.rawValue), ["topLeading", "topTrailing", "bottomLeading", "bottomTrailing"])
-        for corner in TeacherCopyCardCorner.allCases { XCTAssertEqual(TeacherCopyCardCorner(rawValue: corner.rawValue), corner) }
+    func testDraggingTheGrabberInwardsShowsThePanel() {
+        XCTAssertTrue(TeacherCopyCardGeometry.grabberOpens(side: .trailing, translation: -60, predictedTranslation: -60))
+        XCTAssertTrue(TeacherCopyCardGeometry.grabberOpens(side: .leading, translation: 60, predictedTranslation: 60))
+        XCTAssertTrue(TeacherCopyCardGeometry.grabberOpens(side: .trailing, translation: -20, predictedTranslation: -120), "a flick in")
+        XCTAssertFalse(TeacherCopyCardGeometry.grabberOpens(side: .trailing, translation: 60, predictedTranslation: 60), "outwards")
+        XCTAssertFalse(TeacherCopyCardGeometry.grabberOpens(side: .leading, translation: 10, predictedTranslation: 20))
+    }
+
+    func testSideRawValuesAreStableForPersistence() {
+        XCTAssertEqual(TeacherCopyPanelSide.allCases.map(\.rawValue), ["leading", "trailing"])
+        XCTAssertEqual(TeacherCopyPanelSide.leading.opposite, .trailing)
+    }
+
+    // MARK: Open state and side (persisted, not @SceneStorage)
+
+    func testCloseSetsIsOpenFalseAndTheEdgeTabReopens() {
+        let card = TeacherCopyCardState(defaults: freshDefaults())
+        card.worksheetOpened(hasTeacherCopy: true)
+        XCTAssertTrue(card.isOpen)
+        card.close()
+        XCTAssertFalse(card.isOpen)
+        card.open()
+        XCTAssertTrue(card.isOpen)
+    }
+
+    func testBookToggleFlipsItsAccessibilityLabel() {
+        let card = TeacherCopyCardState(defaults: freshDefaults())
+        card.worksheetOpened(hasTeacherCopy: true)
+        XCTAssertEqual(card.toggleAccessibilityLabel, "Hide Teacher copy")
+        card.toggle()
+        XCTAssertFalse(card.isOpen)
+        XCTAssertEqual(card.toggleAccessibilityLabel, "Show Teacher copy")
+        card.toggle()
+        XCTAssertTrue(card.isOpen)
+        XCTAssertEqual(card.toggleAccessibilityLabel, "Hide Teacher copy")
+    }
+
+    func testOpenStateAndSideSurviveRelaunch() {
+        let defaults = freshDefaults()
+        let first = TeacherCopyCardState(defaults: defaults)
+        XCTAssertEqual(first.side, .trailing, "Docks on the right by default, like Slide Over")
+        first.dock(.leading)
+        first.close()
+
+        let relaunched = TeacherCopyCardState(defaults: defaults)
+        XCTAssertFalse(relaunched.isOpen)
+        XCTAssertEqual(relaunched.side, .leading)
+        relaunched.worksheetOpened(hasTeacherCopy: true)
+        XCTAssertFalse(relaunched.isOpen, "A panel the teacher hid stays hidden on the next worksheet")
+    }
+
+    func testReleasingThePanelHidesOrDocksIt() {
+        let card = TeacherCopyCardState(defaults: freshDefaults())
+        card.worksheetOpened(hasTeacherCopy: true)
+        card.apply(.hide)
+        XCTAssertFalse(card.isOpen)
+        XCTAssertEqual(card.side, .trailing, "Hiding keeps the side, so the grabber stays on that edge")
+        card.apply(.dock(.leading))
+        XCTAssertTrue(card.isOpen)
+        XCTAssertEqual(card.side, .leading)
+    }
+
+    func testAWorksheetWithoutATeacherCopyStartsClosedAndKeepsTheRememberedChoice() {
+        let defaults = freshDefaults()
+        let card = TeacherCopyCardState(defaults: defaults)
+        card.worksheetOpened(hasTeacherCopy: false)
+        XCTAssertFalse(card.isOpen, "Only the edge tab shows when there is no Teacher copy")
+        XCTAssertEqual(card.toggleAccessibilityLabel, "Show Teacher copy")
+        card.worksheetOpened(hasTeacherCopy: true)
+        XCTAssertTrue(card.isOpen, "The next paired worksheet opens the card again")
+    }
+
+    // MARK: Answer key
+
+    func testAPairedWorksheetsCardResolvesToItsTeacherCopyPDF() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ep34-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
+        let student = try await importSynthetic(role: .student, paper: "synthetic-paired", into: store)
+        let teacher = try await importSynthetic(role: .teacher, paper: "synthetic-paired", into: store)
+        let unpaired = try await importSynthetic(role: .student, paper: "synthetic-unpaired", into: store)
+        let library = LibraryController(store: store, inbox: root.appendingPathComponent("Inbox"))
+
+        let pairedRecord = try await store.document(student.id)
+        XCTAssertEqual(pairedRecord.pairedDocumentID, teacher.id)
+        let resolved = await library.teacherCopyURL(for: pairedRecord)
+        let answers = try XCTUnwrap(resolved)
+        let teacherOriginal = try await store.originalURL(documentID: teacher.id)
+        XCTAssertEqual(answers, teacherOriginal)
+        let shown = PresentationPolicy(captureActive: false, externalSceneCount: 1, mainSceneActive: true)
+        XCTAssertEqual(TeacherCopyCardContent.resolve(policy: shown, mainSceneActive: true, privateAnswerURL: answers), .pdf(teacherOriginal))
+
+        let unpairedAnswers = await library.teacherCopyURL(for: try await store.document(unpaired.id))
+        XCTAssertNil(unpairedAnswers)
+        // A Teacher copy's own pairing points at the Student copy, which is never an answer key.
+        let teacherAnswers = await library.teacherCopyURL(for: try await store.document(teacher.id))
+        XCTAssertNil(teacherAnswers)
     }
 
     // MARK: States and privacy
@@ -166,24 +256,42 @@ final class TeacherCopyCardTests: XCTestCase {
                 .background(Theme.canvas)
             try save(snapshot(tab, size: CGSize(width: 120, height: 200), scheme: scheme), as: "teacher-card-edge-tab-\(suffix)")
 
-            // The card over a synthetic worksheet body, in each orientation and a different corner.
-            for (orientationName, container, corner) in [("landscape", landscape, TeacherCopyCardCorner.topLeading),
-                                                         ("portrait", portrait, .bottomTrailing)] {
-                let worksheet = SyntheticWorksheetBody(
-                    content: .pdf(url), title: title, isOpen: true,
-                    landscape: orientationName == "landscape" ? corner : .topLeading,
-                    portrait: orientationName == "portrait" ? corner : .topLeading)
+            // The panel over a synthetic worksheet body, in each orientation and on a different side.
+            for (orientationName, container, side) in [("landscape", landscape, TeacherCopyPanelSide.trailing),
+                                                       ("portrait", portrait, .leading)] {
+                let worksheet = SyntheticWorksheetBody(content: .pdf(url), title: title, isOpen: true, side: side)
                     .frame(width: container.width, height: container.height)
                 try save(snapshot(worksheet, size: container, scheme: scheme),
                          as: "teacher-card-over-worksheet-\(orientationName)-\(suffix)")
             }
-            let closed = SyntheticWorksheetBody(content: .pdf(url), title: title, isOpen: false, landscape: .topLeading, portrait: .topLeading)
+            let closed = SyntheticWorksheetBody(content: .pdf(url), title: title, isOpen: false, side: .trailing)
                 .frame(width: landscape.width, height: landscape.height)
             try save(snapshot(closed, size: landscape, scheme: scheme), as: "teacher-card-closed-edge-tab-\(suffix)")
         }
     }
 
     // MARK: Helpers
+
+    private func freshDefaults() -> UserDefaults {
+        let name = "TeacherCopyCardTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return defaults
+    }
+
+    private func importSynthetic(role: DocumentRole, paper: String, into store: LibraryStore) async throws -> DocumentRecord {
+        let bounds = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let data = UIGraphicsPDFRenderer(bounds: bounds).pdfData { context in
+            context.beginPage()
+            ("Synthetic \(paper) \(role.rawValue)" as NSString).draw(at: CGPoint(x: 72, y: 72), withAttributes: nil)
+        }
+        let publication = try Publication(subject: "Synthetic Subject", paperKey: PaperKey(rawValue: paper),
+                                          role: role, title: "Synthetic \(paper) (\(role.rawValue))")
+        let entry = try ManifestEntry(source: SourcePath(classFolder: "Synthetic Subject", relativePath: "\(paper)-\(role.rawValue).pdf"),
+                                      sha256: .digest(data), size: Int64(data.count), modifiedAt: Date(timeIntervalSince1970: 0),
+                                      publication: publication)
+        return try await store.importPDF(data: data, entry: entry, pageCount: 1)
+    }
 
     private func record(role: DocumentRole) throws -> DocumentRecord {
         let data = Data("synthetic".utf8)
@@ -263,16 +371,15 @@ final class TeacherCopyCardTests: XCTestCase {
 private struct SyntheticWorksheetBody: View {
     let content: TeacherCopyCardContent
     let title: String
-    @State var isOpen: Bool
-    @State var landscape: TeacherCopyCardCorner
-    @State var portrait: TeacherCopyCardCorner
+    @State var card: TeacherCopyCardState
 
-    init(content: TeacherCopyCardContent, title: String, isOpen: Bool, landscape: TeacherCopyCardCorner, portrait: TeacherCopyCardCorner) {
+    init(content: TeacherCopyCardContent, title: String, isOpen: Bool, side: TeacherCopyPanelSide) {
         self.content = content
         self.title = title
-        _isOpen = State(initialValue: isOpen)
-        _landscape = State(initialValue: landscape)
-        _portrait = State(initialValue: portrait)
+        let card = TeacherCopyCardState(defaults: UserDefaults(suiteName: "SyntheticWorksheetBody-\(UUID().uuidString)")!)
+        card.dock(side)
+        if !isOpen { card.close() }
+        _card = State(initialValue: card)
     }
 
     var body: some View {
@@ -289,8 +396,7 @@ private struct SyntheticWorksheetBody: View {
             .frame(maxWidth: 700, maxHeight: .infinity, alignment: .topLeading)
             .background(Color.white)
             .frame(maxWidth: .infinity)
-            TeacherCopyCardOverlay(content: content, documentTitle: title, isOpen: $isOpen,
-                                   landscapeCorner: $landscape, portraitCorner: $portrait)
+            TeacherCopyCardOverlay(content: content, documentTitle: title, card: card)
         }
     }
 }

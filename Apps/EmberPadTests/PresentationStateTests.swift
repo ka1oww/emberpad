@@ -11,6 +11,19 @@ final class PresentationStateTests: XCTestCase {
         XCTAssertNil(state.privateAnswerURL)
     }
 
+    func testOnlyTheEditorThatSetTheAnswersClearsThem() {
+        let state = PresentationState()
+        let closing = UUID(), opening = UUID()
+        let answers = URL(fileURLWithPath: "/tmp/synthetic-teacher.pdf")
+        state.showPrivateAnswers(URL(fileURLWithPath: "/tmp/synthetic-other.pdf"), owner: closing)
+        // The next editor loads before the previous one's onDisappear runs.
+        state.showPrivateAnswers(answers, owner: opening)
+        state.clearPrivateAnswers(owner: closing)
+        XCTAssertEqual(state.privateAnswerURL, answers)
+        state.clearPrivateAnswers(owner: opening)
+        XCTAssertNil(state.privateAnswerURL)
+    }
+
     func testMainSceneActivityDrivesPause() {
         let state = PresentationState()
         state.mainSceneActive = true

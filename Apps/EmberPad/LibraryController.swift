@@ -221,6 +221,14 @@ final class LibraryController: ObservableObject {
         return session
     }
 
+    /// The stored original of the Teacher copy paired with a Student worksheet: the Teacher copy card's answer key.
+    /// `nil` for a Teacher copy itself, an unpaired worksheet, or a pairing whose file cannot be read.
+    func teacherCopyURL(for record: DocumentRecord) async -> URL? {
+        guard record.role == .student, let pairedID = record.pairedDocumentID,
+              let paired = try? await store.document(pairedID), paired.role == .teacher else { return nil }
+        return try? await store.originalURL(documentID: pairedID)
+    }
+
     /// The open editor session for `id`, if any. Export reads its in-memory ink.
     func liveSession(for id: UUID) -> DocumentSession? { sessions[id] }
 
