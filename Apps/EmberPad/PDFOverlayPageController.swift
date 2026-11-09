@@ -436,7 +436,7 @@ extension PDFOverlayPageController {
         let snaps = switch tools.current {
         case .highlighter: settings.highlighterAlwaysStraight || (hold.isHeld && settings.straightHighlighter)
         case .pen: hold.isHeld && settings.penDrawAndHold && hold.lineLikeAtHold
-        case .lasso, .eraser: false
+        case .lasso, .eraser, .laser: false
         }
         guard snaps else {
             holdGuide.removeFromSuperlayer()
