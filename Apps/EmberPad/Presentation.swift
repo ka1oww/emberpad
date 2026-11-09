@@ -115,6 +115,8 @@ final class StudentDisplayModel: ObservableObject {
     /// Strokes in progress over the published page. Published beside `content`, so the update that brings a stroke's
     /// committed drawing also removes its provisional copy, and the student view never shows both or neither.
     @Published private(set) var liveInk: StudentLiveInk?
+    /// The laser pointer's dot (P6), while the Pencil points. Never part of any drawing, and gated like live ink.
+    @Published private(set) var laser: StudentLaserPointer?
     var snapshot: StudentPageSnapshot? { content.snapshot }
     private let now: () -> TimeInterval
     private let schedule: MirrorThrottle.Scheduler
@@ -134,20 +136,41 @@ final class StudentDisplayModel: ObservableObject {
             if let current = content.snapshot, current.showsSameFrame(as: next) { return settleLiveInk(session) }
             content = .page(next)
             settleLiveInk(session)
+            if let laser, !laser.belongs(to: next) { self.laser = nil }
         }
-        catch StudentViewError.teacherCopyIsPrivate { content = .teacherCopyPrivate; setLiveInk(nil) }
-        catch { content = .none; setLiveInk(nil) } // Never leave a stale page from another document or page.
+        catch StudentViewError.teacherCopyIsPrivate { content = .teacherCopyPrivate; setLiveInk(nil); hideLaser() }
+        catch { content = .none; setLiveInk(nil); hideLaser() } // Never leave a stale page from another document or page.
     }
 
     /// Called as soon as a document becomes the main page, before any renderer publishes a page.
     func opened(_ record: DocumentRecord) {
         content = StudentSafeDocument(record) == nil ? .teacherCopyPrivate : .none
         setLiveInk(nil)
+        hideLaser()
     }
 
     func clear() {
         content = .none
         setLiveInk(nil)
+        hideLaser()
+    }
+
+    // MARK: Laser pointer (P6)
+
+    /// Shows the laser dot at `location` on `pageIndex`, in that page's ink space. Refused unless the student view is
+    /// showing this same Student session's page, so the dot passes the same role gate as ink.
+    func pointLaser(session: DocumentSession, pageIndex: Int, location: CGPoint) {
+        guard let snapshot = content.snapshot, snapshot.sessionID == session.instanceID,
+              snapshot.documentID == session.record.id,
+              let next = try? StudentLaserPointer(session: session, pageIndex: pageIndex, location: location) else {
+            return hideLaser()
+        }
+        if next != laser { laser = next }
+    }
+
+    /// The Pencil lifted or left the pages: the dot goes at once.
+    func hideLaser() {
+        if laser != nil { laser = nil }
     }
 
     // MARK: Live ink (EP-30)
@@ -256,7 +279,8 @@ struct StudentDisplayView: View {
             if model.paused { Text("Paused").font(.largeTitle).foregroundStyle(.white) }
             else {
                 switch model.content {
-                case .page(let snapshot): StudentPageSurface(snapshot: snapshot, framing: model.framing, liveInk: model.liveInk)
+                case .page(let snapshot):
+                    StudentPageSurface(snapshot: snapshot, framing: model.framing, liveInk: model.liveInk, laser: model.laser)
                 case .teacherCopyPrivate: Text("Teacher copy · private").font(.largeTitle).foregroundStyle(.white)
                 case .none: Text("No worksheet selected").foregroundStyle(.white)
                 }
@@ -269,8 +293,11 @@ private struct StudentPageSurface: UIViewRepresentable {
     let snapshot: StudentPageSnapshot
     let framing: StudentFraming
     let liveInk: StudentLiveInk?
+    let laser: StudentLaserPointer?
     func makeUIView(context: Context) -> StudentPageDrawingView { StudentPageDrawingView() }
-    func updateUIView(_ uiView: StudentPageDrawingView, context: Context) { uiView.update(snapshot, framing: framing, liveInk: liveInk) }
+    func updateUIView(_ uiView: StudentPageDrawingView, context: Context) {
+        uiView.update(snapshot, framing: framing, liveInk: liveInk, laser: laser)
+    }
 }
 
 /// Draws the snapshot by compositing cached page and ink bitmaps in layers. A scroll or zoom frame only moves layer
@@ -295,11 +322,14 @@ final class StudentPageDrawingView: UIView {
     private var inkLayers: [CALayer] = []
     private let liveLayer = CALayer()
     private var liveStrokeLayers: [CAShapeLayer] = []
+    /// The laser pointer's dot, above live ink. Placed like a live stroke, so a Pencil move never re-rasterises.
+    private let laserLayer = CALayer()
     /// Where each laid-out page sits in the viewport layer, for placing live strokes between full layouts.
     private var placedPages: [Int: (frame: CGRect, pageSize: CGSize)] = [:]
     private var snapshot: StudentPageSnapshot?
     private var framing: StudentFraming = .presenterPage
     private var liveInk: StudentLiveInk?
+    private var laser: StudentLaserPointer?
     let cache = StudentPageImageCache()
 
     override init(frame: CGRect) {
@@ -310,16 +340,21 @@ final class StudentPageDrawingView: UIView {
         viewport.backgroundColor = UIColor.emberCanvas.resolvedColor(with: Self.light).cgColor
         liveLayer.zPosition = 1 // Above every page and ink bitmap, however many are added later.
         viewport.addSublayer(liveLayer)
+        laserLayer.zPosition = 1
+        laserLayer.isHidden = true
+        liveLayer.addSublayer(laserLayer)
         layer.addSublayer(viewport)
     }
     required init?(coder: NSCoder) { nil }
 
-    func update(_ value: StudentPageSnapshot, framing: StudentFraming, liveInk: StudentLiveInk? = nil) {
+    func update(_ value: StudentPageSnapshot, framing: StudentFraming, liveInk: StudentLiveInk? = nil,
+                laser: StudentLaserPointer? = nil) {
         if snapshot?.documentID != value.documentID || snapshot?.sessionID != value.sessionID { cache.removeAll() }
         let sameFrame = snapshot.map { $0.showsSameFrame(as: value) } == true && self.framing == framing
         snapshot = value
         self.framing = framing
         self.liveInk = liveInk
+        self.laser = laser
         // A Pencil move changes only the live paths. A new page frame lays everything out in one pass, so a stroke's
         // committed bitmap and the removal of its provisional copy land in the same frame.
         if sameFrame { layoutLiveInk() } else { setNeedsLayout() }
@@ -327,6 +362,12 @@ final class StudentPageDrawingView: UIView {
 
     /// The live stroke layers currently drawn, for tests.
     var visibleLiveStrokeLayers: [CAShapeLayer] { liveStrokeLayers.filter { !$0.isHidden } }
+
+    /// The laser dot's centre and diameter in this view's coordinates while it is drawn, for tests.
+    var visibleLaserDot: (center: CGPoint, diameter: CGFloat)? {
+        guard !laserLayer.isHidden, !viewport.isHidden else { return nil }
+        return (viewport.convert(laserLayer.position, to: layer), laserLayer.bounds.width)
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -406,6 +447,20 @@ final class StudentPageDrawingView: UIView {
             shape.lineWidth = stroke.style.width * placed.frame.width / max(placed.pageSize.width, 1)
             shape.path = LiveInkGeometry.path(LiveInkGeometry.map(stroke.displayPoints, pageSize: placed.pageSize, onto: placed.frame))
         }
+        layoutLaser()
+    }
+
+    /// Places the laser dot over its page; a dot on a page not in view is not drawn.
+    private func layoutLaser() {
+        guard let snapshot, let laser, laser.belongs(to: snapshot), let placed = placedPages[laser.pageIndex],
+              let center = LiveInkGeometry.map([laser.location], pageSize: placed.pageSize, onto: placed.frame).first,
+              placed.frame.contains(center) else {
+            laserLayer.isHidden = true
+            return
+        }
+        LaserDotStyle.style(laserLayer, diameter: LaserDotStyle.studentDiameter(for: liveLayer.bounds.size))
+        laserLayer.position = center
+        laserLayer.isHidden = false
     }
 
     private func scene(for snapshot: StudentPageSnapshot) -> Scene? {

@@ -2,10 +2,11 @@ import Observation
 import PencilKit
 import UIKit
 
-/// The four selectable tools on the worksheet toolbar strip (design 5.4).
+/// The selectable tools on the worksheet toolbar strip (design 5.4).
 /// The eraser's partial or whole-stroke behaviour is a setting, not a tool.
+/// The laser pointer (P6) only points: it never makes ink.
 enum WorksheetTool: String, CaseIterable, Codable, Sendable {
-    case lasso, pen, highlighter, eraser
+    case lasso, pen, highlighter, eraser, laser
 
     var title: String {
         switch self {
@@ -13,6 +14,7 @@ enum WorksheetTool: String, CaseIterable, Codable, Sendable {
         case .pen: "Fountain pen"
         case .highlighter: "Highlighter"
         case .eraser: "Eraser"
+        case .laser: "Laser pointer"
         }
     }
 
@@ -22,6 +24,7 @@ enum WorksheetTool: String, CaseIterable, Codable, Sendable {
         case .pen: "pencil.tip"
         case .highlighter: "highlighter"
         case .eraser: "eraser"
+        case .laser: "circle.circle"
         }
     }
 }
@@ -137,7 +140,9 @@ struct ToolSettings: Codable, Equatable, Sendable {
             case .partial: PKEraserTool(.fixedWidthBitmap, width: eraserSize)
             case .wholeStroke: PKEraserTool(.vector)
             }
-        case .lasso: PKLassoTool()
+        // The laser never inks: the canvases' drawing recogniser is off while it is chosen, and a lasso tool is
+        // not an inking tool, so no live ink can be built from it either.
+        case .lasso, .laser: PKLassoTool()
         }
     }
 
@@ -373,6 +378,7 @@ private extension ToolSettings {
         case .highlighter: "highlighter \(highlighterColors[highlighterColorIndex]) \(highlighterWidthIndex)"
         case .eraser: "eraser \(eraserMode.rawValue) \(eraserSizeIndex)"
         case .lasso: "lasso"
+        case .laser: "laser"
         }
     }
 }

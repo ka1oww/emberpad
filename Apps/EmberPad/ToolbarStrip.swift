@@ -6,9 +6,10 @@ extension WorksheetTool: Identifiable {
 }
 
 /// A greyed placeholder on the strip. Positions are fixed now so nothing moves
-/// when the real tools ship (design 5.4).
+/// when the real tools ship (design 5.4). The laser pointer shipped (P6) and
+/// sits in its old place, after these.
 enum ToolbarExtra: String, CaseIterable, Identifiable {
-    case shapes, text, image, laser
+    case shapes, text, image
 
     var id: String { rawValue }
 
@@ -17,7 +18,6 @@ enum ToolbarExtra: String, CaseIterable, Identifiable {
         case .shapes: "Shapes"
         case .text: "Text"
         case .image: "Image"
-        case .laser: "Laser pointer"
         }
     }
 
@@ -26,13 +26,12 @@ enum ToolbarExtra: String, CaseIterable, Identifiable {
         case .shapes: "square.on.circle"
         case .text: "textformat"
         case .image: "photo"
-        case .laser: "circle.circle"
         }
     }
 }
 
 /// The worksheet toolbar strip under the nav bar: lasso | pen, highlighter,
-/// eraser | greyed extras | the active tool menu (design 5.4). Tapping the
+/// eraser | greyed extras, laser pointer | the active tool menu (design 5.4). Tapping the
 /// selected tool again opens its settings popover.
 struct ToolbarStrip: View {
     let tools: ToolState
@@ -53,6 +52,7 @@ struct ToolbarStrip: View {
                             tools.showToast(symbol: extra.symbol, text: "\(extra.title) · coming later")
                         }
                     }
+                    toolButton(.laser)
                     Spacer(minLength: 16)
                     ActiveToolMenu(tools: tools)
                 }
@@ -157,6 +157,11 @@ private struct ActiveToolMenu: View {
                     .opacity(tools.settings.eraserMode == .partial ? 1 : 0.4)
             case .lasso:
                 Text("Circle ink to select · then drag, or Cut / Copy / Duplicate / Delete")
+                    .font(Theme.meta)
+                    .foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+            case .laser:
+                Text("Dot · point with the Pencil · nothing is written")
                     .font(Theme.meta)
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1)
@@ -301,6 +306,13 @@ struct ToolSettingsPopover: View {
                     TaggedRow(title: "Rectangle", tag: "Later")
                     TaggedRow(title: "Select only ink, or only highlighter", tag: "Later")
                 }
+            case .laser:
+                Section {
+                    CheckRow(title: "Dot", checked: true) {}
+                    TaggedRow(title: "Trail", tag: "Later")
+                } footer: {
+                    Text("A red dot follows the Pencil on this iPad and on the student view. Lift and it goes. It is never saved as ink.")
+                }
             }
         }
         .listStyle(.insetGrouped)
@@ -315,6 +327,7 @@ struct ToolSettingsPopover: View {
         case .highlighter: 580
         case .eraser: 300
         case .lasso: 230
+        case .laser: 250
         }
     }
 
