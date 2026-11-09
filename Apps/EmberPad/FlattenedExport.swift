@@ -16,6 +16,7 @@ enum FlattenedExportError: LocalizedError, Equatable {
     case unreadablePDF
     case noPages
     case corruptInk(page: Int)
+    case pageOutOfRange(page: Int)
 
     var errorDescription: String? {
         switch self {
@@ -23,6 +24,7 @@ enum FlattenedExportError: LocalizedError, Equatable {
         case .unreadablePDF: "The worksheet PDF could not be opened for export."
         case .noPages: "The worksheet has no pages to export."
         case .corruptInk(let page): "The saved ink on page \(page + 1) could not be read, so nothing was exported."
+        case .pageOutOfRange(let page): "Page \(page + 1) is not in this worksheet, so nothing was exported."
         }
     }
 }
@@ -34,14 +36,23 @@ enum FlattenedExport {
 
     /// Renders every page of `source`, drawing the matching ink (by zero-based page index)
     /// over it. The result has the same page count and page sizes as `source`.
+    /// With `page` set, only that zero-based page is rendered (Export This Page): the result
+    /// is a one-page PDF, and ink saved on other pages is neither read nor drawn.
     ///
     /// `drawings` holds `PKDrawing.dataRepresentation()` values so the work can run off the
     /// main actor. Ink is mapped from the canvas space used on screen (the page's displayed
     /// size, rotation applied, origin top left) onto the whole output page.
-    static func render(source: PDFDocument, drawings: [Int: Data], title: String) throws -> Data {
+    static func render(source: PDFDocument, drawings: [Int: Data], title: String, page only: Int? = nil) throws -> Data {
         guard source.pageCount > 0 else { throw FlattenedExportError.noPages }
+        let indices: Range<Int>
+        if let only {
+            guard only >= 0 && only < source.pageCount else { throw FlattenedExportError.pageOutOfRange(page: only) }
+            indices = only..<(only + 1)
+        } else {
+            indices = 0..<source.pageCount
+        }
         var decoded: [Int: PKDrawing] = [:]
-        for (page, data) in drawings where page >= 0 && page < source.pageCount {
+        for (page, data) in drawings where indices.contains(page) {
             do { decoded[page] = try PKDrawing(data: data) }
             catch { throw FlattenedExportError.corruptInk(page: page) }
         }
@@ -51,7 +62,7 @@ enum FlattenedExport {
         // The renderer needs a default bounds; each page below supplies its own.
         let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792), format: format)
         return renderer.pdfData { context in
-            for index in 0..<source.pageCount {
+            for index in indices {
                 guard let page = source.page(at: index) else { continue }
                 autoreleasepool {
                     let cropBox = page.bounds(for: .cropBox)
@@ -86,13 +97,15 @@ enum FlattenedExport {
         }
     }
 
-    /// `<title> (annotated).pdf` with path separators and control characters removed.
-    static func fileName(for record: DocumentRecord) -> String {
+    /// `<title> (annotated).pdf`, or `<title> p<N> (annotated).pdf` for one zero-based `page`,
+    /// with path separators and control characters removed.
+    static func fileName(for record: DocumentRecord, page: Int? = nil) -> String {
         let bad = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters).union(.newlines)
         var base = record.title.components(separatedBy: bad).joined(separator: " ")
             .split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
         if base.lowercased().hasSuffix(".pdf") { base = String(base.dropLast(4)).trimmingCharacters(in: .whitespaces) }
         if base.isEmpty { base = "Worksheet" }
+        if let page { return "\(base) p\(page + 1) (annotated).pdf" }
         return "\(base) (annotated).pdf"
     }
 
@@ -126,26 +139,30 @@ extension LibraryController {
     /// Renders a flattened copy of `id` into a temporary file and returns its URL.
     /// A document that is open in the editor contributes its latest in-memory ink, so
     /// strokes still waiting for the debounced save are included.
-    func exportFlattenedPDF(_ id: UUID) async throws -> URL {
+    /// With `page` set (zero-based), only that page is exported, as a one-page PDF named
+    /// `<title> p<N> (annotated).pdf` (Export This Page).
+    func exportFlattenedPDF(_ id: UUID, page only: Int? = nil) async throws -> URL {
         let record = try await store.document(id)
         guard record.role == .student else { throw FlattenedExportError.teacherCopy }
+        if let only, only < 0 || only >= record.pageCount { throw FlattenedExportError.pageOutOfRange(page: only) }
+        let pages = only.map { [$0] } ?? Array(0..<record.pageCount)
         let sourceURL = try await store.originalURL(documentID: id)
         var inkData: [Int: Data] = [:]
         if let live = liveSession(for: id), live.record.source.sha256 == record.source.sha256 {
-            for (page, drawing) in live.drawings where !drawing.strokes.isEmpty {
+            for (page, drawing) in live.drawings where pages.contains(page) && !drawing.strokes.isEmpty {
                 inkData[page] = drawing.dataRepresentation()
             }
         } else {
-            for page in 0..<record.pageCount {
+            for page in pages {
                 if let data = try await store.drawing(documentID: id, page: page) { inkData[page] = data }
             }
         }
         let title = record.title
-        let name = FlattenedExport.fileName(for: record)
+        let name = FlattenedExport.fileName(for: record, page: only)
         let ink = inkData
         let data = try await Task.detached(priority: .userInitiated) { () -> Data in
             guard let pdf = PDFDocument(url: sourceURL), !pdf.isLocked else { throw FlattenedExportError.unreadablePDF }
-            return try FlattenedExport.render(source: pdf, drawings: ink, title: title)
+            return try FlattenedExport.render(source: pdf, drawings: ink, title: title, page: only)
         }.value
         return try FlattenedExport.writeTemporary(data, fileName: name)
     }
@@ -176,12 +193,13 @@ final class FlattenedExportModel: ObservableObject {
     @Published var shareItem: ShareItem?
     @Published private(set) var isExporting = false
 
-    func export(_ id: UUID, library: LibraryController) {
+    /// Exports the whole worksheet, or only the zero-based `page` when it is set (Export This Page).
+    func export(_ id: UUID, page: Int? = nil, library: LibraryController) {
         guard !isExporting else { return }
         isExporting = true
         Task {
             defer { isExporting = false }
-            do { shareItem = ShareItem(url: try await library.exportFlattenedPDF(id)) }
+            do { shareItem = ShareItem(url: try await library.exportFlattenedPDF(id, page: page)) }
             catch { library.showError(error.localizedDescription) }
         }
     }

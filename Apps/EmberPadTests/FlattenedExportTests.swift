@@ -41,11 +41,13 @@ final class FlattenedExportTests: XCTestCase {
         }
     }
 
-    /// A thick red diagonal stroke across the lower half of a canvas of `size`.
-    private func redInk(on size: CGSize) -> PKDrawing {
+    /// A thick red diagonal stroke across the lower half of a canvas of `size`
+    /// (or the upper half with `top`, so one page's ink can be told apart from another's).
+    private func redInk(on size: CGSize, top: Bool = false) -> PKDrawing {
+        let start: CGFloat = top ? 0.1 : 0.6
         let points = (0..<20).map { i -> PKStrokePoint in
             let t = CGFloat(i) / 19
-            return PKStrokePoint(location: CGPoint(x: size.width * (0.2 + 0.6 * t), y: size.height * (0.6 + 0.2 * t)),
+            return PKStrokePoint(location: CGPoint(x: size.width * (0.2 + 0.6 * t), y: size.height * (start + 0.2 * t)),
                                  timeOffset: Double(i) * 0.01, size: CGSize(width: 14, height: 14),
                                  opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
         }
@@ -53,13 +55,19 @@ final class FlattenedExportTests: XCTestCase {
         return PKDrawing(strokes: [PKStroke(ink: PKInk(.pen, color: .red), path: path)])
     }
 
-    private func redPixelCount(in page: PDFPage) -> Int {
+    /// Red pixels on `page`, optionally only in its top or bottom half (as displayed).
+    private func redPixelCount(in page: PDFPage, half: Half? = nil) -> Int {
         let box = page.bounds(for: .cropBox)
         let image = page.thumbnail(of: CGSize(width: box.width, height: box.height), for: .cropBox)
         guard let cg = image.cgImage, let data = cg.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else { return 0 }
         let bpp = cg.bitsPerPixel / 8
         var count = 0
-        for y in 0..<cg.height {
+        let rows: Range<Int> = switch half {
+        case nil: 0..<cg.height
+        case .top: 0..<(cg.height / 2)
+        case .bottom: (cg.height / 2)..<cg.height
+        }
+        for y in rows {
             for x in 0..<cg.width {
                 let p = bytes + y * cg.bytesPerRow + x * bpp
                 // Channel order differs by bitmap info; red ink has one strong channel and two weak ones either way.
@@ -69,6 +77,8 @@ final class FlattenedExportTests: XCTestCase {
         }
         return count
     }
+
+    private enum Half { case top, bottom }
 
     // MARK: Rendering
 
@@ -124,6 +134,38 @@ final class FlattenedExportTests: XCTestCase {
         let stray = redInk(on: CGSize(width: 595, height: 842)).dataRepresentation()
         let data = try FlattenedExport.render(source: source, drawings: [9: stray, -1: stray], title: "Plain")
         XCTAssertEqual(try XCTUnwrap(PDFDocument(data: data)).pageCount, 3)
+    }
+
+    // MARK: Export This Page
+
+    func testThisPageRendersOnlyThatPageWithItsOwnInk() throws {
+        let source = try XCTUnwrap(PDFDocument(data: fixturePDF()))
+        let sizes = (0..<3).map { source.page(at: $0)!.bounds(for: .cropBox).size }
+        // Every page is inked; only page 1's ink sits in the bottom half.
+        let ink: [Int: Data] = [0: redInk(on: sizes[0], top: true).dataRepresentation(),
+                                1: redInk(on: sizes[1]).dataRepresentation(),
+                                2: redInk(on: sizes[2], top: true).dataRepresentation()]
+
+        let output = try XCTUnwrap(PDFDocument(data: try FlattenedExport.render(source: source, drawings: ink, title: "One page", page: 1)))
+
+        XCTAssertEqual(output.pageCount, 1)
+        let page = try XCTUnwrap(output.page(at: 0))
+        XCTAssertEqual(page.bounds(for: .cropBox).size, sizes[1], "keeps that page's own size")
+        XCTAssertGreaterThan(redPixelCount(in: page, half: .bottom), 500, "page 1's ink is drawn")
+        XCTAssertEqual(redPixelCount(in: page, half: .top), 0, "no other page's ink is drawn")
+        XCTAssertTrue((page.string ?? "").contains("Synthetic page 2"), "the page asked for, not the first")
+    }
+
+    func testThisPageIgnoresCorruptInkOnOtherPagesAndRejectsMissingPages() throws {
+        let source = try XCTUnwrap(PDFDocument(data: fixturePDF()))
+        let data = try FlattenedExport.render(source: source, drawings: [0: Data("not ink".utf8)], title: "x", page: 2)
+        XCTAssertEqual(try XCTUnwrap(PDFDocument(data: data)).pageCount, 1)
+        XCTAssertThrowsError(try FlattenedExport.render(source: source, drawings: [:], title: "x", page: 3)) {
+            XCTAssertEqual($0 as? FlattenedExportError, .pageOutOfRange(page: 3))
+        }
+        XCTAssertThrowsError(try FlattenedExport.render(source: source, drawings: [:], title: "x", page: -1)) {
+            XCTAssertEqual($0 as? FlattenedExportError, .pageOutOfRange(page: -1))
+        }
     }
 
     func testCorruptInkFailsLoudlyInsteadOfDroppingIt() throws {
@@ -189,6 +231,66 @@ final class FlattenedExportTests: XCTestCase {
         let output = try XCTUnwrap(PDFDocument(url: url))
         XCTAssertGreaterThan(redPixelCount(in: output.page(at: 2)!), 500)
         try await library.close(record.id)
+    }
+
+    func testThisPageExportOfAnnotatedMultiPageWorksheet() async throws {
+        let (library, record, store) = try await makeLibrary()
+        let sourceURL = try await store.originalURL(documentID: record.id)
+        let source = try XCTUnwrap(PDFDocument(url: sourceURL))
+        let sizes = (0..<3).map { source.page(at: $0)!.bounds(for: .cropBox).size }
+        for page in 0..<3 {
+            try await store.saveDrawing(redInk(on: sizes[page], top: page != 1).dataRepresentation(),
+                                        documentID: record.id, page: page, hasInk: true)
+        }
+        let sourceBefore = try Data(contentsOf: sourceURL)
+
+        let url = try await library.exportFlattenedPDF(record.id, page: 1)
+        defer { FlattenedExport.discard(url) }
+
+        XCTAssertEqual(url.lastPathComponent, "Synthetic Paper 1 p2 (annotated).pdf")
+        let output = try XCTUnwrap(PDFDocument(url: url))
+        XCTAssertEqual(output.pageCount, 1, "exactly one page")
+        let page = try XCTUnwrap(output.page(at: 0))
+        XCTAssertEqual(page.bounds(for: .cropBox).size, sizes[1])
+        XCTAssertTrue((page.string ?? "").contains("Synthetic page 2"), "the page asked for, not the first")
+        XCTAssertGreaterThan(redPixelCount(in: page, half: .bottom), 500, "that page's ink")
+        XCTAssertEqual(redPixelCount(in: page, half: .top), 0, "and no other page's ink")
+        XCTAssertEqual(try Data(contentsOf: sourceURL), sourceBefore)
+        let stored = try await store.document(record.id)
+        XCTAssertEqual(stored.inkPages, [0, 1, 2])
+    }
+
+    func testThisPageIncludesUnsavedInkOfTheOpenWorksheet() async throws {
+        let (library, record, _) = try await makeLibrary()
+        let session = try await library.open(record.id)
+        session.update(redInk(on: CGSize(width: 595, height: 842)), page: 2)   // still inside the save debounce
+        session.update(redInk(on: CGSize(width: 595, height: 842), top: true), page: 0)
+
+        let url = try await library.exportFlattenedPDF(record.id, page: 2)
+        defer { FlattenedExport.discard(url) }
+        XCTAssertEqual(url.lastPathComponent, "Synthetic Paper 1 p3 (annotated).pdf")
+        let output = try XCTUnwrap(PDFDocument(url: url))
+        XCTAssertEqual(output.pageCount, 1)
+        XCTAssertGreaterThan(redPixelCount(in: output.page(at: 0)!, half: .bottom), 500)
+        XCTAssertEqual(redPixelCount(in: output.page(at: 0)!, half: .top), 0)
+        try await library.close(record.id)
+    }
+
+    func testThisPageRejectsTeacherCopyAndMissingPage() async throws {
+        let (teacherLibrary, teacher, _) = try await makeLibrary(role: .teacher)
+        do {
+            _ = try await teacherLibrary.exportFlattenedPDF(teacher.id, page: 0)
+            XCTFail("A Teacher copy page must never reach a share sheet")
+        } catch {
+            XCTAssertEqual(error as? FlattenedExportError, .teacherCopy)
+        }
+        let (library, record, _) = try await makeLibrary()
+        do {
+            _ = try await library.exportFlattenedPDF(record.id, page: 5)
+            XCTFail("A page outside the worksheet must not export")
+        } catch {
+            XCTAssertEqual(error as? FlattenedExportError, .pageOutOfRange(page: 5))
+        }
     }
 
     func testTeacherCopyCannotBeExported() async throws {
