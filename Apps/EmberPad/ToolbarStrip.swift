@@ -156,7 +156,7 @@ private struct ActiveToolMenu: View {
                     .disabled(tools.settings.eraserMode != .partial)
                     .opacity(tools.settings.eraserMode == .partial ? 1 : 0.4)
             case .lasso:
-                Text("Circle ink to select · then drag, or Cut / Copy / Duplicate / Delete")
+                Text("Circle ink to select · tap it for Cut, Copy, Delete, Duplicate, Resize, Color")
                     .font(Theme.meta)
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1)

@@ -5,9 +5,10 @@ import EmberSyncKit
 @testable import EmberPad
 
 /// EP-29 acceptance: the "inside the loop" geometry (closed and open strokes,
-/// self-intersecting loops, strokes crossing the boundary), the move, resize
-/// and rotate transforms, and that circle to lasso and every selection edit
-/// is exactly one undo step. Every fixture is synthetic.
+/// self-intersecting loops, strokes crossing the boundary), the move and the
+/// GoodNotes-style Resize (scale and turn in one drag) transforms, the
+/// lasso-only selection with its menu on a tap, and that circle to lasso and
+/// every selection edit is exactly one undo step. Every fixture is synthetic.
 @MainActor
 final class CircleLassoTests: XCTestCase {
 
@@ -94,7 +95,7 @@ final class CircleLassoTests: XCTestCase {
         XCTAssertGreaterThan(LassoGeometry.drawingPoints(of: sparse).count, 3)
     }
 
-    // MARK: - Move, resize and rotate
+    // MARK: - Move and Resize
 
     func testBoxIsThePaddedInk() throws {
         let strokes = [Self.penStroke(Self.row(from: 20, to: 80, y: 40)), Self.penStroke(Self.row(from: 50, to: 150, y: 90))]
@@ -115,65 +116,65 @@ final class CircleLassoTests: XCTestCase {
         XCTAssertFalse(box.applying(delta).contains(CGPoint(x: 10, y: 30)))
     }
 
-    func testResizeKeepsTheOppositeCornerAndTheProportions() {
+    func testResizeHandleScalesAboutTheOppositeCornerKeepingProportions() {
         let box = SelectionBox(rect: CGRect(x: 0, y: 0, width: 100, height: 50))
-        let double = box.applying(box.resize(.bottomRight, to: CGPoint(x: 200, y: 100)))
+        let corner = box.point(.bottomRight)
+        // Straight out along the diagonal to twice as far: twice the size, no turn.
+        let double = box.applying(box.scaleAndRotate(from: corner, to: CGPoint(x: 200, y: 100)))
         Self.assertEqual(double.point(.topLeft), .zero)
         Self.assertEqual(double.point(.bottomRight), CGPoint(x: 200, y: 100))
         XCTAssertEqual(double.scale, 2, accuracy: 1e-9)
-        // Off the diagonal, the scale follows the drag along it: (200·100 + 60·50) / (100² + 50²) = 1.84.
-        let skewed = box.applying(box.resize(.bottomRight, to: CGPoint(x: 200, y: 60)))
-        XCTAssertEqual(skewed.scale, 1.84, accuracy: 1e-9)
-        Self.assertEqual(skewed.point(.bottomRight), CGPoint(x: 184, y: 92))
-        // Dragging the top-left corner scales about the bottom right.
-        let half = box.applying(box.resize(.topLeft, to: CGPoint(x: 50, y: 25)))
-        Self.assertEqual(half.point(.bottomRight), CGPoint(x: 100, y: 50))
+        XCTAssertEqual(double.angle, 0, accuracy: 1e-9)
+        // Halfway in: half the size.
+        let half = box.applying(box.scaleAndRotate(from: corner, to: CGPoint(x: 50, y: 25)))
         XCTAssertEqual(half.scale, 0.5, accuracy: 1e-9)
+        Self.assertEqual(half.point(.topLeft), .zero)
+        // The touch need not be on the corner: only its distance and angle from the anchor count.
+        let offCorner = box.applying(box.scaleAndRotate(from: CGPoint(x: 90, y: 45), to: CGPoint(x: 135, y: 67.5)))
+        XCTAssertEqual(offCorner.scale, 1.5, accuracy: 1e-9)
+    }
+
+    func testResizeHandleTurnsAboutTheOppositeCornerInTheSameDrag() {
+        let box = SelectionBox(rect: CGRect(x: 0, y: 0, width: 100, height: 50))
+        let corner = box.point(.bottomRight)
+        let length = hypot(corner.x, corner.y), start = atan2(corner.y, corner.x)
+        func along(_ degrees: CGFloat, _ factor: CGFloat) -> CGPoint {
+            let angle = start + degrees * .pi / 180
+            return CGPoint(x: length * factor * cos(angle), y: length * factor * sin(angle))
+        }
+        // 30° round the top-left corner and 1.5 times as far, in one drag.
+        let turned = box.applying(box.scaleAndRotate(from: corner, to: along(30, 1.5)))
+        XCTAssertEqual(turned.angle, 30 * .pi / 180, accuracy: 1e-9)
+        XCTAssertEqual(turned.scale, 1.5, accuracy: 1e-9)
+        Self.assertEqual(turned.point(.topLeft), .zero)
+        Self.assertEqual(turned.point(.bottomRight), along(30, 1.5))
+        // 87° lands within 4° of a quarter turn and snaps onto it.
+        XCTAssertEqual(box.applying(box.scaleAndRotate(from: corner, to: along(87, 1))).angle, .pi / 2, accuracy: 1e-9)
+        // A second drag on the turned box keeps turning about its (moved) top-left corner.
+        var moved = turned.applying(CGAffineTransform(translationX: 40, y: 70))
+        let anchor = moved.point(.topLeft)
+        moved = moved.applying(moved.scaleAndRotate(from: moved.point(.bottomRight), to: moved.point(.bottomRight)))
+        Self.assertEqual(moved.point(.topLeft), anchor)
+        XCTAssertEqual(box.scaleAndRotate(from: .zero, to: corner), .identity, "a drag from the anchor itself does nothing")
     }
 
     func testResizeCannotFlipOrVanishOrRunAway() {
         let box = SelectionBox(rect: CGRect(x: 0, y: 0, width: 100, height: 50))
-        let crossed = box.applying(box.resize(.bottomRight, to: CGPoint(x: -80, y: -40)))
-        XCTAssertEqual(crossed.scale, SelectionBox.minimumSide / 100, accuracy: 1e-9, "stops at the smallest box, unflipped")
-        Self.assertEqual(crossed.point(.topLeft), .zero)
-        let huge = box.applying(box.resize(.bottomRight, to: CGPoint(x: 100_000, y: 50_000)))
+        let corner = box.point(.bottomRight)
+        let tinyDrag = box.applying(box.scaleAndRotate(from: corner, to: CGPoint(x: 2, y: 1)))
+        XCTAssertEqual(tinyDrag.scale, SelectionBox.minimumSide / 100, accuracy: 1e-9, "stops at the smallest box")
+        Self.assertEqual(tinyDrag.point(.topLeft), .zero)
+        let huge = box.applying(box.scaleAndRotate(from: corner, to: CGPoint(x: 100_000, y: 50_000)))
         XCTAssertEqual(huge.scale, SelectionBox.maximumScale, accuracy: 1e-9)
+        // Dragging past the anchor turns the box half round rather than turning it inside out.
+        let across = box.applying(box.scaleAndRotate(from: corner, to: CGPoint(x: -100, y: -50)))
+        XCTAssertEqual(across.scale, 1, accuracy: 1e-9)
+        XCTAssertEqual(abs(across.angle), .pi, accuracy: 1e-9)
         // A box already at its smallest cannot shrink further, but can grow.
         let tiny = SelectionBox(rect: CGRect(x: 0, y: 0, width: 20, height: 10))
-        XCTAssertEqual(tiny.applying(tiny.resize(.bottomRight, to: CGPoint(x: 5, y: 2))).scale, 1, accuracy: 1e-9)
-        XCTAssertEqual(tiny.applying(tiny.resize(.bottomRight, to: CGPoint(x: 40, y: 20))).scale, 2, accuracy: 1e-9)
-    }
-
-    func testRotateTurnsAboutTheCentreAndSnapsToQuarterTurns() {
-        let box = SelectionBox(rect: CGRect(x: 0, y: 0, width: 100, height: 50))
-        let c = box.center
-        // From above the centre round to its right is a quarter turn clockwise on screen.
-        let quarter = box.applying(box.rotation(from: CGPoint(x: c.x, y: c.y - 100), to: CGPoint(x: c.x + 100, y: c.y)))
-        XCTAssertEqual(quarter.angle, .pi / 2, accuracy: 1e-9)
-        Self.assertEqual(quarter.center, c)
-        XCTAssertEqual(quarter.scale, 1, accuracy: 1e-9)
-        Self.assertEqual(quarter.point(.topLeft), CGPoint(x: c.x + 25, y: c.y - 50))
-        // 30° stays 30°; 87° lands within 4° of a quarter turn and snaps onto it.
-        let start = CGPoint(x: c.x + 100, y: c.y)
-        XCTAssertEqual(box.applying(box.rotation(from: start, to: Self.point(around: c, degrees: 30))).angle,
-                       30 * .pi / 180, accuracy: 1e-9)
-        XCTAssertEqual(box.applying(box.rotation(from: start, to: Self.point(around: c, degrees: 87))).angle,
-                       .pi / 2, accuracy: 1e-9)
-        XCTAssertEqual(box.rotation(from: c, to: start), .identity)
-    }
-
-    func testResizeAfterRotateKeepsTheOppositeCorner() {
-        let upright = SelectionBox(rect: CGRect(x: 0, y: 0, width: 100, height: 50))
-        let c = upright.center
-        let turned = upright.applying(upright.rotation(from: CGPoint(x: c.x + 100, y: c.y), to: Self.point(around: c, degrees: 40)))
-        let anchor = turned.point(.topLeft)
-        let corner = turned.point(.bottomRight)
-        let target = CGPoint(x: anchor.x + (corner.x - anchor.x) * 1.5, y: anchor.y + (corner.y - anchor.y) * 1.5)
-        let grown = turned.applying(turned.resize(.bottomRight, to: target))
-        Self.assertEqual(grown.point(.topLeft), anchor)
-        Self.assertEqual(grown.point(.bottomRight), target)
-        XCTAssertEqual(grown.scale, 1.5, accuracy: 1e-9)
-        XCTAssertEqual(grown.angle, turned.angle, accuracy: 1e-9)
+        let tinyCorner = tiny.point(.bottomRight)
+        XCTAssertEqual(tiny.applying(tiny.scaleAndRotate(from: tinyCorner, to: CGPoint(x: 5, y: 2.5))).scale, 1, accuracy: 1e-9)
+        XCTAssertEqual(tiny.applying(tiny.scaleAndRotate(from: tinyCorner, to: CGPoint(x: 40, y: 20))).scale, 2, accuracy: 1e-9)
     }
 
     func testEditsChangeOnlyTheSelectedStrokes() {
@@ -396,7 +397,7 @@ final class CircleLassoTests: XCTestCase {
 
     // MARK: - Selection edits on the canvas
 
-    func testMoveResizeAndRotateAreOneUndoStepEach() async throws {
+    func testMoveAndResizeAreOneUndoStepEach() async throws {
         let (controller, session) = try await Self.makeController(pages: 1)
         let canvas = try Self.canvas(controller, session, page: 0)
         let undo = Self.undoManager(controller)
@@ -414,29 +415,26 @@ final class CircleLassoTests: XCTestCase {
         XCTAssertEqual(session.drawing(on: 0).strokes.map(\.transform), [move, .identity])
         XCTAssertEqual(selection.selection?.box, box.applying(move), "the box follows the ink")
 
+        // One Resize drag scales and turns: 25° round the top-left corner and 1.2 times as far.
         let moved = try XCTUnwrap(selection.selection?.box)
-        let resize = moved.resize(.bottomRight, to: CGPoint(x: moved.point(.bottomRight).x + 30, y: moved.point(.bottomRight).y + 10))
+        let anchor = moved.point(.topLeft), corner = moved.point(.bottomRight)
+        let reach = hypot(corner.x - anchor.x, corner.y - anchor.y) * 1.2
+        let angle = atan2(corner.y - anchor.y, corner.x - anchor.x) + 25 * .pi / 180
+        let resize = moved.scaleAndRotate(from: corner, to: CGPoint(x: anchor.x + reach * cos(angle), y: anchor.y + reach * sin(angle)))
         selection.transformSelection(by: resize, actionName: "Resize", undoManager: undo)
         XCTAssertEqual(undo.undoActionName, "Resize")
-        let resized = try XCTUnwrap(selection.selection?.box)
-        let rotate = resized.rotation(from: CGPoint(x: resized.center.x + 50, y: resized.center.y),
-                                      to: Self.point(around: resized.center, degrees: 25))
-        selection.transformSelection(by: rotate, actionName: "Rotate", undoManager: undo)
-        XCTAssertEqual(undo.undoActionName, "Rotate")
-        let all = move.concatenating(resize).concatenating(rotate)
-        Self.assertEqual(canvas.drawing.strokes[0].transform, all)
+        Self.assertEqual(canvas.drawing.strokes[0].transform, move.concatenating(resize))
         XCTAssertEqual(canvas.drawing.strokes[1].transform, .identity, "ink outside the loop never moves")
         XCTAssertEqual(try XCTUnwrap(selection.selection?.box.angle), 25 * .pi / 180, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(selection.selection?.box.scale), 1.2, accuracy: 1e-9)
 
         undo.undo()
-        Self.assertEqual(canvas.drawing.strokes[0].transform, move.concatenating(resize))
-        XCTAssertNil(selection.selection, "undo drops the selection")
-        undo.undo()
         XCTAssertEqual(canvas.drawing.strokes[0].transform, move)
+        XCTAssertNil(selection.selection, "undo drops the selection")
         undo.undo()
         XCTAssertEqual(canvas.drawing.strokes[0].transform, .identity)
         XCTAssertEqual(session.drawing(on: 0).strokes[0].transform, .identity)
-        XCTAssertFalse(undo.canUndo, "three gestures, three steps")
+        XCTAssertFalse(undo.canUndo, "two gestures, two steps")
         undo.redo()
         XCTAssertEqual(canvas.drawing.strokes[0].transform, move)
         XCTAssertEqual(session.drawing(on: 0).strokes[0].transform, move)
@@ -485,6 +483,43 @@ final class CircleLassoTests: XCTestCase {
         XCTAssertEqual(canvas.drawing.strokes.count, 2)
         XCTAssertEqual(session.drawing(on: 0).strokes.count, 2)
         XCTAssertFalse(undo.canUndo)
+    }
+
+    func testColorRecolorsTheSelectionFromThePenPresetsInOneUndoStep() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let undo = Self.undoManager(controller)
+        let word = Self.penStroke(Self.row(from: 270, to: 330, y: 300))
+        var marker = Self.penStroke(Self.row(from: 270, to: 330, y: 320))
+        marker.ink = PKInk(.marker, color: UIColor.yellow.withAlphaComponent(0.4))
+        let elsewhere = Self.penStroke(Self.row(from: 40, to: 200, y: 600))
+        Self.commit(PKDrawing(strokes: [word, marker, elsewhere]), on: canvas, controller)
+        let selection = controller.inkSelection
+        selection.select(page: 0, lasso: Self.circle(center: CGPoint(x: 300, y: 300), radius: 70, degrees: 359))
+        XCTAssertEqual(selection.selection?.indices, [0, 1])
+
+        // Color offers the current pen presets, in order.
+        let color = try XCTUnwrap(selection.overlay.menuActions?().first { $0.title == "Color" })
+        let presets = controller.tools.settings.penColors.compactMap { UIColor(emberHex: $0) }
+        XCTAssertEqual(color.children.compactMap { $0.color?.emberHex }, presets.map(\.emberHex))
+        XCTAssertEqual(presets.count, 3)
+        color.children[2].perform()
+
+        XCTAssertEqual(undo.undoActionName, "Color")
+        let red = presets[2]
+        XCTAssertEqual(canvas.drawing.strokes[0].ink.color.emberHex, red.emberHex)
+        XCTAssertEqual(canvas.drawing.strokes[0].ink.inkType, .fountainPen)
+        XCTAssertEqual(canvas.drawing.strokes[1].ink.inkType, .marker, "a highlighter stroke stays a highlighter")
+        XCTAssertEqual(canvas.drawing.strokes[1].ink.color.cgColor.alpha, 0.4, accuracy: 0.01, "and keeps its see-through ink")
+        XCTAssertEqual(canvas.drawing.strokes[2].ink.color.emberHex, UIColor.emberPenBlack.emberHex, "ink outside is unchanged")
+        XCTAssertEqual(session.drawing(on: 0).strokes[0].ink.color.emberHex, red.emberHex)
+        XCTAssertEqual(canvas.drawing.strokes.map { $0.path.count }, [word, marker, elsewhere].map { $0.path.count })
+        XCTAssertNotNil(selection.selection, "the selection stays")
+
+        color.children[2].perform()
+        undo.undo()
+        XCTAssertEqual(canvas.drawing.strokes[0].ink.color.emberHex, UIColor.emberPenBlack.emberHex)
+        XCTAssertFalse(undo.canUndo, "one step; the same colour again is no step")
     }
 
     func testCopyPutsTheSelectedInkOnThePasteboard() async throws {
@@ -696,21 +731,64 @@ final class CircleLassoTests: XCTestCase {
 
     // MARK: - Overlay
 
-    func testOverlayClaimsOnlyTheSelectionAndItsHandles() throws {
+    func testOverlayShowsOnlyTheLassoAndClaimsOnlyTheSelection() throws {
         let (window, canvas, overlay) = Self.hostOverlay()
         defer { overlay.hide(); window.isHidden = true }
         let box = SelectionBox(rect: CGRect(x: 100, y: 100, width: 200, height: 100))
-        overlay.show(box, on: canvas, presentMenu: false)
-        // The canvas sits at (50, 80) in the window, so the box's top left is at (150, 180) on screen.
+        // A lasso wider than the ink: the canvas sits at (50, 80), so it spans x 110...410 on screen.
+        let lasso = Self.circle(center: CGPoint(x: 210, y: 150), radius: 150, degrees: 359).map {
+            CGPoint(x: $0.x, y: 150 + ($0.y - 150) * 0.5)
+        }
+        overlay.show(box, outline: lasso, on: canvas)
+        XCTAssertFalse(overlay.isResizing)
+        XCTAssertFalse(overlay.menuVisible, "no menu on lift")
+        XCTAssertTrue(Self.subviewsShown(overlay).isEmpty, "no handles and no ×, only the lasso")
         XCTAssertEqual(overlay.target(at: CGPoint(x: 250, y: 230)), .move)
         XCTAssertTrue(overlay.hitTest(CGPoint(x: 250, y: 230), with: nil) === overlay)
-        XCTAssertEqual(overlay.target(at: CGPoint(x: 152, y: 182)), .resize(.topLeft))
-        XCTAssertEqual(overlay.target(at: CGPoint(x: 348, y: 278)), .resize(.bottomRight))
-        XCTAssertEqual(overlay.target(at: CGPoint(x: 250, y: 180 - SelectionOverlayView.rotateHandleDistance)), .rotate)
+        XCTAssertEqual(overlay.target(at: CGPoint(x: 120, y: 230)), .move, "inside the lasso, outside the ink")
+        XCTAssertEqual(overlay.target(at: CGPoint(x: 348, y: 278)), .move, "a corner is no handle")
         XCTAssertNil(overlay.target(at: CGPoint(x: 500, y: 500)))
         XCTAssertNil(overlay.hitTest(CGPoint(x: 500, y: 500), with: nil), "touches elsewhere reach the page")
         overlay.hide()
         XCTAssertNil(overlay.hitTest(CGPoint(x: 250, y: 230), with: nil))
+    }
+
+    func testResizeModeHasOneHandleAndAnX() throws {
+        let (window, canvas, overlay) = Self.hostOverlay()
+        defer { overlay.hide(); window.isHidden = true }
+        var ended: (CGAffineTransform, SelectionDrag)?
+        overlay.onDragEnded = { ended = ($0, $1) }
+        let box = SelectionBox(rect: CGRect(x: 100, y: 100, width: 200, height: 100))
+        overlay.show(box, outline: box.corners, on: canvas)
+        overlay.setResizing(true)
+        XCTAssertEqual(Self.subviewsShown(overlay).count, 2, "the handle and the ×")
+        // On screen the box runs from (150, 180) to (350, 280).
+        Self.assertEqual(try XCTUnwrap(overlay.handleCenter), CGPoint(x: 350, y: 280))
+        Self.assertEqual(try XCTUnwrap(overlay.closeCenter), CGPoint(x: 150, y: 180))
+        XCTAssertEqual(overlay.target(at: CGPoint(x: 352, y: 283)), .resize)
+        XCTAssertEqual(overlay.target(at: CGPoint(x: 250, y: 230)), .move, "drag inside still moves")
+        XCTAssertNil(overlay.target(at: CGPoint(x: 356, y: 174)), "no other corner is a handle")
+        XCTAssertNil(overlay.target(at: CGPoint(x: 144, y: 286)))
+        XCTAssertNil(overlay.target(at: CGPoint(x: 152, y: 182)), "the × does not drag")
+        XCTAssertTrue(overlay.hitTest(CGPoint(x: 152, y: 182), with: nil) === overlay, "but it takes the tap")
+
+        // The handle scales and turns in one drag about the top-left corner (150, 180): out to
+        // twice as far, a quarter turn clockwise from the box's diagonal.
+        XCTAssertEqual(overlay.beginDrag(at: CGPoint(x: 350, y: 280), to: CGPoint(x: 350, y: 280)), .resize)
+        let target = CGPoint(x: 150 - 200, y: 180 + 400)
+        overlay.continueDrag(to: target)
+        overlay.endDrag(at: target)
+        let (delta, drag) = try XCTUnwrap(ended)
+        XCTAssertEqual(drag, .resize)
+        let after = box.applying(delta)
+        XCTAssertEqual(after.scale, 2, accuracy: 1e-6)
+        XCTAssertEqual(after.angle, .pi / 2, accuracy: 1e-6)
+        Self.assertEqual(after.point(.topLeft), box.point(.topLeft))
+
+        overlay.tap(at: CGPoint(x: 150, y: 180))
+        XCTAssertFalse(overlay.isResizing, "the × leaves Resize")
+        XCTAssertTrue(Self.subviewsShown(overlay).isEmpty)
+        XCTAssertFalse(overlay.isHidden, "and keeps the selection")
     }
 
     func testSelectionOverlayRenders() throws {
@@ -719,8 +797,11 @@ final class CircleLassoTests: XCTestCase {
         let words = [Self.penStroke(Self.wave(from: CGPoint(x: 120, y: 140), width: 150)),
                      Self.penStroke(Self.wave(from: CGPoint(x: 120, y: 190), width: 110))]
         let box = try XCTUnwrap(SelectionBox(around: words))
-        let turned = box.applying(box.rotation(from: CGPoint(x: box.center.x + 50, y: box.center.y),
-                                               to: Self.point(around: box.center, degrees: 12)))
+        let lasso = Self.circle(center: box.center, radius: 130, degrees: 359).map {
+            CGPoint(x: $0.x, y: box.center.y + ($0.y - box.center.y) * 0.5)
+        }
+        let turned = box.applying(box.scaleAndRotate(from: box.point(.bottomRight),
+                                                     to: box.point(.bottomRight).applying(CGAffineTransform(translationX: -20, y: 30))))
         let drawing = SelectionEdit.transformed(
             PKDrawing(strokes: words + [Self.penStroke(Self.wave(from: CGPoint(x: 120, y: 400), width: 200))]),
             indices: [0, 1], by: turned.transform)
@@ -732,7 +813,7 @@ final class CircleLassoTests: XCTestCase {
             page.image = drawing.image(from: canvas.bounds, scale: 2)
         }
         canvas.superview?.insertSubview(page, belowSubview: canvas)
-        overlay.show(turned, on: canvas, presentMenu: false)
+        overlay.show(turned, outline: lasso, on: canvas, resizing: true)
         window.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         let root = try XCTUnwrap(window.rootViewController?.view)
@@ -748,56 +829,65 @@ final class CircleLassoTests: XCTestCase {
         add(attachment)
     }
 
-    func testEditMenuLeavesTheRotateHandleClear() {
+    func testEditMenuGoesBesideTheSelection() {
         let screen = CGRect(x: 0, y: 0, width: 800, height: 1000)
-        let box = CGRect(x: 200, y: 300, width: 200, height: 100)
-        let handle = CGPoint(x: 300, y: 300 - SelectionOverlayView.rotateHandleDistance)
-        let above = SelectionOverlayView.menuPlacement(box: box, rotateHandle: handle, in: screen)
+        let lasso = CGRect(x: 200, y: 300, width: 200, height: 100)
+        let above = SelectionOverlayView.menuPlacement(keepClear: lasso, in: screen)
         XCTAssertFalse(above.below)
-        let reach = SelectionOverlayView.handleHitRadius
-        XCTAssertEqual(above.keepClear.minY, handle.y - reach, "above every touch that grabs the handle")
-        XCTAssertLessThanOrEqual(above.keepClear.minY,
-                                 box.minY - SelectionOverlayView.rotateHandleDistance - SelectionOverlayView.handleRadius - 8)
-        XCTAssertEqual(above.sourcePoint, CGPoint(x: 300, y: above.keepClear.minY))
-        XCTAssertTrue(above.keepClear.contains(box))
-
-        // Near the top of the screen there is no room above, so the menu goes below the box.
-        let high = box.offsetBy(dx: 0, dy: -240)
-        let below = SelectionOverlayView.menuPlacement(box: high, rotateHandle: CGPoint(x: 300, y: high.minY - 30), in: screen)
+        XCTAssertEqual(above.sourcePoint, CGPoint(x: 300, y: 300))
+        // Near the top of the screen there is no room above, so the menu goes below, as in GoodNotes.
+        let high = lasso.offsetBy(dx: 0, dy: -260)
+        let below = SelectionOverlayView.menuPlacement(keepClear: high, in: screen)
         XCTAssertTrue(below.below)
         XCTAssertEqual(below.sourcePoint, CGPoint(x: 300, y: high.maxY))
     }
 
-    func testRotateHandleRotatesWhileTheMenuShows() async throws {
+    func testTapInsideOpensTheMenuInGoodNotesOrder() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        Self.commit(PKDrawing(strokes: [Self.penStroke(Self.row(from: 270, to: 330, y: 300))]), on: canvas, controller)
+        let selection = controller.inkSelection
+        selection.select(page: 0, lasso: Self.circle(center: CGPoint(x: 300, y: 300), radius: 70, degrees: 359))
+        let actions = try XCTUnwrap(selection.overlay.menuActions?())
+        XCTAssertEqual(actions.map(\.title), ["Cut", "Copy", "Delete", "Duplicate", "Resize", "Color"])
+        XCTAssertEqual(actions.map(\.destructive), [false, false, true, false, false, false])
+        let elements = SelectionOverlayView.menuElements(for: actions)
+        XCTAssertEqual(elements.map(\.title), ["Cut", "Copy", "Delete", "Duplicate", "Resize", "Color"])
+        XCTAssertTrue(elements[5] is UIMenu, "Color opens the pen colours")
+        XCTAssertEqual((elements[5] as? UIMenu)?.children.count, 3)
+        XCTAssertEqual(selection.selection?.outline.count, 73, "the lasso drawn is the outline shown")
+
+        XCTAssertFalse(selection.overlay.isResizing)
+        actions[4].perform()
+        XCTAssertTrue(selection.overlay.isResizing, "Resize enters Resize mode")
+        XCTAssertNotNil(selection.selection)
+        // A move in Resize mode stays in Resize mode.
+        selection.transformSelection(by: CGAffineTransform(translationX: 10, y: 0), actionName: "Move", undoManager: Self.undoManager(controller))
+        XCTAssertTrue(selection.overlay.isResizing)
+        selection.dismiss()
+        XCTAssertFalse(selection.overlay.isResizing, "a new selection starts with the lasso only")
+    }
+
+    func testTapInsideTheLassoOpensTheMenuThatALiftDoesNot() async throws {
         let (window, canvas, overlay) = Self.hostOverlay(inScene: true)
         defer { overlay.hide(); window.isHidden = true }
-        var menuUsed: [String] = []
+        var used: [String] = []
         overlay.menuActions = {
-            ["Cut", "Copy", "Duplicate", "Delete"].map { title in SelectionAction(title: title, symbol: "circle") { menuUsed.append(title) } }
+            ["Cut", "Copy", "Delete", "Duplicate", "Resize", "Color"].map { title in
+                SelectionAction(title: title, symbol: "circle") { used.append(title) }
+            }
         }
-        var ended: (CGAffineTransform, SelectionDrag)?
-        overlay.onDragEnded = { ended = ($0, $1) }
         let box = SelectionBox(rect: CGRect(x: 100, y: 100, width: 200, height: 100))
-        overlay.show(box, on: canvas, presentMenu: true)
+        overlay.show(box, outline: box.corners, on: canvas)
+        for _ in 0..<10 { await Self.pause(0.05) }
+        XCTAssertFalse(overlay.menuVisible, "no menu on lift")
+        overlay.tap(at: CGPoint(x: 500, y: 500))
+        for _ in 0..<10 { await Self.pause(0.05) }
+        XCTAssertFalse(overlay.menuVisible, "a tap outside opens nothing")
+        overlay.tap(at: CGPoint(x: 250, y: 230))
         for _ in 0..<40 where !overlay.menuVisible { await Self.pause(0.05) }
-        XCTAssertTrue(overlay.menuVisible, "the menu is showing")
-
-        // The canvas sits at (50, 80), so the box's top centre is (250, 180) and the handle 30 pt above it.
-        let handle = CGPoint(x: 250, y: 180 - SelectionOverlayView.rotateHandleDistance)
-        let placement = try XCTUnwrap(overlay.menuPlacement)
-        let reach = SelectionOverlayView.handleHitRadius
-        XCTAssertTrue(placement.keepClear.contains(CGRect(x: handle.x - reach, y: handle.y - reach, width: 2 * reach, height: 2 * reach)),
-                      "the menu lays itself out outside this rectangle, so it never covers the handle")
-        XCTAssertTrue(overlay.hitTest(handle, with: nil) === overlay)
-        XCTAssertEqual(overlay.beginDrag(at: handle, to: handle), .rotate)
-        // A quarter turn about the box's centre (250, 230): from straight above to straight right.
-        let right = CGPoint(x: 250 + 50, y: 230)
-        overlay.continueDrag(to: right)
-        overlay.endDrag(at: right)
-        let (delta, drag) = try XCTUnwrap(ended)
-        XCTAssertEqual(drag, .rotate)
-        XCTAssertEqual(atan2(delta.b, delta.a), .pi / 2, accuracy: 1e-6)
-        XCTAssertEqual(menuUsed, [], "no menu item ran, so nothing was duplicated")
+        XCTAssertTrue(overlay.menuVisible, "a tap inside opens the menu")
+        XCTAssertEqual(used, [])
     }
 
     // MARK: - Fixtures
@@ -844,6 +934,11 @@ final class CircleLassoTests: XCTestCase {
         for (x, y) in [(a.a, b.a), (a.b, b.b), (a.c, b.c), (a.d, b.d), (a.tx, b.tx), (a.ty, b.ty)] {
             XCTAssertEqual(x, y, accuracy: 1e-6, file: file, line: line)
         }
+    }
+
+    /// The overlay's subviews on screen: the Resize handle and ×, when shown.
+    private static func subviewsShown(_ overlay: SelectionOverlayView) -> [UIView] {
+        overlay.subviews.filter { !$0.isHidden }
     }
 
     private static func undoManager(_ controller: PDFOverlayPageController) -> UndoManager {

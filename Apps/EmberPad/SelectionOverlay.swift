@@ -4,32 +4,39 @@ import UniformTypeIdentifiers
 
 // MARK: - Selection model
 
-/// One page's selected ink: which strokes, and the box drawn round them.
+/// One page's selected ink: which strokes, the box round them, and the
+/// lasso drawn round them (in the box's own space, so it moves, scales and
+/// turns with the box).
 struct InkSelection: Equatable {
     let page: Int
     var indices: [Int]
     var box: SelectionBox
+    var outline: [CGPoint]
 }
 
 /// One entry of the selection's edit menu (and its accessibility actions).
+/// An entry with `children` opens them as a submenu instead of performing.
 struct SelectionAction {
     let title: String
     let symbol: String
     var destructive = false
+    /// A swatch shown in place of the symbol.
+    var color: UIColor?
+    var children: [SelectionAction] = []
     let perform: @MainActor () -> Void
 }
 
 /// What a drag on the selection does, decided by where it starts.
 enum SelectionDrag: Equatable {
+    /// Anywhere inside the selection: move it.
     case move
-    case resize(SelectionBox.Corner)
-    case rotate
+    /// The Resize handle, in Resize mode: scale and turn about the opposite corner.
+    case resize
 
     var actionName: String {
         switch self {
         case .move: "Move"
         case .resize: "Resize"
-        case .rotate: "Rotate"
         }
     }
 }
@@ -42,12 +49,15 @@ enum SelectionDrag: Equatable {
 /// - a closed fountain-pen loop held still at its end, or long-pressed with
 ///   the Pencil just after it is lifted (circle to lasso, as in GoodNotes), or
 ///   a toolbar-lasso stroke selects the strokes at least half inside it;
-/// - the selection shows a dashed accent outline with corner resize handles
-///   and a rotate handle, over the page but never on the student view;
-/// - drag to move, a corner to resize, the top handle to rotate: each gesture
-///   is one `PKStroke.transform` change on the selected strokes and one undo step;
-/// - its edit menu offers Cut, Copy, Duplicate and Delete, each one undo
-///   step, and sits clear of the rotate handle;
+/// - as in GoodNotes, the selection shows only its dashed lasso, over the
+///   page but never on the student view, and a tap inside it opens the edit
+///   menu: Cut, Copy, Delete, Duplicate, Resize and Color;
+/// - drag inside to move; Resize shows a box with one handle at the bottom
+///   right that scales and turns about the top-left corner in one drag, and
+///   an × that leaves Resize. Each gesture is one `PKStroke.transform`
+///   change on the selected strokes and one undo step;
+/// - Cut, Delete, Duplicate and Color (a current pen colour) are each one
+///   undo step;
 /// - a finger long-press on a page offers Paste for ink copied in EmberPad,
 ///   placed at the touch point as one undo step.
 ///
@@ -145,18 +155,22 @@ final class InkSelectionController {
     @discardableResult
     func select(page: Int, lasso: [CGPoint]) -> Bool {
         guard let canvas = host?.canvases[page] else { return false }
-        return show(LassoGeometry.selectedIndices(in: canvas.drawing, lasso: lasso), page: page)
+        return show(LassoGeometry.selectedIndices(in: canvas.drawing, lasso: lasso), page: page, outline: lasso)
     }
 
+    /// Selects `indices` on `page`, outlined by `outline` (drawing space), or
+    /// by the box round the ink when there is no lasso (pasted ink). Like
+    /// GoodNotes, it shows only the outline: the menu waits for a tap.
     @discardableResult
-    private func show(_ indices: [Int], page: Int) -> Bool {
+    private func show(_ indices: [Int], page: Int, outline: [CGPoint]? = nil) -> Bool {
         guard !indices.isEmpty, let canvas = host?.canvases[page],
               let box = SelectionBox(around: SelectionEdit.strokes(of: canvas.drawing, at: indices)) else {
             dismiss()
             return false
         }
-        selection = InkSelection(page: page, indices: indices, box: box)
-        overlay.show(box, on: canvas, presentMenu: true)
+        let lasso = (outline?.count ?? 0) >= 3 ? outline! : box.corners
+        selection = InkSelection(page: page, indices: indices, box: box, outline: lasso)
+        overlay.show(box, outline: lasso, on: canvas)
         return true
     }
 
@@ -218,7 +232,7 @@ final class InkSelectionController {
             canvas.drawing = rest
         }
         host.session.update(canvas.drawing, page: page)
-        guard show(indices, page: page) else { return false }
+        guard show(indices, page: page, outline: loop) else { return false }
         host.tools.showToast(symbol: WorksheetTool.lasso.symbol, text: "Circle to lasso · selected")
         return true
     }
@@ -283,7 +297,7 @@ final class InkSelectionController {
         select(page: page, lasso: lasso.points)
     }
 
-    // MARK: - Move, resize, rotate
+    // MARK: - Move and resize
 
     private func dragBegan() {
         guard let selection, let canvas = host?.canvases[selection.page] else { return }
@@ -307,8 +321,8 @@ final class InkSelectionController {
         host?.previewDrawing(base, page: selection.page)
     }
 
-    /// Moves, resizes or rotates the selection by `delta` (in drawing space)
-    /// as one undo step named `actionName`.
+    /// Moves or resizes the selection by `delta` (in drawing space) as one
+    /// undo step named `actionName`.
     func transformSelection(by delta: CGAffineTransform, actionName: String, undoManager: UndoManager?) {
         guard let selection, let canvas = host?.canvases[selection.page] else { return }
         apply(delta, actionName: actionName, from: canvas.drawing, undoManager: undoManager)
@@ -325,11 +339,13 @@ final class InkSelectionController {
             selection.box = selection.box.applying(delta)
             self.selection = selection
         }
-        overlay.show(selection.box, on: canvas, presentMenu: true)
+        overlay.show(selection.box, outline: selection.outline, on: canvas, resizing: overlay.isResizing)
     }
 
-    // MARK: - Cut, Copy, Duplicate, Delete, Paste
+    // MARK: - Cut, Copy, Delete, Duplicate, Resize, Color, Paste
 
+    /// The edit menu, in GoodNotes' order. GoodNotes' overflow (Take
+    /// Screenshot, Add Element, Convert) is not offered yet.
     private func menuActions() -> [SelectionAction] {
         [
             SelectionAction(title: "Cut", symbol: "scissors") { [weak self] in
@@ -337,15 +353,50 @@ final class InkSelectionController {
                 self.cutSelection(undoManager: self.undoManager(for: page))
             },
             SelectionAction(title: "Copy", symbol: "doc.on.doc") { [weak self] in self?.copySelection() },
+            SelectionAction(title: "Delete", symbol: "trash", destructive: true) { [weak self] in
+                guard let self, let page = self.selection?.page else { return }
+                self.deleteSelection(undoManager: self.undoManager(for: page))
+            },
             SelectionAction(title: "Duplicate", symbol: "plus.square.on.square") { [weak self] in
                 guard let self, let page = self.selection?.page else { return }
                 self.duplicateSelection(undoManager: self.undoManager(for: page))
             },
-            SelectionAction(title: "Delete", symbol: "trash", destructive: true) { [weak self] in
-                guard let self, let page = self.selection?.page else { return }
-                self.deleteSelection(undoManager: self.undoManager(for: page))
-            }
+            SelectionAction(title: "Resize", symbol: "arrow.up.left.and.arrow.down.right") { [weak self] in
+                self?.beginResize()
+            },
+            SelectionAction(title: "Color", symbol: "paintpalette", children: colorActions()) {}
         ]
+    }
+
+    /// The current pen colour presets, as Color's submenu.
+    private func colorActions() -> [SelectionAction] {
+        (host?.tools.settings.penColors ?? []).compactMap { hex in
+            guard let color = UIColor(emberHex: hex) else { return nil }
+            return SelectionAction(title: color.accessibilityName.capitalized, symbol: "circle.fill", color: color) { [weak self] in
+                guard let self, let page = self.selection?.page else { return }
+                self.recolorSelection(color, undoManager: self.undoManager(for: page))
+            }
+        }
+    }
+
+    /// Shows the Resize box: one handle at the bottom right that scales and
+    /// turns the selection, and an × that goes back to the lasso.
+    func beginResize() {
+        guard selection != nil else { return }
+        overlay.setResizing(true)
+    }
+
+    /// Inks the selected strokes in `color` as one undo step named Color.
+    /// The selection stays.
+    func recolorSelection(_ color: UIColor, undoManager: UndoManager?) {
+        guard let host, let selection, let canvas = host.canvases[selection.page] else { return }
+        let before = canvas.drawing
+        let after = SelectionEdit.recolored(before, indices: selection.indices, color: color)
+        // The same colour again changes nothing and is no undo step.
+        guard SelectionEdit.strokes(of: before, at: selection.indices).contains(where: { $0.ink.color.emberHex != color.emberHex })
+        else { return }
+        host.commitDrawing(after, page: selection.page, replacing: before, actionName: "Color", undoManager: undoManager)
+        overlay.show(selection.box, outline: selection.outline, on: canvas, resizing: overlay.isResizing)
     }
 
     /// Puts the selected ink on the pasteboard as PencilKit drawing data and
@@ -426,8 +477,9 @@ final class InkSelectionController {
         let (after, indices) = SelectionEdit.duplicated(before, indices: selection.indices)
         host.commitDrawing(after, page: selection.page, replacing: before, actionName: "Duplicate", undoManager: undoManager)
         let offset = CGAffineTransform(translationX: SelectionEdit.duplicateOffset, y: SelectionEdit.duplicateOffset)
-        self.selection = InkSelection(page: selection.page, indices: indices, box: selection.box.applying(offset))
-        overlay.show(selection.box.applying(offset), on: canvas, presentMenu: true)
+        let box = selection.box.applying(offset)
+        self.selection = InkSelection(page: selection.page, indices: indices, box: box, outline: selection.outline)
+        overlay.show(box, outline: selection.outline, on: canvas)
     }
 
     /// Removes the selected ink as one undo step.
@@ -465,42 +517,45 @@ extension PDFOverlayPageController {
 
 // MARK: - Overlay view
 
-/// The selection's box over the page: a dashed accent outline, a round handle
-/// on each corner to resize and one above the top edge to rotate, plus the
-/// Cut, Copy, Duplicate and Delete edit menu, placed clear of the rotate
-/// handle so a touch on the handle always rotates. It sits above the PDF view rather
-/// than inside a page canvas, so a touch on the selection never reaches
-/// PencilKit (no ink) or the PDF scroll view (no scrolling); everywhere else
-/// it is transparent to touches. It follows the page through scrolling and
-/// zoom by converting from the canvas on every display frame while shown.
+/// The selection over the page, as in GoodNotes. Normally only the dashed
+/// lasso shows; a tap inside it opens the edit menu (Cut, Copy, Delete,
+/// Duplicate, Resize, Color) beside it, and a drag inside moves it. Resize
+/// mode draws the box round the ink with a red × at the top left, which
+/// leaves the mode, and one round handle at the bottom right, which scales
+/// and turns the ink about the top-left corner in one drag. It sits above
+/// the PDF view rather than inside a page canvas, so a touch on the
+/// selection never reaches PencilKit (no ink) or the PDF scroll view (no
+/// scrolling); everywhere else it is transparent to touches. It follows the
+/// page through scrolling and zoom by converting from the canvas on every
+/// display frame while shown.
 @MainActor
 final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionDelegate {
-    static let handleRadius: CGFloat = 6
+    /// The Resize handle's and the ×'s radius, on screen.
+    static let handleRadius: CGFloat = 11
     /// How far from a handle's centre a touch still grabs it, at most.
     static let handleHitRadius: CGFloat = 22
-    /// How far above the top edge the rotate handle sits, on screen.
-    static let rotateHandleDistance: CGFloat = 30
     /// Room the edit menu needs above the selection before it goes below instead.
     static let menuRoom: CGFloat = 56
 
-    /// Where the edit menu goes: outside `keepClear`, the selection's screen
-    /// rectangle plus every point that grabs its rotate handle, above it when
-    /// `bounds` (the visible area) has room and below the box otherwise.
+    /// Where the edit menu goes: beside `keepClear`, the selection's screen
+    /// rectangle (with the Resize handle and × in Resize mode), above it when
+    /// `bounds` (the visible area) has room and below it otherwise.
     struct MenuPlacement: Equatable {
         let keepClear: CGRect
         let below: Bool
         var sourcePoint: CGPoint { CGPoint(x: keepClear.midX, y: below ? keepClear.maxY : keepClear.minY) }
     }
 
-    static func menuPlacement(box: CGRect, rotateHandle: CGPoint, in bounds: CGRect) -> MenuPlacement {
-        let reach = handleHitRadius
-        let handle = CGRect(x: rotateHandle.x - reach, y: rotateHandle.y - reach, width: 2 * reach, height: 2 * reach)
-        let keepClear = box.union(handle)
-        return MenuPlacement(keepClear: keepClear, below: keepClear.minY - menuRoom < bounds.minY)
+    static func menuPlacement(keepClear: CGRect, in bounds: CGRect) -> MenuPlacement {
+        MenuPlacement(keepClear: keepClear, below: keepClear.minY - menuRoom < bounds.minY)
     }
 
     private(set) weak var canvas: PKCanvasView?
     private(set) var box: SelectionBox?
+    /// The lasso round the ink, in the box's own space.
+    private(set) var outlinePoints: [CGPoint] = []
+    /// Resize mode: the box, its handle and its × show instead of the lasso.
+    private(set) var isResizing = false
     /// The live gesture's change, shown before it is committed.
     private(set) var liveDelta = CGAffineTransform.identity
     private var drag: SelectionDrag?
@@ -514,10 +569,10 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
     var menuActions: (() -> [SelectionAction])?
 
     private let outline = CAShapeLayer()
-    private let stem = CAShapeLayer()
-    private let handles = CAShapeLayer()
+    private let handle = UIImageView()
+    private let close = UIImageView()
     private let pan = UIPanGestureRecognizer()
-    private let tap = UITapGestureRecognizer()
+    private let tapRecognizer = UITapGestureRecognizer()
     private lazy var editMenu = UIEditMenuInteraction(delegate: self)
     private var displayLink: CADisplayLink?
     private var shownCorners: [CGPoint] = []
@@ -529,47 +584,68 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
         isOpaque = false
         backgroundColor = .clear
         isHidden = true
-        let accent = UIColor.emberAccent.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)).cgColor
-        outline.strokeColor = accent
+        let light = UITraitCollection(userInterfaceStyle: .light)
+        let accent = UIColor.emberAccent.resolvedColor(with: light)
+        outline.strokeColor = accent.cgColor
         outline.fillColor = nil
         outline.lineWidth = 1.5
-        outline.lineDashPattern = [6, 4]
-        stem.strokeColor = accent
-        stem.lineWidth = 1
-        handles.strokeColor = accent
-        handles.fillColor = UIColor.white.cgColor
-        handles.lineWidth = 1.5
-        for sublayer in [outline, stem, handles] { layer.addSublayer(sublayer) }
+        outline.lineJoin = .round
+        layer.addSublayer(outline)
+        let size = CGSize(width: 2 * Self.handleRadius, height: 2 * Self.handleRadius)
+        let symbol = UIImage.SymbolConfiguration(pointSize: 2 * Self.handleRadius, weight: .regular)
+        handle.image = UIImage(systemName: "arrow.up.left.and.arrow.down.right.circle", withConfiguration: symbol)?
+            .withTintColor(accent, renderingMode: .alwaysOriginal)
+        close.image = UIImage(systemName: "xmark.circle.fill", withConfiguration: symbol)?
+            .withTintColor(.systemRed.resolvedColor(with: light), renderingMode: .alwaysOriginal)
+        for view in [handle, close] {
+            view.frame.size = size
+            view.contentMode = .scaleAspectFit
+            view.backgroundColor = .white
+            view.layer.cornerRadius = Self.handleRadius
+            view.isHidden = true
+            addSubview(view)
+        }
         pan.maximumNumberOfTouches = 1
         pan.addTarget(self, action: #selector(handlePan(_:)))
-        tap.addTarget(self, action: #selector(handleTap))
+        tapRecognizer.addTarget(self, action: #selector(handleTap(_:)))
         addGestureRecognizer(pan)
-        addGestureRecognizer(tap)
+        addGestureRecognizer(tapRecognizer)
         addInteraction(editMenu)
         isAccessibilityElement = true
         accessibilityLabel = "Selected ink"
-        accessibilityHint = "Cut, Copy, Duplicate or Delete from the actions."
+        accessibilityHint = "Cut, Copy, Delete, Duplicate, Resize or Color from the actions."
     }
 
     required init?(coder: NSCoder) { nil }
 
-    func show(_ box: SelectionBox, on canvas: PKCanvasView, presentMenu: Bool) {
+    /// Shows `box` with its lasso `outline` (in the box's own space) over
+    /// `canvas`, in Resize mode when `resizing`. The menu waits for a tap.
+    func show(_ box: SelectionBox, outline: [CGPoint], on canvas: PKCanvasView, resizing: Bool = false) {
         self.box = box
         self.canvas = canvas
+        outlinePoints = outline
+        isResizing = resizing
         liveDelta = .identity
         drag = nil
         isHidden = false
         startTracking()
         refresh(force: true)
-        if presentMenu {
-            DispatchQueue.main.async { [weak self] in self?.presentMenu() }
-        }
+    }
+
+    /// Enters or leaves Resize mode, closing the menu.
+    func setResizing(_ resizing: Bool) {
+        guard box != nil else { return }
+        isResizing = resizing
+        editMenu.dismissMenu()
+        refresh(force: true)
     }
 
     func hide() {
         drag = nil
         box = nil
         canvas = nil
+        outlinePoints = []
+        isResizing = false
         liveDelta = .identity
         isHidden = true
         if pan.state == .began || pan.state == .changed {
@@ -580,7 +656,9 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
         editMenu.dismissMenu()
         stopTracking()
         shownCorners = []
-        for sublayer in [outline, stem, handles] { sublayer.path = nil }
+        outline.path = nil
+        handle.isHidden = true
+        close.isHidden = true
     }
 
     // MARK: Geometry on screen
@@ -590,37 +668,55 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
 
     private var shownBox: SelectionBox? { box?.applying(liveDelta) }
 
-    private func rotateHandle(for box: SelectionBox) -> CGPoint {
-        let top = onScreen(box.topCenter), mid = onScreen(box.center)
-        let dx = top.x - mid.x, dy = top.y - mid.y, length = hypot(dx, dy)
-        let direction = length > 0.5 ? CGPoint(x: dx / length, y: dy / length) : CGPoint(x: 0, y: -1)
-        return CGPoint(x: top.x + direction.x * Self.rotateHandleDistance, y: top.y + direction.y * Self.rotateHandleDistance)
+    /// The lasso as shown now, on screen.
+    private func screenOutline(for box: SelectionBox) -> [CGPoint] {
+        outlinePoints.map { onScreen($0.applying(box.transform)) }
     }
 
-    /// The selection's bounding rectangle on screen.
+    /// The Resize handle's centre on screen: the box's bottom-right corner.
+    var handleCenter: CGPoint? { shownBox.map { onScreen($0.point(.bottomRight)) } }
+    /// The ×'s centre on screen: the box's top-left corner.
+    var closeCenter: CGPoint? { shownBox.map { onScreen($0.point(.topLeft)) } }
+
+    /// What is on screen: the lasso, or in Resize mode the box with its handle and ×.
     private var screenRect: CGRect {
         guard let box = shownBox else { return .null }
-        return LassoGeometry.bounds(of: box.corners.map(onScreen)) ?? .null
+        guard isResizing else { return LassoGeometry.bounds(of: screenOutline(for: box)) ?? .null }
+        let r = Self.handleRadius
+        let corners = box.corners.map(onScreen)
+        return (LassoGeometry.bounds(of: corners) ?? .null).insetBy(dx: -r, dy: -r)
     }
 
-    /// What a touch at `point` (overlay coordinates) would drag, if anything.
-    func target(at point: CGPoint) -> SelectionDrag? {
-        guard let box = shownBox, canvas != nil else { return nil }
+    /// How far from the handle or × a touch still lands on it; smaller on a
+    /// small box so its middle can still be dragged.
+    private func reach(for box: SelectionBox) -> CGFloat {
         let corners = box.corners.map(onScreen)
         let shortest = zip(corners, corners.dropFirst() + corners.prefix(1)).map { hypot($1.x - $0.x, $1.y - $0.y) }.min() ?? 0
-        // On a small box the handles shrink so its middle can still be dragged.
-        let reach = min(Self.handleHitRadius, max(10, shortest / 3))
-        let handle = rotateHandle(for: box)
-        if hypot(point.x - handle.x, point.y - handle.y) <= reach { return .rotate }
-        for (corner, position) in zip(SelectionBox.Corner.allCases, corners)
-        where hypot(point.x - position.x, point.y - position.y) <= reach {
-            return .resize(corner)
+        return min(Self.handleHitRadius, max(12, shortest / 3))
+    }
+
+    /// Whether a touch at `point` (overlay coordinates) is on the Resize mode ×.
+    func isOnClose(_ point: CGPoint) -> Bool {
+        guard isResizing, let box = shownBox, let center = closeCenter else { return false }
+        return hypot(point.x - center.x, point.y - center.y) <= reach(for: box)
+    }
+
+    /// What a touch at `point` (overlay coordinates) would drag, if anything:
+    /// the handle in Resize mode, or the selection from anywhere inside it.
+    func target(at point: CGPoint) -> SelectionDrag? {
+        guard let box = shownBox, canvas != nil else { return nil }
+        if isResizing {
+            if let center = handleCenter, hypot(point.x - center.x, point.y - center.y) <= reach(for: box) { return .resize }
+            if isOnClose(point) { return nil }
         }
-        return box.contains(onCanvas(point)) ? .move : nil
+        let local = onCanvas(point)
+        if box.contains(local) { return .move }
+        let lasso = outlinePoints.map { $0.applying(box.transform) }
+        return !isResizing && LassoGeometry.contains(local, in: lasso) ? .move : nil
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard !isHidden, isUserInteractionEnabled, target(at: point) != nil else { return nil }
+        guard !isHidden, isUserInteractionEnabled, target(at: point) != nil || isOnClose(point) else { return nil }
         return self
     }
 
@@ -636,42 +732,53 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
 
     override var accessibilityCustomActions: [UIAccessibilityCustomAction]? {
         get {
-            (menuActions?() ?? []).map { action in
-                UIAccessibilityCustomAction(name: action.title) { _ in
+            let actions = (menuActions?() ?? []).flatMap { action in
+                action.children.isEmpty ? [(action.title, action)] : action.children.map { ("\(action.title) \($0.title)", $0) }
+            }
+            var custom = actions.map { name, action in
+                UIAccessibilityCustomAction(name: name) { _ in
                     MainActor.assumeIsolated { action.perform() }
                     return true
                 }
             }
+            if isResizing {
+                custom.append(UIAccessibilityCustomAction(name: "Done resizing") { [weak self] _ in
+                    MainActor.assumeIsolated { self?.setResizing(false) }
+                    return true
+                })
+            }
+            return custom
         }
         set { super.accessibilityCustomActions = newValue }
     }
 
     // MARK: Drawing
 
-    /// Redraws the box where the page now puts it; skipped when nothing moved.
+    /// Redraws the selection where the page now puts it; skipped when nothing moved.
     fileprivate func refresh(force: Bool) {
         guard let box = shownBox, canvas != nil else { return }
         let corners = box.corners.map(onScreen)
         guard force || corners != shownCorners else { return }
         shownCorners = corners
-        let outlinePath = UIBezierPath()
-        outlinePath.move(to: corners[0])
-        for corner in corners.dropFirst() { outlinePath.addLine(to: corner) }
-        outlinePath.close()
-        let top = onScreen(box.topCenter), rotate = rotateHandle(for: box)
-        let stemPath = UIBezierPath()
-        stemPath.move(to: top)
-        stemPath.addLine(to: rotate)
-        let handlePath = UIBezierPath()
-        for center in corners + [rotate] {
-            handlePath.append(UIBezierPath(arcCenter: center, radius: Self.handleRadius, startAngle: 0, endAngle: 2 * .pi, clockwise: true))
+        let points = isResizing ? corners : screenOutline(for: box)
+        let path = UIBezierPath()
+        if let first = points.first {
+            path.move(to: first)
+            for point in points.dropFirst() { path.addLine(to: point) }
+            path.close()
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        outline.path = outlinePath.cgPath
-        stem.path = stemPath.cgPath
-        handles.path = handlePath.cgPath
+        outline.path = path.cgPath
+        outline.lineDashPattern = isResizing ? nil : [6, 4]
+        outline.lineWidth = isResizing ? 1 : 1.5
         CATransaction.commit()
+        handle.isHidden = !isResizing
+        close.isHidden = !isResizing
+        if isResizing {
+            handle.center = corners[SelectionBox.Corner.bottomRight.rawValue]
+            close.center = corners[SelectionBox.Corner.topLeft.rawValue]
+        }
     }
 
     private func startTracking() {
@@ -744,27 +851,33 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
     /// The gesture's change from where it began to `point`, in drawing space.
     private func delta(for drag: SelectionDrag, box: SelectionBox, to point: CGPoint) -> CGAffineTransform {
         switch drag {
-        case .move:
-            return SelectionBox.translation(from: dragStart, to: point)
-        case .resize(let corner):
-            // The corner keeps the offset it had from the touch, so it does not jump to the Pencil tip.
-            let handle = box.point(corner)
-            return box.resize(corner, to: CGPoint(x: point.x + handle.x - dragStart.x, y: point.y + handle.y - dragStart.y))
-        case .rotate:
-            return box.rotation(from: dragStart, to: point)
+        case .move: SelectionBox.translation(from: dragStart, to: point)
+        case .resize: box.scaleAndRotate(from: dragStart, to: point)
         }
     }
 
-    @objc private func handleTap() {
-        if menuVisible { editMenu.dismissMenu() } else { presentMenu() }
+    @objc private func handleTap(_ tap: UITapGestureRecognizer) {
+        self.tap(at: tap.location(in: self))
+    }
+
+    /// A tap at `point` (overlay coordinates): the × leaves Resize mode, and
+    /// anywhere inside the selection opens the menu, or closes it when open.
+    func tap(at point: CGPoint) {
+        if isOnClose(point) {
+            setResizing(false)
+        } else if menuVisible {
+            editMenu.dismissMenu()
+        } else if target(at: point) != nil {
+            presentMenu()
+        }
     }
 
     // MARK: Edit menu
 
-    /// Where the menu goes for the box as shown now, or nil when nothing is shown.
+    /// Where the menu goes for the selection as shown now, or nil when nothing is shown.
     var menuPlacement: MenuPlacement? {
-        guard let box = shownBox, canvas != nil, !screenRect.isNull else { return nil }
-        return Self.menuPlacement(box: screenRect, rotateHandle: rotateHandle(for: box), in: bounds.inset(by: safeAreaInsets))
+        guard shownBox != nil, canvas != nil, !screenRect.isNull else { return nil }
+        return Self.menuPlacement(keepClear: screenRect, in: bounds.inset(by: safeAreaInsets))
     }
 
     private func presentMenu() {
@@ -775,16 +888,27 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
         editMenu.presentEditMenu(with: configuration)
     }
 
-    func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
-                             suggestedActions: [UIMenuElement]) -> UIMenu? {
-        UIMenu(children: (menuActions?() ?? []).map { action in
-            UIAction(title: action.title, image: UIImage(systemName: action.symbol),
-                     attributes: action.destructive ? .destructive : []) { _ in action.perform() }
-        })
+    /// The menu's items, in order, as UIKit menu elements.
+    static func menuElements(for actions: [SelectionAction]) -> [UIMenuElement] {
+        actions.map { action in
+            let image = action.color.map { color in
+                UIImage(systemName: action.symbol)?.withTintColor(color, renderingMode: .alwaysOriginal)
+            } ?? UIImage(systemName: action.symbol)
+            if !action.children.isEmpty {
+                return UIMenu(title: action.title, image: image, children: menuElements(for: action.children))
+            }
+            return UIAction(title: action.title, image: image, attributes: action.destructive ? .destructive : []) { _ in
+                action.perform()
+            }
+        }
     }
 
-    /// The menu lays itself out beside this rectangle, never over it, so the
-    /// rotate handle inside it stays uncovered.
+    func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                             suggestedActions: [UIMenuElement]) -> UIMenu? {
+        UIMenu(children: Self.menuElements(for: menuActions?() ?? []))
+    }
+
+    /// The menu lays itself out beside this rectangle, never over it.
     func editMenuInteraction(_ interaction: UIEditMenuInteraction, targetRectFor configuration: UIEditMenuConfiguration) -> CGRect {
         menuPlacement?.keepClear ?? .zero
     }
