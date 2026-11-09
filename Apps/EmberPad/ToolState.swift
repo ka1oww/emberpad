@@ -72,6 +72,11 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// is disabled; `normalized()` keeps it off whatever was stored.
     var scribbleToErase = false
     var circleToLasso = true
+    /// The fountain pen's GoodNotes-style feel (`PenFeel`), applied when the
+    /// Pencil lifts. Tip sharpness ships; pressure sensitivity (0 = Min) is
+    /// stored for a later package and not applied yet.
+    var penTipSharpness = PenFeelSettings().tipSharpness
+    var penPressureSensitivity = PenFeelSettings().pressureSensitivity
 
     /// The design's ink hex values (section 3), which the `pen*` and
     /// `highlighter*` colour sets approximate to three decimals.
@@ -98,6 +103,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
         penDrawAndHold = (try? c.decodeIfPresent(Bool.self, forKey: .penDrawAndHold)) ?? d.penDrawAndHold
         scribbleToErase = (try? c.decodeIfPresent(Bool.self, forKey: .scribbleToErase)) ?? d.scribbleToErase
         circleToLasso = (try? c.decodeIfPresent(Bool.self, forKey: .circleToLasso)) ?? d.circleToLasso
+        penTipSharpness = (try? c.decodeIfPresent(Double.self, forKey: .penTipSharpness)) ?? d.penTipSharpness
+        penPressureSensitivity = (try? c.decodeIfPresent(Double.self, forKey: .penPressureSensitivity)) ?? d.penPressureSensitivity
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
@@ -113,6 +120,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
         s.penWidthIndex = Self.clamp(s.penWidthIndex, count: Theme.penWidths.count)
         s.highlighterWidthIndex = Self.clamp(s.highlighterWidthIndex, count: Theme.highlighterWidths.count)
         s.eraserSizeIndex = Self.clamp(s.eraserSizeIndex, count: Theme.eraserSizes.count)
+        s.penTipSharpness = Self.unit(s.penTipSharpness, fallback: Self().penTipSharpness)
+        s.penPressureSensitivity = Self.unit(s.penPressureSensitivity, fallback: Self().penPressureSensitivity)
         return s
     }
 
@@ -123,11 +132,16 @@ struct ToolSettings: Codable, Equatable, Sendable {
 
     private static func clamp(_ index: Int, count: Int) -> Int { min(max(index, 0), count - 1) }
 
+    private static func unit(_ value: Double, fallback: Double) -> Double { value.isFinite ? min(max(value, 0), 1) : fallback }
+
     var penColor: UIColor { UIColor(emberHex: penColors[penColorIndex]) ?? .emberPenBlack }
     var highlighterColor: UIColor { UIColor(emberHex: highlighterColors[highlighterColorIndex]) ?? .emberHighlighterYellow }
     var penWidth: CGFloat { Theme.penWidths[penWidthIndex] }
     var highlighterWidth: CGFloat { Theme.highlighterWidths[highlighterWidthIndex] }
     var eraserSize: CGFloat { Theme.eraserSizes[eraserSizeIndex] }
+    var penFeel: PenFeelSettings {
+        PenFeelSettings(tipSharpness: penTipSharpness, pressureSensitivity: penPressureSensitivity)
+    }
 
     /// The PencilKit tool every page canvas uses for `tool`.
     func pencilTool(for tool: WorksheetTool) -> any PKTool {
@@ -275,6 +289,8 @@ final class ToolState {
     func setHighlighterAlwaysStraight(_ on: Bool) { update { $0.highlighterAlwaysStraight = on } }
     func setPenDrawAndHold(_ on: Bool) { update { $0.penDrawAndHold = on } }
     func setCircleToLasso(_ on: Bool) { update { $0.circleToLasso = on } }
+    func setPenTipSharpness(_ value: Double) { update { $0.penTipSharpness = value } }
+    func setPenPressureSensitivity(_ value: Double) { update { $0.penPressureSensitivity = value } }
 
     func canAddColor(for tool: WorksheetTool) -> Bool {
         presets(for: tool).count < ToolSettings.maxPresets

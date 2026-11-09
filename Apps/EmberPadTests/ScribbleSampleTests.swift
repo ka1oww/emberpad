@@ -69,6 +69,48 @@ final class ScribbleSampleTests: XCTestCase {
         XCTAssertEqual(roundTrip.samples, [sample])
     }
 
+    func testExportsWithoutSizeStillDecodeAndNewOnesCarryIt() throws {
+        let old = try ScribbleSampleCodec.decode(Data(Self.fixtureJSON.utf8))
+        XCTAssertNil(old.samples[0].strokes[0].points[0].size)
+        let point = PKStrokePoint(location: .zero, timeOffset: 0, size: CGSize(width: 3.25, height: 3.25), opacity: 1,
+                                  force: 1, azimuth: 0, altitude: 1)
+        let stroke = PKStroke(ink: PKInk(.fountainPen, color: .black),
+                              path: PKStrokePath(controlPoints: [point, point], creationDate: Date(timeIntervalSince1970: 0)))
+        XCTAssertEqual(try XCTUnwrap(ScribbleStroke(stroke).points.first?.size), 3.25, accuracy: 1e-6)
+    }
+
+    func testPenFeelProbeRecordsSizeForceAngleTimingAndWidth() throws {
+        let points = (0..<4).map { (i: Int) -> PKStrokePoint in
+            let step = CGFloat(i)
+            let size = CGSize(width: 2 + step * 0.5, height: 2)
+            return PKStrokePoint(location: CGPoint(x: step * 8, y: 20), timeOffset: 50 + Double(i) / 240, size: size,
+                                 opacity: 1, force: 0.3 + step * 0.4, azimuth: 0.7, altitude: 1.1)
+        }
+        let stroke = PKStroke(ink: PKInk(.fountainPen, color: .black),
+                              path: PKStrokePath(controlPoints: points, creationDate: Date(timeIntervalSince1970: 0)))
+        let line = PenFeelProbeLine(id: "line", widthIndex: 2, toolWidth: 4, drawing: PKDrawing(strokes: [stroke]))
+        XCTAssertEqual(line.toolWidth, 4)
+        XCTAssertEqual(line.widthIndex, 2)
+        XCTAssertEqual(line.inkType, PKInk.InkType.fountainPen.rawValue)
+        let recorded = try XCTUnwrap(line.strokes.first?.points)
+        XCTAssertEqual(recorded.map { $0.size ?? -1 }, [2, 2.5, 3, 3.5])
+        XCTAssertEqual(recorded[3].force, 1.5, accuracy: 1e-6)
+        XCTAssertEqual(recorded[3].timeOffset, 3.0 / 240, accuracy: 1e-4)
+        XCTAssertEqual(recorded[0].azimuth, 0.7, accuracy: 1e-3)
+        XCTAssertEqual(recorded[0].altitude, 1.1, accuracy: 1e-3)
+
+        let set = PenFeelProbeSet(lines: [line])
+        let url = try PenFeelProbeCodec.writeExport(set)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        XCTAssertEqual(url.lastPathComponent, "pen-feel-probe.json")
+        let decoded = try PenFeelProbeCodec.decode(Data(contentsOf: url))
+        XCTAssertEqual(decoded, set)
+        XCTAssertEqual(decoded.schema, "ember.pen-feel-probe/v1")
+        var wrong = set
+        wrong.schema = "ember.pen-feel-probe/v9"
+        XCTAssertThrowsError(try PenFeelProbeCodec.decode(PenFeelProbeCodec.encode(wrong)))
+    }
+
     func testUnknownSchemaIsRejected() {
         let json = Self.fixtureJSON.replacingOccurrences(of: "ember.scribble-samples/v1", with: "ember.scribble-samples/v9")
         XCTAssertThrowsError(try ScribbleSampleCodec.decode(Data(json.utf8)))

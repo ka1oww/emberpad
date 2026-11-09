@@ -27,6 +27,11 @@ struct DeviceChecksView: View {
     @State private var scribbleClearToken = 0
     @State private var scribbleExportURL: URL?
     @State private var scribbleError: String?
+    @State private var probeDrawing = PKDrawing()
+    @State private var probeWidthIndex = Theme.penDefaultWidthIndex
+    @State private var probeLines: [PenFeelProbeLine] = []
+    @State private var probeClearToken = 0
+    @State private var probeError: String?
 
     private var snapshot: DeviceChecksSnapshot {
         DeviceChecksSnapshot(
@@ -98,6 +103,33 @@ struct DeviceChecksView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
+            Section("Pen feel probe") {
+                Picker("Width", selection: $probeWidthIndex) {
+                    ForEach(Theme.penWidths.indices, id: \.self) { Text(Self.widthLabel(Theme.penWidths[$0])).tag($0) }
+                }.pickerStyle(.segmented)
+                DeviceChecksScribbleCanvas(drawing: $probeDrawing, clearToken: probeClearToken,
+                                           tool: PKInkingTool(.fountainPen, color: .black, width: Theme.penWidths[probeWidthIndex]),
+                                           policy: .pencilOnly, background: .white)
+                    .frame(height: 200)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.4)))
+                HStack {
+                    Button("Save line") { saveProbeLine() }
+                        .disabled(probeDrawing.strokes.isEmpty)
+                    Button("Clear canvas") { probeClearToken += 1 }
+                    Spacer()
+                    Button("Export JSON") { exportProbeLines() }
+                        .disabled(probeLines.isEmpty)
+                }.buttonStyle(.bordered)
+                LabeledValue(label: "Saved lines", value: Theme.penWidths.indices.map { index in
+                    "\(Self.widthLabel(Theme.penWidths[index])) \(probeLines.filter { $0.widthIndex == index }.count)"
+                }.joined(separator: ", "))
+                if let error = probeError {
+                    Text("Export failed: \(error)").foregroundStyle(.red).font(.footnote)
+                } else {
+                    Text("Write one line with the Pencil at each width, saving after each, then export through Files. It records each point's size, force, azimuth, altitude and timing with the pen width, to tune the fountain pen's feel. Nothing is uploaded.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
             Section("Apple Pencil") {
                 LabeledValue(label: "Double-tap action", value: pencilLabel)
             }
@@ -135,6 +167,26 @@ struct DeviceChecksView: View {
         guard !scribbleDrawing.strokes.isEmpty else { return }
         scribbleSamples.append(ScribbleSample(label: scribbleLabel, drawing: scribbleDrawing))
         scribbleClearToken += 1
+    }
+
+    private static func widthLabel(_ width: CGFloat) -> String {
+        "\(Double(width).formatted(.number.precision(.fractionLength(0...1)))) pt"
+    }
+
+    private func saveProbeLine() {
+        guard !probeDrawing.strokes.isEmpty else { return }
+        probeLines.append(PenFeelProbeLine(widthIndex: probeWidthIndex, toolWidth: Theme.penWidths[probeWidthIndex],
+                                           drawing: probeDrawing))
+        probeClearToken += 1
+    }
+
+    private func exportProbeLines() {
+        do {
+            scribbleExportURL = try PenFeelProbeCodec.writeExport(PenFeelProbeSet(lines: probeLines))
+            probeError = nil
+        } catch {
+            probeError = error.localizedDescription
+        }
     }
 
     private func exportScribbleSamples() {
@@ -196,24 +248,30 @@ extension URL: @retroactive Identifiable {
     public var id: String { absoluteString }
 }
 
-/// Plain PKCanvasView that accepts any input so samples can be drawn in the
-/// Simulator as well as with the Pencil. Bumping `clearToken` empties it.
+/// Plain PKCanvasView. By default it accepts any input so samples can be
+/// drawn in the Simulator as well as with the Pencil; the pen feel probe takes
+/// only the Pencil so finger touches never reach its data. Bumping
+/// `clearToken` empties it.
 private struct DeviceChecksScribbleCanvas: UIViewRepresentable {
     @Binding var drawing: PKDrawing
     let clearToken: Int
+    var tool: any PKTool = PKInkingTool(.pen, color: .label, width: 3)
+    var policy: PKCanvasViewDrawingPolicy = .anyInput
+    var background: UIColor = .secondarySystemBackground
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> PKCanvasView {
         let canvas = PKCanvasView()
-        canvas.drawingPolicy = .anyInput
-        canvas.tool = PKInkingTool(.pen, color: .label, width: 3)
-        canvas.backgroundColor = .secondarySystemBackground
+        canvas.drawingPolicy = policy
+        canvas.tool = tool
+        canvas.backgroundColor = background
         canvas.delegate = context.coordinator
         return canvas
     }
 
     func updateUIView(_ canvas: PKCanvasView, context: Context) {
+        canvas.tool = tool
         if context.coordinator.lastClearToken != clearToken {
             context.coordinator.lastClearToken = clearToken
             canvas.drawing = PKDrawing()

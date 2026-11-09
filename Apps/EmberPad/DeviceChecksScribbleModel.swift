@@ -24,10 +24,29 @@ struct ScribblePoint: Codable, Equatable {
     var azimuth: Double
     /// Radians.
     var altitude: Double
+    /// PencilKit's recorded point size (width), which its committed renderer
+    /// draws from. Nil in exports made before the pen feel probe.
+    var size: Double?
 }
 
 struct ScribbleStroke: Codable, Equatable {
     var points: [ScribblePoint]
+}
+
+extension ScribbleStroke {
+    /// Raw points of a committed stroke. Timestamps become offsets from the
+    /// stroke's first point so exports carry no wall-clock time.
+    init(_ stroke: PKStroke) {
+        let start = stroke.path.first?.timeOffset ?? 0
+        points = stroke.path.map { point in
+            ScribblePoint(
+                x: Double(point.location.x), y: Double(point.location.y),
+                timeOffset: point.timeOffset - start,
+                force: Double(point.force),
+                azimuth: Double(point.azimuth), altitude: Double(point.altitude),
+                size: Double(point.size.width))
+        }
+    }
 }
 
 struct ScribbleSample: Codable, Equatable {
@@ -44,18 +63,7 @@ struct ScribbleSample: Codable, Equatable {
     /// Captures raw points from a drawing. Timestamps become offsets from each
     /// stroke's first point so exports carry no wall-clock time.
     init(id: String = UUID().uuidString, label: ScribbleLabel, drawing: PKDrawing) {
-        let strokes = drawing.strokes.map { stroke -> ScribbleStroke in
-            let start = stroke.path.first?.timeOffset ?? 0
-            let points = stroke.path.map { point in
-                ScribblePoint(
-                    x: Double(point.location.x), y: Double(point.location.y),
-                    timeOffset: point.timeOffset - start,
-                    force: Double(point.force),
-                    azimuth: Double(point.azimuth), altitude: Double(point.altitude))
-            }
-            return ScribbleStroke(points: points)
-        }
-        self.init(id: id, label: label, strokes: strokes)
+        self.init(id: id, label: label, strokes: drawing.strokes.map(ScribbleStroke.init))
     }
 }
 
@@ -92,11 +100,76 @@ enum ScribbleSampleCodec {
 
     /// Writes the export into a fresh temporary file for the Files share sheet.
     static func writeExport(_ set: ScribbleSampleSet, directory: URL = FileManager.default.temporaryDirectory) throws -> URL {
+        try write(encode(set), named: fileName, in: directory)
+    }
+
+    static func write(_ data: Data, named name: String, in directory: URL) throws -> URL {
         let folder = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let url = folder.appendingPathComponent(fileName, isDirectory: false)
-        try encode(set).write(to: url, options: .atomic)
+        let url = folder.appendingPathComponent(name, isDirectory: false)
+        try data.write(to: url, options: .atomic)
         return url
+    }
+}
+
+// MARK: - Pen feel probe
+
+/// One line the captain wrote with the fountain pen at one of the toolbar's
+/// widths, for calibrating `PenFeel` against PencilKit's real point sizes and
+/// force-to-size response on the device.
+struct PenFeelProbeLine: Codable, Equatable {
+    var id: String
+    /// The `PKInkingTool` width the line was written with, in points.
+    var toolWidth: Double
+    /// Index into the toolbar's pen widths (`Theme.penWidths`).
+    var widthIndex: Int
+    var inkType: String
+    var strokes: [ScribbleStroke]
+
+    init(id: String = UUID().uuidString, toolWidth: Double, widthIndex: Int, inkType: String, strokes: [ScribbleStroke]) {
+        self.id = id
+        self.toolWidth = toolWidth
+        self.widthIndex = widthIndex
+        self.inkType = inkType
+        self.strokes = strokes
+    }
+
+    init(id: String = UUID().uuidString, widthIndex: Int, toolWidth: CGFloat, drawing: PKDrawing) {
+        self.init(id: id, toolWidth: Double(toolWidth), widthIndex: widthIndex,
+                  inkType: drawing.strokes.first?.ink.inkType.rawValue ?? PKInk.InkType.fountainPen.rawValue,
+                  strokes: drawing.strokes.map(ScribbleStroke.init))
+    }
+}
+
+struct PenFeelProbeSet: Codable, Equatable {
+    static let schema = "ember.pen-feel-probe/v1"
+
+    var schema: String
+    var lines: [PenFeelProbeLine]
+
+    init(lines: [PenFeelProbeLine]) {
+        self.schema = Self.schema
+        self.lines = lines
+    }
+}
+
+enum PenFeelProbeCodec {
+    static let fileName = "pen-feel-probe.json"
+
+    static func encode(_ set: PenFeelProbeSet) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(set)
+    }
+
+    static func decode(_ data: Data) throws -> PenFeelProbeSet {
+        let set = try JSONDecoder().decode(PenFeelProbeSet.self, from: data)
+        guard set.schema == PenFeelProbeSet.schema else { throw ScribbleSampleCodec.CodecError.unsupportedSchema(set.schema) }
+        return set
+    }
+
+    static func writeExport(_ set: PenFeelProbeSet, directory: URL = FileManager.default.temporaryDirectory) throws -> URL {
+        try ScribbleSampleCodec.write(encode(set), named: fileName, in: directory)
     }
 }
 #endif

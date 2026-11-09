@@ -204,7 +204,27 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let previousCount = session.drawing(on: page).strokes.count
         inkSelection.pageDidChange(page)
         session.update(canvasView.drawing, page: page)
-        straightenIfHeld(canvasView, page: page, previousCount: previousCount)
+        if !straightenIfHeld(canvasView, page: page, previousCount: previousCount) {
+            applyPenFeel(canvasView, page: page, previousCount: previousCount)
+        }
+    }
+
+    /// After PencilKit commits a new fountain-pen stroke, swaps it for the
+    /// same stroke with the pen's tip sharpness (`PenFeel`), as one undo step
+    /// named "Ink", the same way the straight highlighter swaps its line. The
+    /// live ink was PencilKit's own; only the stroke ends change, after lift.
+    private func applyPenFeel(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
+        guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
+              stroke.ink.inkType == .fountainPen,
+              let reshaped = PenFeel.reshaped(stroke, settings: tools.settings.penFeel) else { return }
+        let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
+        // Undo and redo bring strokes back exactly as they were, never tapered twice.
+        guard undoManager?.isUndoing != true, undoManager?.isRedoing != true else { return }
+        let count = canvas.drawing.strokes.count
+        DispatchQueue.main.async { [weak self] in
+            self?.replaceNewestStroke(page: page, strokeCount: count, with: reshaped, undoManager: undoManager,
+                                      actionName: "Ink")
+        }
     }
 
     func undo() { activeCanvas?.undoManager?.undo() }
@@ -504,19 +524,22 @@ extension PDFOverlayPageController {
     /// held closed pen loop is circle to lasso instead. The swap waits a turn
     /// of the run loop so PencilKit finishes its commit and closes its undo
     /// group first; the ink was already drawn, so nothing here can delay it.
-    private func straightenIfHeld(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
-        guard let hold = Self.holdRecognizer(on: canvas) else { return }
+    /// Returns whether the stroke is taken (a selection, a snap, or an undo or
+    /// redo), so the pen's tip sharpness leaves it alone.
+    @discardableResult
+    private func straightenIfHeld(_ canvas: PKCanvasView, page: Int, previousCount: Int) -> Bool {
+        guard let hold = Self.holdRecognizer(on: canvas) else { return false }
         let held = hold.heldAtEnd
         if !held, canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last {
             // Lifted without a hold: a closed loop can still be long-pressed into a selection.
             inkSelection.noteLiftedStroke(stroke, page: page, strokeCount: canvas.drawing.strokes.count)
         }
-        guard held || hold.pencilStroke else { return }
+        guard held || hold.pencilStroke else { return false }
         let lineLike = hold.lineLikeAtHold
         // A hold or stroke applies to the one drawing change it ended, whatever that change was.
         hold.consumeHold()
         // Undo and redo bring strokes back exactly as they were.
-        if let undoManager = canvas.undoManager, undoManager.isUndoing || undoManager.isRedoing { return }
+        if let undoManager = canvas.undoManager, undoManager.isUndoing || undoManager.isRedoing { return true }
         if held, canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last, inkSelection.isLassoLoop(stroke) {
             // Circle to lasso (EP-29): the same wait for PencilKit's commit as the snap below.
             let count = canvas.drawing.strokes.count
@@ -524,15 +547,16 @@ extension PDFOverlayPageController {
             DispatchQueue.main.async { [weak self] in
                 self?.inkSelection.lassoNewestStroke(page: page, strokeCount: count, undoManager: undoManager)
             }
-            return
+            return true
         }
         guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
-              snapsStraight(stroke, held: held, lineLike: lineLike), let straight = StrokeSnap.straightened(stroke) else { return }
+              snapsStraight(stroke, held: held, lineLike: lineLike), let straight = StrokeSnap.straightened(stroke) else { return false }
         let count = canvas.drawing.strokes.count
         let undoManager = canvas.undoManager
         DispatchQueue.main.async { [weak self] in
             self?.replaceNewestStroke(page: page, strokeCount: count, with: straight, undoManager: undoManager)
         }
+        return true
     }
 
     /// Whether a just-committed stroke becomes a straight line.
@@ -555,9 +579,11 @@ extension PDFOverlayPageController {
     /// stroke and its snap are one undo step: PencilKit's own undo action for
     /// the freehand stroke is popped first, then one action swaps between the
     /// page without the stroke and the page with the straight line. One undo
-    /// removes the straight line; redo puts it back. Does nothing if the
+    /// removes the straight line; redo puts it back. The pen's tip sharpness
+    /// uses the same swap under `actionName` "Ink". Does nothing if the
     /// page's drawing has moved on since the stroke was committed.
-    func replaceNewestStroke(page: Int, strokeCount: Int, with replacement: PKStroke, undoManager: UndoManager?) {
+    func replaceNewestStroke(page: Int, strokeCount: Int, with replacement: PKStroke, undoManager: UndoManager?,
+                             actionName: String = "Straight Line") {
         guard let canvas = canvases[page], canvas.drawing.strokes.count == strokeCount, strokeCount > 0,
               undoManager?.isUndoing != true, undoManager?.isRedoing != true else { return }
         isReplacingStroke = true
@@ -581,7 +607,7 @@ extension PDFOverlayPageController {
         if let undoManager {
             undoManager.beginUndoGrouping()
             registerDrawingSwap(on: undoManager, page: page, restoring: before, then: after)
-            undoManager.setActionName("Straight Line")
+            undoManager.setActionName(actionName)
             undoManager.endUndoGrouping()
         }
     }
