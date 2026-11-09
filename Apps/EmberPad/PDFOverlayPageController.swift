@@ -454,11 +454,11 @@ extension PDFOverlayPageController {
         let settings = tools.settings
         switch stroke.ink.inkType {
         case .marker:
-            return (settings.highlighterAlwaysStraight && tools.current == .highlighter) || (held && settings.straightHighlighter)
+            return tools.current == .highlighter && (settings.highlighterAlwaysStraight || (held && settings.straightHighlighter))
         case .fountainPen:
             // Only a stroke already close to a line when held snaps; a held letter,
             // curve or closed loop stays as written (shapes come later).
-            return held && lineLike && settings.penDrawAndHold
+            return tools.current == .pen && held && lineLike && settings.penDrawAndHold
         default:
             return false
         }

@@ -179,6 +179,7 @@ final class StraightHighlighterTests: XCTestCase {
         let (controller, session) = try await Self.makeController(pages: 1)
         let canvas = try Self.canvas(controller, session, page: 0)
         let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        controller.tools.select(.highlighter)
         let marker = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 131))
 
         hold.heldAtEnd = true
@@ -212,6 +213,8 @@ final class StraightHighlighterTests: XCTestCase {
         controller.canvasViewDrawingDidChange(canvas)
         XCTAssertFalse(hold.heldAtEnd)
         // Held highlighter with the switch off.
+        controller.tools.select(.highlighter)
+        controller.tools.setHighlighterAlwaysStraight(false)
         controller.tools.setStraightHighlighter(false)
         hold.heldAtEnd = true
         canvas.drawing = PKDrawing(strokes: [marker, pen, marker])
@@ -352,6 +355,29 @@ final class StraightHighlighterTests: XCTestCase {
         XCTAssertEqual(canvas.drawing.strokes.count, 3)
         for stroke in canvas.drawing.strokes {
             XCTAssertEqual(Array(stroke.path).map(\.location), Array(pen.path).map(\.location))
+        }
+    }
+
+    func testEraserSplitFragmentsWithAHoldAreLeftAlone() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        let pen = Self.wobblyPen(from: CGPoint(x: 40, y: 220), to: CGPoint(x: 400, y: 226))
+        let marker = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 131))
+        canvas.drawing = PKDrawing(strokes: [pen])
+        controller.canvasViewDrawingDidChange(canvas)
+        controller.tools.select(.eraser)
+
+        for fragment in [pen, marker] {
+            let before = canvas.drawing.strokes.count
+            hold.pencilStroke = true
+            hold.heldAtEnd = true
+            hold.lineLikeAtHold = true
+            canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + [fragment])
+            controller.canvasViewDrawingDidChange(canvas)
+            await Self.settle()
+            XCTAssertEqual(canvas.drawing.strokes.count, before + 1)
+            XCTAssertEqual(Array(try XCTUnwrap(canvas.drawing.strokes.last).path).map(\.location), Array(fragment.path).map(\.location))
         }
     }
 
