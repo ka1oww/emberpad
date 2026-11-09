@@ -256,6 +256,7 @@ struct ToolSettingsPopover: View {
                     CheckRow(title: "Fountain pen", checked: true) {}
                     TaggedRow(title: "Ball pen, brush pen", tag: "Not planned")
                 }
+                tipSharpnessSection
                 colorSection(.pen)
                 Section {
                     Toggle("Draw and hold: straight line",
@@ -339,9 +340,40 @@ struct ToolSettingsPopover: View {
         }
     }
 
-    private var height: CGFloat {
+    /// GoodNotes' Fountain Pen "Tip sharpness": a five-tick slider, applied to
+    /// each stroke when the Pencil lifts (`PenFeel`).
+    private var tipSharpnessSection: some View {
+        let value = tools.settings.penTipSharpness
+        return Section {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Tip sharpness")
+                    Spacer()
+                    Text("\(Int((value * 100).rounded()))%").monospacedDigit().foregroundStyle(Theme.text2)
+                }
+                Slider(value: Binding(get: { value }, set: tools.setPenTipSharpness), in: 0...1, step: PenFeel.sliderStep)
+                    .accessibilityLabel("Tip sharpness")
+                    .accessibilityValue("\(Int((value * 100).rounded())) percent")
+                // Five ticks, as in GoodNotes: 0, 25, 50, 75 and 100%.
+                HStack {
+                    ForEach(0..<5, id: \.self) { index in
+                        if index > 0 { Spacer() }
+                        Capsule().fill(Theme.line).frame(width: 2, height: 6)
+                    }
+                }
+                .padding(.horizontal, 13)
+                .accessibilityHidden(true)
+            }
+        } footer: {
+            Text("Applied when the Pencil lifts.")
+        }
+    }
+
+    private var height: CGFloat { Self.height(for: tool) }
+
+    static func height(for tool: WorksheetTool) -> CGFloat {
         switch tool {
-        case .pen: 600
+        case .pen: 720
         case .highlighter: 580
         case .eraser: 480
         case .lasso: 230
