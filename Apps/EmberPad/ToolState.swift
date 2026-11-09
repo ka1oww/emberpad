@@ -72,6 +72,10 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// is disabled; `normalized()` keeps it off whatever was stored.
     var scribbleToErase = false
     var circleToLasso = true
+    /// Eraser Phase 4: the eraser removes only highlighter strokes. Off, as in GoodNotes.
+    var eraseHighlighterOnly = false
+    /// Eraser Phase 4 (GoodNotes' Auto-Deselect): lifting the eraser goes back to the tool used before it. Off by default.
+    var eraserBackToLastTool = false
 
     /// The design's ink hex values (section 3), which the `pen*` and
     /// `highlighter*` colour sets approximate to three decimals.
@@ -98,6 +102,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
         penDrawAndHold = (try? c.decodeIfPresent(Bool.self, forKey: .penDrawAndHold)) ?? d.penDrawAndHold
         scribbleToErase = (try? c.decodeIfPresent(Bool.self, forKey: .scribbleToErase)) ?? d.scribbleToErase
         circleToLasso = (try? c.decodeIfPresent(Bool.self, forKey: .circleToLasso)) ?? d.circleToLasso
+        eraseHighlighterOnly = (try? c.decodeIfPresent(Bool.self, forKey: .eraseHighlighterOnly)) ?? d.eraseHighlighterOnly
+        eraserBackToLastTool = (try? c.decodeIfPresent(Bool.self, forKey: .eraserBackToLastTool)) ?? d.eraserBackToLastTool
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
@@ -211,6 +217,8 @@ final class ToolState {
 
     /// Called with the new PencilKit tool whenever it changes.
     @ObservationIgnored var onToolChange: ((any PKTool) -> Void)?
+    /// Clears the focused page's ink as one undo step; set by the page renderer.
+    @ObservationIgnored var onClearPage: (() -> Void)?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var toastTask: Task<Void, Never>?
 
@@ -244,6 +252,22 @@ final class ToolState {
         }
     }
 
+    /// The Pencil lifted after erasing. With "Back to last tool on lift" on,
+    /// the tool used before the eraser comes back (the pen if there was none).
+    /// Returns whether it switched, for tests.
+    @discardableResult
+    func eraserLifted() -> Bool {
+        guard settings.current == .eraser, settings.eraserBackToLastTool else { return false }
+        select(settings.previous == .eraser ? .pen : settings.previous)
+        return true
+    }
+
+    /// Removes all ink on the focused page (after the teacher confirms) and closes the popover.
+    func clearPage() {
+        settingsTool = nil
+        onClearPage?()
+    }
+
     /// Follows the iPad's Pencil preference. Returns what it did, for tests.
     @discardableResult
     func handlePencil(_ action: UIPencilPreferredAction, gesture: PencilGesture) -> PencilCommand {
@@ -275,6 +299,8 @@ final class ToolState {
     func setHighlighterAlwaysStraight(_ on: Bool) { update { $0.highlighterAlwaysStraight = on } }
     func setPenDrawAndHold(_ on: Bool) { update { $0.penDrawAndHold = on } }
     func setCircleToLasso(_ on: Bool) { update { $0.circleToLasso = on } }
+    func setEraseHighlighterOnly(_ on: Bool) { update { $0.eraseHighlighterOnly = on } }
+    func setEraserBackToLastTool(_ on: Bool) { update { $0.eraserBackToLastTool = on } }
 
     func canAddColor(for tool: WorksheetTool) -> Bool {
         presets(for: tool).count < ToolSettings.maxPresets

@@ -246,6 +246,7 @@ struct ToolSettingsPopover: View {
     var heightOverride: CGFloat?
     @State private var pickedColor: PickedColor?
     @State private var addingColorFor: WorksheetTool?
+    @State private var confirmingClearPage = false
 
     var body: some View {
         List {
@@ -297,8 +298,19 @@ struct ToolSettingsPopover: View {
                     }
                 }
                 Section {
-                    TaggedRow(title: "Erase highlighter only", tag: "Phase 4")
-                    TaggedRow(title: "Back to last tool on lift", tag: "Phase 4")
+                    Toggle("Erase highlighter only",
+                           isOn: Binding(get: { tools.settings.eraseHighlighterOnly }, set: tools.setEraseHighlighterOnly))
+                    Button("Clear page", role: .destructive) { confirmingClearPage = true }
+                } footer: {
+                    Text("Highlighter only leaves pen ink untouched.")
+                }
+                Section {
+                    Toggle("Back to last tool on lift",
+                           isOn: Binding(get: { tools.settings.eraserBackToLastTool }, set: tools.setEraserBackToLastTool))
+                } header: {
+                    Text("Settings")
+                } footer: {
+                    Text("After each erase, the Pencil returns to the tool you used before.")
                 }
             case .lasso:
                 Section {
@@ -319,13 +331,19 @@ struct ToolSettingsPopover: View {
         .environment(\.editMode, .constant(tool == .pen || tool == .highlighter ? .active : .inactive))
         .frame(width: 320, height: heightOverride ?? height)
         .addColorSheet(for: $addingColorFor, picked: $pickedColor, tools: tools)
+        .alert("Clear this page?", isPresented: $confirmingClearPage) {
+            Button("Clear page", role: .destructive) { tools.clearPage() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All ink on this page is removed. You can undo it.")
+        }
     }
 
     private var height: CGFloat {
         switch tool {
         case .pen: 600
         case .highlighter: 580
-        case .eraser: 300
+        case .eraser: 480
         case .lasso: 230
         case .laser: 250
         }
