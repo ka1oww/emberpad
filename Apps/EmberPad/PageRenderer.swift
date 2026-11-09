@@ -10,6 +10,8 @@ protocol WorksheetPageRenderer: AnyObject {
     var onPageChange: ((Int) -> Void)? { get set }
     func undo()
     func redo()
+    /// Scrolls the worksheet so page `index` (zero-based) is at the top of the viewport.
+    func goToPage(_ index: Int)
     /// Sets the PencilKit tool on every page canvas, called through `ToolState.onToolChange`.
     func apply(_ tool: any PKTool)
 }
@@ -120,19 +122,70 @@ struct PhaseTag: View {
     }
 }
 
-/// Page number and save state for the nav bar and the page pill.
+/// Where the page-thumbnail popover is anchored.
+enum PagesPopoverSource: Equatable {
+    case toolbar
+    case pill
+}
+
+/// Page number, the page pill and the page-thumbnail popover for the nav bar.
 @MainActor
 final class PageChromeState: ObservableObject {
     @Published private(set) var currentPage = 0
     @Published private(set) var pagePillVisible = false
+    /// The open page-thumbnail popover, if any. While it hangs off the pill, the pill stays put.
+    @Published private(set) var pagesPopover: PagesPopoverSource?
+    /// Scrolls the worksheet; the editor sets it once its renderer exists.
+    var jumpToPage: ((Int) -> Void)?
     private var pillTask: Task<Void, Never>?
+    private let pillLifetime: Duration
+
+    init(pillLifetime: Duration = .seconds(1.5)) { self.pillLifetime = pillLifetime }
+
+    var pillPinned: Bool { pagesPopover == .pill }
 
     func notePageChange(_ page: Int) {
         currentPage = page
         pagePillVisible = true
+        scheduleHide()
+    }
+
+    func openPages(from source: PagesPopoverSource) {
+        pagesPopover = source
+        if source == .pill {
+            pillTask?.cancel()
+            pagePillVisible = true
+        }
+    }
+
+    /// Closing the pill's popover lets the pill fade as after a scroll.
+    func closePages() {
+        guard let source = pagesPopover else { return }
+        pagesPopover = nil
+        if source == .pill { scheduleHide() }
+    }
+
+    /// A tapped thumbnail: close the popover and jump to that page.
+    func selectPage(_ index: Int) {
+        closePages()
+        jumpToPage?(index)
+    }
+
+    /// The binding a popover from `source` presents with.
+    func isShowingPages(from source: PagesPopoverSource) -> Binding<Bool> {
+        Binding(get: { [weak self] in self?.pagesPopover == source },
+                set: { [weak self] shown in
+                    guard let self else { return }
+                    if shown { self.openPages(from: source) } else if self.pagesPopover == source { self.closePages() }
+                })
+    }
+
+    private func scheduleHide() {
         pillTask?.cancel()
+        guard !pillPinned else { return }
+        let lifetime = pillLifetime
         pillTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1.5))
+            try? await Task.sleep(for: lifetime)
             guard !Task.isCancelled else { return }
             self?.pagePillVisible = false
         }
@@ -145,10 +198,21 @@ struct EditorScreen: View {
     let documentID: UUID
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
+
+    /// `chrome` is injectable so a test can open the Pages popover the way a tap does.
+    @MainActor
+    init(documentID: UUID, library: LibraryController, presentation: PresentationState,
+         chrome: PageChromeState? = nil) {
+        self.documentID = documentID
+        self.library = library
+        self.presentation = presentation
+        _chrome = StateObject(wrappedValue: chrome ?? PageChromeState())
+    }
     @State private var session: DocumentSession?
     @State private var renderer: (any WorksheetPageRenderer)?
     @State private var errorMessage: String?
-    @StateObject private var chrome = PageChromeState()
+    @StateObject private var chrome: PageChromeState
+    @StateObject private var pageThumbnails = PageThumbnailStore()
     @State private var tools = ToolState()
     // The card's open state and its corner per orientation, persisted across launches (design 6.3).
     @State private var teacherCard = TeacherCopyCardState()
@@ -167,6 +231,18 @@ struct EditorScreen: View {
     /// iPad landscape keeps the full sharing copy; portrait and iPhone shorten it.
     private var shortPill: Bool { !(horizontalSizeClass == .regular && verticalSizeClass == .compact) }
 
+    /// Thumbnails show page content, so they follow the same main-screen policy as the pages themselves.
+    private var pagesAvailable: Bool {
+        guard let session, renderer != nil, session.pdf.pageCount > 0 else { return false }
+        return presentation.policy.rendersOnMainScreen(session.record)
+    }
+
+    private func pageNavigator(_ session: DocumentSession) -> some View {
+        PageNavigatorView(session: session, thumbnails: pageThumbnails, currentPage: chrome.currentPage) { index in
+            chrome.selectPage(index)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ToolbarStrip(tools: tools)
@@ -184,8 +260,12 @@ struct EditorScreen: View {
                 } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
                 else { ProgressView("Opening worksheet") }
                 if chrome.pagePillVisible, let session, session.pdf.pageCount > 0 {
-                    PagePill(current: chrome.currentPage, total: session.pdf.pageCount)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    PagePill(current: chrome.currentPage, total: session.pdf.pageCount,
+                             showsPages: chrome.isShowingPages(from: .pill)) {
+                        pageNavigator(session)
+                    }
+                    .disabled(!pagesAvailable)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
                 // iPad main scene only: the external scene never draws this, and it has no answer URL.
                 if let session {
@@ -201,6 +281,13 @@ struct EditorScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .flattenedExportSheet(flattenedExport)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Pages", systemImage: "square.grid.2x2") { chrome.openPages(from: .toolbar) }
+                    .disabled(!pagesAvailable)
+                    .popover(isPresented: chrome.isShowingPages(from: .toolbar), arrowEdge: .top) {
+                        if let session { pageNavigator(session) }
+                    }
+            }
             ToolbarItem(placement: .principal) {
                 if let session { EditorTitleBlock(session: session, currentPage: chrome.currentPage) }
                 else { Text("Worksheet").font(Theme.documentTitle).foregroundStyle(Theme.text) }
@@ -260,13 +347,16 @@ struct EditorScreen: View {
                 guard !Task.isCancelled else { return }
                 presentation.showPrivateAnswers(answers, owner: answersOwner)
                 teacherCard.worksheetOpened(hasTeacherCopy: answers != nil)
+                LastWorksheet().opened(opened.record)
                 session = opened
                 let made = PageRendererFactory.make(session: opened, student: presentation.student, tools: tools)
                 made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
+                chrome.jumpToPage = { [weak made] page in made?.goToPage(page) }
                 renderer = made
             } catch { errorMessage = error.localizedDescription }
         }
         .onDisappear {
+            LastWorksheet().closed(documentID)
             chrome.cancel()
             tools.cancelToast()
             tools.settingsTool = nil
@@ -327,18 +417,28 @@ private struct InkSaveBanner: View {
     }
 }
 
-private struct PagePill: View {
+/// The "2 / 3" pill shown while scrolling. Tapping it opens the page-thumbnail popover above it.
+private struct PagePill<Pages: View>: View {
     let current: Int
     let total: Int
+    @Binding var showsPages: Bool
+    @ViewBuilder let pages: () -> Pages
 
     var body: some View {
-        Text("\(current + 1) / \(total)")
-            .font(.system(.footnote, design: .default).weight(.semibold))
-            .foregroundStyle(Theme.text)
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(.thinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Theme.line, lineWidth: Theme.hairlineWidth))
-            .padding(.bottom, 20)
+        Button { showsPages = true } label: {
+            Text("\(current + 1) / \(total)")
+                .font(.system(.footnote, design: .default).weight(.semibold))
+                .foregroundStyle(Theme.text)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(.thinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(Theme.line, lineWidth: Theme.hairlineWidth))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Page \(current + 1) of \(total)")
+        .accessibilityHint("Shows every page")
+        .popover(isPresented: $showsPages, arrowEdge: .bottom) { pages() }
+        .padding(.bottom, 20)
     }
 }
 

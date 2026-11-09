@@ -23,6 +23,10 @@ struct LibraryView: View {
     @State private var showImport = false
     @State private var showPairing = false
     @State private var confirmForget = false
+    /// The worksheet launch reopens (left open when EmberPad last quit); nil once Back returns to the library.
+    @State private var reopenedWorksheet: UUID?
+    @State private var checkedLastWorksheet = false
+    private let lastWorksheet: LastWorksheet
 
     init(library: LibraryController, presentation: PresentationState, pairing: PairingController,
          sync: SyncClient) {
@@ -37,8 +41,10 @@ struct LibraryView: View {
     }
 
     init(library: LibraryController, presentation: PresentationState, pairing: PairingController,
-         sync: SyncClient, signingExpiryDate: Date?, thumbnailCache: ThumbnailCache?) {
+         sync: SyncClient, signingExpiryDate: Date?, thumbnailCache: ThumbnailCache?,
+         lastWorksheet: LastWorksheet = LastWorksheet()) {
         self.library = library
+        self.lastWorksheet = lastWorksheet
         self.sync = sync
         self.presentation = presentation
         self.pairing = pairing
@@ -57,6 +63,11 @@ struct LibraryView: View {
         } detail: {
             NavigationStack {
                 detail
+                    .navigationDestination(item: $reopenedWorksheet) { id in
+                        EditorScreen(documentID: id, library: library, presentation: presentation)
+                            .onAppear { columns.worksheetOpened() }
+                            .onDisappear { columns.worksheetClosed() }
+                    }
             }
         }
         .tint(Theme.tint)
@@ -67,7 +78,10 @@ struct LibraryView: View {
         } message: {
             Text("The pairing secret is deleted from this iPad. Also choose Forget iPad in EmberPad Companion, then pair again with a new code.")
         }
-        .task { await library.refresh() }
+        .task {
+            await library.refresh()
+            reopenLastWorksheet()
+        }
         .onAppear { columns.sizeClassChanged(to: horizontalSizeClass) }
         .onChange(of: horizontalSizeClass) { _, sizeClass in columns.sizeClassChanged(to: sizeClass) }
         .onChange(of: library.sidebarSelection) { _, new in
@@ -231,6 +245,8 @@ struct LibraryView: View {
                             .tint(Theme.accent)
                     }
                     .frame(maxWidth: .infinity, minHeight: 200)
+                } else if library.visibleCards.isEmpty && library.isSearching {
+                    noSearchResults
                 } else if library.visibleCards.isEmpty {
                     emptyState
                 } else {
@@ -284,6 +300,7 @@ struct LibraryView: View {
                 }
             }
         }
+        .searchable(text: $library.searchText, placement: .toolbar, prompt: searchPrompt)
         .refreshable { await library.fileInbox() }
         .task { await library.refresh() }
     }
@@ -295,9 +312,17 @@ struct LibraryView: View {
 
     private var detailSubline: String {
         let count = library.visibleCards.count
-        let noun = count == 1 ? "worksheet" : "worksheets"
         let order = library.sortNewestFirst ? "newest first" : "oldest first"
+        if library.isSearching {
+            let total = library.unsearchedCardCount
+            return "\(count) of \(total) \(total == 1 ? "worksheet" : "worksheets") · \(order)"
+        }
+        let noun = count == 1 ? "worksheet" : "worksheets"
         return "\(count) \(noun) · \(order)"
+    }
+
+    private var searchPrompt: String {
+        library.showingArchived ? "Search Archived" : "Search \(library.selectedSubject ?? "all subjects")"
     }
 
     private var classFilterChips: some View {
@@ -322,6 +347,24 @@ struct LibraryView: View {
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(selected ? Theme.accent : Theme.surface2, in: Capsule())
             .foregroundStyle(selected ? Theme.onAccent : Theme.text2)
+    }
+
+    private var noSearchResults: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 46))
+                .foregroundStyle(Theme.text3)
+            Text("No results for \u{201C}\(LibraryController.normalizedQuery(library.searchText))\u{201D}")
+                .font(.system(.title3, design: .serif).weight(.semibold))
+                .foregroundStyle(Theme.text)
+                .multilineTextAlignment(.center)
+            Text("Search looks at worksheet titles in \(library.showingArchived ? "Archived" : library.selectedSubject ?? "all subjects").")
+                .font(Theme.meta)
+                .foregroundStyle(Theme.text2)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 320)
+        .padding(.horizontal, 24)
     }
 
     private var emptyState: some View {
@@ -349,6 +392,14 @@ struct LibraryView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 320)
         .padding(.horizontal, 24)
+    }
+
+    /// Once per launch, after the library first loads: reopen the worksheet left open last time.
+    private func reopenLastWorksheet() {
+        guard !checkedLastWorksheet else { return }
+        checkedLastWorksheet = true
+        reopenedWorksheet = LastWorksheet.documentToReopen(storedID: lastWorksheet.storedID,
+                                                           documents: library.documents)
     }
 
 }
