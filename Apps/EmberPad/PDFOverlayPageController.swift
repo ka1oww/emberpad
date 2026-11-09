@@ -20,6 +20,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     let liveInk = LiveInkRecognizer()
     /// The page and style of the stroke `liveInk` is tracking, fixed at pen-down.
     private var liveStroke: (page: Int, style: LiveInkStyle)?
+    /// P6: the laser pointer's Pencil input, on while the laser is chosen. Internal for tests.
+    let laser = LaserPointerRecognizer()
+    /// The laser dot on this iPad, above the pages. Internal for tests.
+    let laserDot = PDFOverlayPageController.makeLaserDot()
     private var currentPage = 0
     /// Off from the moment the worksheet starts leaving, so a late throttled frame cannot put a page back on the
     /// student view after the editor has cleared it.
@@ -95,6 +99,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         liveInk.onStroke = { [weak self] event in self?.liveInkEvent(event) }
         liveInk.delegate = self
         pdfView.addGestureRecognizer(liveInk)
+        laser.onEvent = { [weak self] event in self?.laserEvent(event) }
+        laser.delegate = self
+        pdfView.addGestureRecognizer(laser)
+        view.layer.addSublayer(laserDot)
+        updateCanvasInput()
         publishPage()
         onPageChange?(currentPage)
     }
@@ -140,6 +149,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         viewportThrottle.cancel()
         liveStroke = nil
         student.cancelLiveStroke()
+        hideLaser(animated: false)
     }
 
     deinit {
@@ -213,13 +223,18 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// Only the focused page takes Pencil input. The toolbar lasso is
     /// EmberPad's own (EP-29), so with it chosen PencilKit's drawing
     /// recogniser is off and the lasso recogniser takes the Pencil instead.
+    /// With the laser pointer (P6) no canvas takes the Pencil at all: the
+    /// laser recogniser on the PDF view does, so nothing is ever inked.
     private func updateCanvasInput() {
         let lasso = tools.current == .lasso
+        let pointing = tools.current == .laser
         for candidate in canvases.values {
             let focused = candidate === activeCanvas
-            candidate.drawingGestureRecognizer.isEnabled = focused && !lasso
+            candidate.drawingGestureRecognizer.isEnabled = focused && !lasso && !pointing
             InkSelectionController.lassoRecognizer(on: candidate)?.isEnabled = focused && lasso
         }
+        if laser.isEnabled != pointing { laser.isEnabled = pointing }
+        if !pointing { hideLaser(animated: false) }
     }
 
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
@@ -267,6 +282,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     // MARK: Live ink (EP-30)
 
     /// The live-ink recogniser only observes, so it runs beside every other recogniser, PencilKit's included.
+    /// The laser recogniser is not simultaneous: once it has the Pencil, the pages do not scroll under it.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         gestureRecognizer === liveInk || otherGestureRecognizer === liveInk
@@ -302,6 +318,72 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             student.cancelLiveStroke()
         }
     }
+
+    // MARK: Laser pointer (P6)
+
+    /// A Pencil sample or lift from the laser recogniser, `location` in the PDF view's coordinates. The dot follows
+    /// the Pencil on this iPad and, over a page, on the student view. Nothing here touches a drawing. Internal for tests.
+    func laserEvent(_ event: LaserPointerRecognizer.Event) {
+        switch event {
+        case .moved(let location):
+            showLaserDot(at: view.convert(location, from: pdfView))
+            if publishing, let (page, point) = pageLocation(of: location) {
+                student.pointLaser(session: session, pageIndex: page, location: point)
+            } else {
+                student.hideLaser()
+            }
+        case .lifted:
+            hideLaser(animated: true)
+        }
+    }
+
+    /// The page under `location` (PDF view coordinates) and the point in that page's ink space, which is its canvas's
+    /// coordinates: the same space as the committed drawing and live ink.
+    func pageLocation(of location: CGPoint) -> (page: Int, point: CGPoint)? {
+        for (index, canvas) in canvases where canvas.window != nil {
+            let point = pdfView.convert(location, to: canvas)
+            if canvas.bounds.contains(point) { return (index, point) }
+        }
+        return nil
+    }
+
+    private func showLaserDot(at point: CGPoint) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        laserDot.removeAllAnimations()
+        laserDot.opacity = 1
+        laserDot.position = point
+        laserDot.isHidden = false
+        CATransaction.commit()
+    }
+
+    private func hideLaser(animated: Bool) {
+        student.hideLaser()
+        guard !laserDot.isHidden, laserDot.opacity > 0 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if animated {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = laserDot.opacity
+            fade.toValue = 0
+            fade.duration = LaserDotStyle.fadeDuration
+            laserDot.add(fade, forKey: "fade")
+        }
+        laserDot.opacity = 0
+        laserDot.isHidden = !animated
+        CATransaction.commit()
+    }
+
+    private static func makeLaserDot() -> CALayer {
+        let dot = CALayer()
+        LaserDotStyle.style(dot, diameter: LaserDotStyle.presenterDiameter)
+        dot.zPosition = 10
+        dot.isHidden = true
+        return dot
+    }
+
+    /// Whether the iPad's laser dot is showing, for tests.
+    var laserDotVisible: Bool { !laserDot.isHidden && laserDot.opacity > 0 }
 
     /// The visible rect and up to two pages under it, measured from the laid-out PDF view. Only geometry leaves here;
     /// the snapshot fetches the pages and ink from the session itself.
