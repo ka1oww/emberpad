@@ -106,24 +106,22 @@ enum LassoGeometry {
 }
 
 /// The selection's box: a rectangle (`rect`, in the box's own space) placed
-/// on the page by `transform`, which collects every move, resize and rotate
-/// applied since the strokes were selected, so the box turns and scales with
-/// the ink. Every gesture yields a `delta` in drawing space that is applied
-/// to the box and to each selected stroke's `PKStroke.transform` alike.
+/// on the page by `transform`, which collects every move and resize applied
+/// since the strokes were selected, so the box turns and scales with the ink.
+/// Every gesture yields a `delta` in drawing space that is applied to the box
+/// and to each selected stroke's `PKStroke.transform` alike.
 struct SelectionBox: Equatable {
-    /// Room left between the ink and the dashed outline, in points.
+    /// Room left between the ink and the outline, in points.
     static let padding: CGFloat = 8
     /// Resizing stops when the box's larger side would be shorter than this.
     static let minimumSide: CGFloat = 24
     /// Resizing stops at this many times the box's size when the gesture began.
     static let maximumScale: CGFloat = 8
-    /// A rotation this close (in degrees) to a quarter turn snaps onto it.
+    /// A turn that lands this close (in degrees) to a quarter turn snaps onto it.
     static let rotationSnap: CGFloat = 4
 
     enum Corner: Int, CaseIterable, Sendable {
         case topLeft, topRight, bottomRight, bottomLeft
-
-        var opposite: Corner { Corner(rawValue: (rawValue + 2) % 4)! }
     }
 
     var rect: CGRect
@@ -154,8 +152,6 @@ struct SelectionBox: Equatable {
     /// The four corners on the page, clockwise from the top left.
     var corners: [CGPoint] { Corner.allCases.map(point) }
     var center: CGPoint { CGPoint(x: rect.midX, y: rect.midY).applying(transform) }
-    /// The middle of the top edge, where the rotate handle hangs from.
-    var topCenter: CGPoint { CGPoint(x: rect.midX, y: rect.minY).applying(transform) }
     /// How much the box has been scaled since it was selected (always uniform).
     var scale: CGFloat { hypot(transform.a, transform.b) }
     /// How far the box has turned since it was selected, in radians.
@@ -174,40 +170,30 @@ struct SelectionBox: Equatable {
         CGAffineTransform(translationX: point.x - start.x, y: point.y - start.y)
     }
 
-    /// Dragging `corner` to `point`: a uniform scale about the opposite
+    /// Dragging the Resize handle (bottom right) from `start` to `point`, as
+    /// in GoodNotes: one uniform scale and one turn about the top-left
     /// corner, which stays where it is, so the ink keeps its proportions. The
-    /// scale follows the drag along the box's diagonal, cannot turn the box
-    /// inside out, and stays between `minimumSide` and `maximumScale`.
-    func resize(_ corner: Corner, to point: CGPoint) -> CGAffineTransform {
-        let anchor = localPoint(corner.opposite), handle = localPoint(corner)
-        let local = point.applying(transform.inverted())
-        let diagonal = CGPoint(x: handle.x - anchor.x, y: handle.y - anchor.y)
-        let length2 = diagonal.x * diagonal.x + diagonal.y * diagonal.y
-        guard length2 > 0 else { return .identity }
-        var factor = ((local.x - anchor.x) * diagonal.x + (local.y - anchor.y) * diagonal.y) / length2
+    /// scale is how much farther from that corner the touch is, kept between
+    /// `minimumSide` and `maximumScale`; the turn is the angle swept round it,
+    /// snapped onto a quarter turn of the page within `rotationSnap` degrees.
+    func scaleAndRotate(from start: CGPoint, to point: CGPoint) -> CGAffineTransform {
+        let anchor = self.point(.topLeft)
+        let from = CGPoint(x: start.x - anchor.x, y: start.y - anchor.y)
+        let to = CGPoint(x: point.x - anchor.x, y: point.y - anchor.y)
+        let fromLength = hypot(from.x, from.y), toLength = hypot(to.x, to.y)
+        guard fromLength > 0.5, toLength > 0.5 else { return .identity }
         let side = max(rect.width, rect.height) * scale
         let smallest = side > 0 ? Self.minimumSide / side : 1
-        factor = min(max(factor, min(smallest, 1)), Self.maximumScale)
-        let scaling = CGAffineTransform(translationX: -anchor.x, y: -anchor.y)
-            .concatenating(CGAffineTransform(scaleX: factor, y: factor))
-            .concatenating(CGAffineTransform(translationX: anchor.x, y: anchor.y))
-        return transform.inverted().concatenating(scaling).concatenating(transform)
-    }
-
-    /// Dragging the rotate handle from `start` to `point`: a turn about the
-    /// box's centre by the angle swept, snapped onto a quarter turn of the
-    /// page when the box lands within `rotationSnap` degrees of one.
-    func rotation(from start: CGPoint, to point: CGPoint) -> CGAffineTransform {
-        let c = center
-        guard start != c, point != c else { return .identity }
-        var turn = atan2(point.y - c.y, point.x - c.x) - atan2(start.y - c.y, start.x - c.x)
+        let factor = min(max(toLength / fromLength, min(smallest, 1)), Self.maximumScale)
+        var turn = atan2(to.y, to.x) - atan2(from.y, from.x)
         let quarter = CGFloat.pi / 2
         let landed = angle + turn
         let nearest = (landed / quarter).rounded() * quarter
         if abs(landed - nearest) <= Self.rotationSnap * .pi / 180 { turn = nearest - angle }
-        return CGAffineTransform(translationX: -c.x, y: -c.y)
+        return CGAffineTransform(translationX: -anchor.x, y: -anchor.y)
+            .concatenating(CGAffineTransform(scaleX: factor, y: factor))
             .concatenating(CGAffineTransform(rotationAngle: turn))
-            .concatenating(CGAffineTransform(translationX: c.x, y: c.y))
+            .concatenating(CGAffineTransform(translationX: anchor.x, y: anchor.y))
     }
 }
 
@@ -262,6 +248,17 @@ enum SelectionEdit {
         }
         let start = drawing.strokes.count
         return (PKDrawing(strokes: drawing.strokes + copies), Array(start..<(start + copies.count)))
+    }
+
+    /// `drawing` with the strokes at `indices` inked in `color`, each keeping
+    /// its own ink type (pen or highlighter), opacity, points and transform.
+    static func recolored(_ drawing: PKDrawing, indices: [Int], color: UIColor) -> PKDrawing {
+        var strokes = drawing.strokes
+        for index in indices where strokes.indices.contains(index) {
+            let ink = strokes[index].ink
+            strokes[index].ink = PKInk(ink.inkType, color: color.withAlphaComponent(ink.color.cgColor.alpha))
+        }
+        return PKDrawing(strokes: strokes)
     }
 
     /// `drawing` without the strokes at `indices`.
