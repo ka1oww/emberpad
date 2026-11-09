@@ -244,6 +244,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.becomeFirstResponder()
     }
 
+    func goToPage(_ index: Int) {
+        guard let page = session.pdf.page(at: index) else { return }
+        pdfView.go(to: page)
+    }
+
     private func pageChanged() {
         guard let page = pdfView.currentPage else { return }
         let index = session.pdf.index(for: page)

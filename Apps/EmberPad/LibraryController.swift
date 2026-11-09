@@ -53,6 +53,10 @@ final class LibraryController: ObservableObject {
     var showingArchived: Bool { sidebarSelection == .archived }
     /// Design 5.1 detail toolbar sort. Newest first by `importedAt`, then title.
     @Published var sortNewestFirst = true
+    /// Library title search, applied within the current subject, class and Archived selection.
+    @Published var searchText = ""
+    /// True while a title search narrows the grid.
+    var isSearching: Bool { !Self.normalizedQuery(searchText).isEmpty }
 
     /// Non-archived Student copies grouped for the SUBJECTS sidebar section, sorted by name.
     var subjectsWithCounts: [(name: String, count: Int)] { Self.subjectsWithCounts(in: documents) }
@@ -71,7 +75,14 @@ final class LibraryController: ObservableObject {
     var visibleCards: [DocumentRecord] {
         Self.filteredCards(in: documents, subject: showingArchived ? nil : selectedSubject,
                            classTag: showingArchived ? nil : selectedClassTag,
-                           archived: showingArchived, sortNewestFirst: sortNewestFirst)
+                           archived: showingArchived, sortNewestFirst: sortNewestFirst, query: searchText)
+    }
+
+    /// Grid count before the title search, for the "N of M" subline.
+    var unsearchedCardCount: Int {
+        Self.filteredCards(in: documents, subject: showingArchived ? nil : selectedSubject,
+                           classTag: showingArchived ? nil : selectedClassTag,
+                           archived: showingArchived, sortNewestFirst: sortNewestFirst).count
     }
 
     private func reconcileSelection() {
@@ -100,14 +111,26 @@ final class LibraryController: ObservableObject {
 
     /// Pure helper: the grid's documents. Teacher copies are always excluded.
     static func filteredCards(in documents: [DocumentRecord], subject: String?, classTag: String?,
-                              archived: Bool, sortNewestFirst: Bool) -> [DocumentRecord] {
+                              archived: Bool, sortNewestFirst: Bool, query: String = "") -> [DocumentRecord] {
         let pool = studentCards(in: documents).filter { doc in
             guard doc.showsAsArchived == archived else { return false }
             if let subject, doc.subject != subject { return false }
             if let classTag, doc.classTag != classTag { return false }
-            return true
+            return titleMatches(doc.title, query: query)
         }
         return sortCards(pool, sortNewestFirst: sortNewestFirst)
+    }
+
+    /// The query with surrounding whitespace removed and runs of whitespace collapsed to one space.
+    static func normalizedQuery(_ query: String) -> String {
+        query.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// Title search: every word of the query must appear in the title, ignoring case and diacritics,
+    /// in any order. An empty query matches everything.
+    static func titleMatches(_ title: String, query: String) -> Bool {
+        let words = normalizedQuery(query).split(separator: " ")
+        return words.allSatisfy { title.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 
     /// Pure helper: every card-eligible document (Student role only, any status).
