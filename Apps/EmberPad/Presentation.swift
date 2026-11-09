@@ -221,13 +221,28 @@ final class PresentationState: ObservableObject {
     @Published var mainSceneActive = false {
         didSet { student.paused = policy.pauseStudentView }
     }
-    // TODO(teacher-pairing): set only once the pairing and private annotation policies are agreed.
-    @Published var privateAnswerURL: URL?
+    /// The open worksheet's paired Teacher copy, set by its editor and cleared when that editor closes. Main scene only.
+    @Published private(set) var privateAnswerURL: URL?
+    private var privateAnswerOwner: UUID?
     /// The share pill menu's framing choice. Kept here, beside the other rarely changing presentation state, so the
     /// editor chrome never observes the student model's 30 Hz viewport updates.
     @Published var studentFraming: StudentFraming = .presenterPage {
         didSet { student.framing = studentFraming }
     }
+    /// Called by an editor (identified by `owner`) once it knows its worksheet's Teacher copy, or that it has none.
+    func showPrivateAnswers(_ url: URL?, owner: UUID) {
+        privateAnswerOwner = owner
+        privateAnswerURL = url
+    }
+
+    /// Clears the answers only if `owner` set them, so a closing editor cannot wipe the next editor's Teacher copy
+    /// when SwiftUI runs its `onDisappear` after the new editor has loaded.
+    func clearPrivateAnswers(owner: UUID) {
+        guard privateAnswerOwner == owner else { return }
+        privateAnswerOwner = nil
+        privateAnswerURL = nil
+    }
+
     var policy: PresentationPolicy {
         PresentationPolicy(captureActive: captureActive, externalSceneCount: externalSceneCount, mainSceneActive: mainSceneActive)
     }

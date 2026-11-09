@@ -150,10 +150,10 @@ struct EditorScreen: View {
     @State private var errorMessage: String?
     @StateObject private var chrome = PageChromeState()
     @State private var tools = ToolState()
-    // The card's open state and corner survive scene restoration (design 6.3); one corner per orientation.
-    @SceneStorage("cardOpen") private var teacherCardOpen = true
-    @SceneStorage("cardCorner.landscape") private var landscapeCorner = TeacherCopyCardCorner.topLeading
-    @SceneStorage("cardCorner.portrait") private var portraitCorner = TeacherCopyCardCorner.topLeading
+    // The card's open state and its corner per orientation, persisted across launches (design 6.3).
+    @State private var teacherCard = TeacherCopyCardState()
+    /// Identifies this editor to `PresentationState`, which only lets the editor that set the answers clear them.
+    @State private var answersOwner = UUID()
     @StateObject private var flattenedExport = FlattenedExportModel()
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -193,9 +193,7 @@ struct EditorScreen: View {
                                                              mainSceneActive: presentation.mainSceneActive,
                                                              privateAnswerURL: presentation.privateAnswerURL),
                                            documentTitle: session.record.title,
-                                           isOpen: $teacherCardOpen,
-                                           landscapeCorner: $landscapeCorner,
-                                           portraitCorner: $portraitCorner)
+                                           card: teacherCard)
                 }
             }
             .overlay(alignment: .top) { ToolToastOverlay(toast: tools.toast) }
@@ -215,15 +213,15 @@ struct EditorScreen: View {
                 }
                 .accessibilityLabel("Sharing: \(pillState.accessibilityText)")
                 Button {
-                    withAnimation { teacherCardOpen.toggle() }
+                    withAnimation { teacherCard.toggle() }
                 } label: {
                     Image(systemName: "book")
                         .imageScale(.medium)
                         .padding(6)
-                        .background(teacherCardOpen ? Theme.accentSoft : Color.clear,
+                        .background(teacherCard.isOpen ? Theme.accentSoft : Color.clear,
                                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-                .accessibilityLabel(teacherCardOpen ? "Hide Teacher copy" : "Show Teacher copy")
+                .accessibilityLabel(teacherCard.toggleAccessibilityLabel)
                 Button("Undo", systemImage: "arrow.uturn.backward") { renderer?.undo() }
                 Button("Redo", systemImage: "arrow.uturn.forward") { renderer?.redo() }
                 Menu {
@@ -257,6 +255,11 @@ struct EditorScreen: View {
             do {
                 let opened = try await library.open(documentID)
                 presentation.student.opened(opened.record)
+                // The paired Teacher copy is the card's answer key; it stays in the main scene (see TeacherCopyCard).
+                let answers = await library.teacherCopyURL(for: opened.record)
+                guard !Task.isCancelled else { return }
+                presentation.showPrivateAnswers(answers, owner: answersOwner)
+                teacherCard.worksheetOpened(hasTeacherCopy: answers != nil)
                 session = opened
                 let made = PageRendererFactory.make(session: opened, student: presentation.student, tools: tools)
                 made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
@@ -268,6 +271,7 @@ struct EditorScreen: View {
             tools.cancelToast()
             tools.settingsTool = nil
             presentation.student.clear()
+            presentation.clearPrivateAnswers(owner: answersOwner)
             session?.drawingDidChange = nil
             Task { do { try await library.close(documentID) } catch { library.errorMessage = error.localizedDescription } }
         }

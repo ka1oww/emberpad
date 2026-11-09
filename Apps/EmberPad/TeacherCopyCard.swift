@@ -2,70 +2,131 @@ import SwiftUI
 import PDFKit
 import EmberSyncKit
 
-// The floating Teacher copy card (design 5.3). It exists only in the main scene's view hierarchy; the
+// The Teacher copy panel (design 5.3), docked at the worksheet's left or right edge like iPadOS Slide Over. It exists only in the main scene's view hierarchy; the
 // external scene draws from `StudentPageSnapshot`, which has no answer URL, so nothing here can reach the
 // student view. While `PresentationPolicy.hidePrivateContent` is true the PDF view is not in the hierarchy
 // at all, so a captured main screen gets no answer pixels.
 
 // MARK: - Position model (pure, so tests cover it without a scene)
 
-enum TeacherCopyCardCorner: String, CaseIterable, Sendable {
-    case topLeading, topTrailing, bottomLeading, bottomTrailing
+/// The worksheet edge the Teacher copy docks against, like an iPadOS Slide Over window.
+enum TeacherCopyPanelSide: String, CaseIterable, Codable, Sendable {
+    case leading, trailing
 
-    var isTrailing: Bool { self == .topTrailing || self == .bottomTrailing }
-    var isBottom: Bool { self == .bottomLeading || self == .bottomTrailing }
+    var opposite: TeacherCopyPanelSide { self == .leading ? .trailing : .leading }
+    /// The horizontal direction that moves the panel off its own edge: -1 for leading, +1 for trailing.
+    var outward: CGFloat { self == .leading ? -1 : 1 }
+    var edge: Edge { self == .leading ? .leading : .trailing }
+    var alignment: Alignment { self == .leading ? .leading : .trailing }
+    var title: String { self == .leading ? "left" : "right" }
 }
 
-enum TeacherCopyCardOrientation: Sendable {
-    case landscape, portrait
-
-    init(containerSize: CGSize) { self = containerSize.width > containerSize.height ? .landscape : .portrait }
-
-    /// Card height as a share of the worksheet body (design 5.3).
-    var heightFraction: CGFloat { self == .landscape ? 0.66 : 0.52 }
+/// Where a released panel goes.
+enum TeacherCopyPanelRelease: Equatable {
+    case dock(TeacherCopyPanelSide)
+    case hide
 }
 
 enum TeacherCopyCardGeometry {
     static let width: CGFloat = 380
-    static let minHeight: CGFloat = 360
     static let inset: CGFloat = 16
     static let cornerRadius: CGFloat = 16
     static let headerHeight: CGFloat = 44
+    /// Dragged this share of its width off its edge, the panel hides on release.
+    static let hideFraction: CGFloat = 1.0 / 3.0
+    /// A flick whose predicted end is this share of the width off the edge also hides it.
+    static let flickHideFraction: CGFloat = 0.75
+    /// Dragging the edge grabber this far inwards (or flicking twice as far) shows the panel.
+    static let grabberOpenDistance: CGFloat = 40
 
-    /// 380 pt wide, 66% (landscape) or 52% (portrait) of the body's height with a 360 pt minimum, never larger
-    /// than the body minus the inset on every side.
+    /// A tall panel: 380 pt wide and the body's full height, inset 16 pt on every side.
     static func size(in container: CGSize) -> CGSize {
-        let orientation = TeacherCopyCardOrientation(containerSize: container)
-        let maxWidth = max(container.width - 2 * inset, 0)
-        let maxHeight = max(container.height - 2 * inset, 0)
-        let height = min(max(container.height * orientation.heightFraction, minHeight), maxHeight)
-        return CGSize(width: min(width, maxWidth), height: height)
+        CGSize(width: min(width, max(container.width - 2 * inset, 0)), height: max(container.height - 2 * inset, 0))
     }
 
-    /// Top-leading origin of a card of `cardSize` resting in `corner`, inset 16 pt from the body's edges.
-    static func origin(for corner: TeacherCopyCardCorner, cardSize: CGSize, in container: CGSize) -> CGPoint {
-        CGPoint(x: corner.isTrailing ? container.width - cardSize.width - inset : inset,
-                y: corner.isBottom ? container.height - cardSize.height - inset : inset)
+    /// Top-leading origin of the panel docked at `side`.
+    static func origin(for side: TeacherCopyPanelSide, panelSize: CGSize, in container: CGSize) -> CGPoint {
+        CGPoint(x: side == .leading ? inset : container.width - panelSize.width - inset, y: inset)
     }
 
-    /// Keeps the card inside the body, with the inset on every side, while it is dragged.
-    static func clamp(_ origin: CGPoint, cardSize: CGSize, in container: CGSize) -> CGPoint {
-        let minX = inset, minY = inset
-        let maxX = max(container.width - cardSize.width - inset, minX)
-        let maxY = max(container.height - cardSize.height - inset, minY)
-        return CGPoint(x: min(max(origin.x, minX), maxX), y: min(max(origin.y, minY), maxY))
+    /// While dragged the panel moves horizontally only, and can slide fully off either edge.
+    static func draggedX(side: TeacherCopyPanelSide, translation: CGFloat, panelSize: CGSize, in container: CGSize) -> CGFloat {
+        let x = origin(for: side, panelSize: panelSize, in: container).x + translation
+        return min(max(x, -panelSize.width), container.width)
     }
 
-    /// The corner whose resting origin is nearest to a card released at `origin`.
-    static func nearestCorner(toOrigin origin: CGPoint, cardSize: CGSize, in container: CGSize) -> TeacherCopyCardCorner {
-        TeacherCopyCardCorner.allCases.min { lhs, rhs in
-            distanceSquared(origin, self.origin(for: lhs, cardSize: cardSize, in: container))
-                < distanceSquared(origin, self.origin(for: rhs, cardSize: cardSize, in: container))
-        } ?? .topLeading
+    /// Off its own edge far enough (or flicked that way) it hides; otherwise it docks on the side its centre is over.
+    static func release(side: TeacherCopyPanelSide, translation: CGFloat, predictedTranslation: CGFloat,
+                        panelSize: CGSize, in container: CGSize) -> TeacherCopyPanelRelease {
+        let outward = translation * side.outward
+        let predictedOutward = predictedTranslation * side.outward
+        if outward > panelSize.width * hideFraction || predictedOutward > panelSize.width * flickHideFraction { return .hide }
+        let centre = draggedX(side: side, translation: translation, panelSize: panelSize, in: container) + panelSize.width / 2
+        return .dock(centre > container.width / 2 ? .trailing : .leading)
     }
 
-    private static func distanceSquared(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
-        (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y)
+    /// Whether a drag on the closed panel's edge grabber pulls it back in.
+    static func grabberOpens(side: TeacherCopyPanelSide, translation: CGFloat, predictedTranslation: CGFloat) -> Bool {
+        -translation * side.outward > grabberOpenDistance || -predictedTranslation * side.outward > 2 * grabberOpenDistance
+    }
+}
+
+// MARK: - Open state and side
+
+/// The panel's open state and docked side. SwiftUI owns it as `@State` in the editor, and every change is written
+/// through to `UserDefaults`, so it survives relaunch. (`@SceneStorage` cannot be used: the main scene is
+/// UIKit-managed, so its writes were dropped and the close button, the edge tab and the book toggle did nothing.)
+@MainActor
+@Observable
+final class TeacherCopyCardState {
+    static let defaultsKey = "teacherCopyPanel.v1"
+
+    struct Stored: Codable, Equatable {
+        var isOpen = true
+        var side = TeacherCopyPanelSide.trailing
+    }
+
+    /// Whether the panel shows now. A worksheet with no Teacher copy starts closed, whatever was remembered.
+    private(set) var isOpen: Bool
+    private(set) var side: TeacherCopyPanelSide
+    @ObservationIgnored private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let stored = Self.load(from: defaults)
+        isOpen = stored.isOpen
+        side = stored.side
+    }
+
+    /// The nav-bar book button's label, which always names what a tap does.
+    var toggleAccessibilityLabel: String { isOpen ? "Hide Teacher copy" : "Show Teacher copy" }
+
+    /// Called once the worksheet's Teacher copy is known. Without one the panel starts closed (edge grabber only) so
+    /// an empty state never covers the page; the remembered choice is kept for the next paired worksheet.
+    func worksheetOpened(hasTeacherCopy: Bool) {
+        isOpen = hasTeacherCopy && Self.load(from: defaults).isOpen
+    }
+
+    func open() { update(isOpen: true, side: side) }
+    func close() { update(isOpen: false, side: side) }
+    func toggle() { update(isOpen: !isOpen, side: side) }
+    func dock(_ side: TeacherCopyPanelSide) { update(isOpen: true, side: side) }
+
+    func apply(_ release: TeacherCopyPanelRelease) {
+        switch release {
+        case .hide: close()
+        case .dock(let side): dock(side)
+        }
+    }
+
+    private func update(isOpen: Bool, side: TeacherCopyPanelSide) {
+        self.isOpen = isOpen
+        self.side = side
+        if let data = try? JSONEncoder().encode(Stored(isOpen: isOpen, side: side)) { defaults.set(data, forKey: Self.defaultsKey) }
+    }
+
+    private static func load(from defaults: UserDefaults) -> Stored {
+        defaults.data(forKey: defaultsKey).flatMap { try? JSONDecoder().decode(Stored.self, from: $0) } ?? Stored()
     }
 }
 
@@ -102,66 +163,79 @@ enum TeacherCopyCardContent: Equatable {
 
 // MARK: - Views
 
-/// The card plus the edge tab that replaces it when it is closed. Fills the worksheet body, below the
-/// toolbar strip, and only hit-tests where the card or the tab is.
+/// The panel plus the edge grabber that replaces it when it is hidden, like iPadOS Slide Over: drag the header off
+/// the edge to hide it, across the middle to move it to the other side, and drag the grabber in to bring it back.
+/// Fills the worksheet body, below the toolbar strip, and only hit-tests where the panel or the grabber is.
 struct TeacherCopyCardOverlay: View {
     let content: TeacherCopyCardContent
     let documentTitle: String
-    @Binding var isOpen: Bool
-    @Binding var landscapeCorner: TeacherCopyCardCorner
-    @Binding var portraitCorner: TeacherCopyCardCorner
-    @State private var dragTranslation = CGSize.zero
+    let card: TeacherCopyCardState
+    @State private var dragTranslation: CGFloat = 0
 
     var body: some View {
         GeometryReader { proxy in
             let container = proxy.size
-            let orientation = TeacherCopyCardOrientation(containerSize: container)
-            let cardSize = TeacherCopyCardGeometry.size(in: container)
-            let corner = orientation == .landscape ? landscapeCorner : portraitCorner
-            let rest = TeacherCopyCardGeometry.origin(for: corner, cardSize: cardSize, in: container)
-            let current = TeacherCopyCardGeometry.clamp(CGPoint(x: rest.x + dragTranslation.width, y: rest.y + dragTranslation.height),
-                                                        cardSize: cardSize, in: container)
+            let side = card.side
+            let panelSize = TeacherCopyCardGeometry.size(in: container)
+            let x = TeacherCopyCardGeometry.draggedX(side: side, translation: dragTranslation, panelSize: panelSize, in: container)
             ZStack(alignment: .topLeading) {
-                if isOpen {
-                    TeacherCopyCard(content: content, documentTitle: documentTitle, onClose: close,
-                                    onDragChanged: { dragTranslation = $0.translation },
+                if card.isOpen {
+                    TeacherCopyCard(content: content, documentTitle: documentTitle, side: side,
+                                    onClose: { withAnimation(.snappy) { card.close() } },
+                                    onMove: { withAnimation(.snappy) { card.dock(side.opposite) } },
+                                    onDragChanged: { dragTranslation = $0.translation.width },
                                     onDragEnded: { value in
-                                        let release = TeacherCopyCardGeometry.clamp(
-                                            CGPoint(x: rest.x + value.translation.width, y: rest.y + value.translation.height),
-                                            cardSize: cardSize, in: container)
-                                        let snapped = TeacherCopyCardGeometry.nearestCorner(toOrigin: release, cardSize: cardSize, in: container)
-                                        withAnimation(.spring) {
-                                            if orientation == .landscape { landscapeCorner = snapped } else { portraitCorner = snapped }
-                                            dragTranslation = .zero
+                                        let release = TeacherCopyCardGeometry.release(
+                                            side: side, translation: value.translation.width,
+                                            predictedTranslation: value.predictedEndTranslation.width,
+                                            panelSize: panelSize, in: container)
+                                        withAnimation(.snappy) {
+                                            card.apply(release)
+                                            // A hidden panel slides on from where it was let go.
+                                            if release != .hide { dragTranslation = 0 }
                                         }
                                     })
-                    .frame(width: cardSize.width, height: cardSize.height)
-                    .offset(x: current.x, y: current.y)
-                    .transition(.opacity)
+                    .frame(width: panelSize.width, height: panelSize.height)
+                    .offset(x: x, y: TeacherCopyCardGeometry.inset)
+                    .transition(.move(edge: side.edge).combined(with: .opacity))
                 } else {
-                    TeacherCopyEdgeTab { withAnimation { isOpen = true } }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                        .transition(.move(edge: .leading))
+                    TeacherCopyEdgeTab(side: side,
+                                       onOpen: { open() },
+                                       onDragEnded: { value in
+                                           if TeacherCopyCardGeometry.grabberOpens(side: side, translation: value.translation.width,
+                                                                                   predictedTranslation: value.predictedEndTranslation.width) {
+                                               open()
+                                           }
+                                       })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: side.alignment)
+                        .transition(.move(edge: side.edge))
                 }
             }
             .frame(width: container.width, height: container.height, alignment: .topLeading)
+            // The book toggle can bring back a panel that was dragged off its edge; it returns docked.
+            .onChange(of: card.isOpen) { _, isOpen in if isOpen { dragTranslation = 0 } }
         }
     }
 
-    private func close() { withAnimation { isOpen = false } }
+    private func open() {
+        dragTranslation = 0
+        withAnimation(.snappy) { card.open() }
+    }
 }
 
-/// The card itself: a 44 pt drag-handle header over a body that holds exactly one of the three states.
+/// The panel itself: a 44 pt drag-handle header over a body that holds exactly one of the three states.
 struct TeacherCopyCard: View {
     let content: TeacherCopyCardContent
     let documentTitle: String
+    var side: TeacherCopyPanelSide = .trailing
     let onClose: () -> Void
+    var onMove: () -> Void = {}
     var onDragChanged: (DragGesture.Value) -> Void = { _ in }
     var onDragEnded: (DragGesture.Value) -> Void = { _ in }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Only the header drags; the body scrolls.
+            // Only the header drags (sideways, like Slide Over); the body scrolls.
             TeacherCopyCardHeader(documentTitle: documentTitle, onClose: onClose)
                 .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
                     .onChanged(onDragChanged).onEnded(onDragEnded))
@@ -174,6 +248,7 @@ struct TeacherCopyCard: View {
         .shadow(color: .black.opacity(0.28), radius: 25, x: 0, y: 18)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Teacher copy, private")
+        .accessibilityAction(named: "Move to the \(side.opposite.title) side", onMove)
     }
 }
 
@@ -258,30 +333,35 @@ struct NoTeacherCopyState: View {
     }
 }
 
-/// The closed card's tab on the leading edge, vertically centred.
+/// The hidden panel's grabber on its docked edge, vertically centred. Tap it, or drag it inwards, to bring the panel back.
 struct TeacherCopyEdgeTab: View {
+    var side: TeacherCopyPanelSide = .leading
     let onOpen: () -> Void
+    var onDragEnded: (DragGesture.Value) -> Void = { _ in }
 
     var body: some View {
+        let outer: CGFloat = 0, inner: CGFloat = 12
+        let shape = UnevenRoundedRectangle(topLeadingRadius: side == .leading ? outer : inner,
+                                           bottomLeadingRadius: side == .leading ? outer : inner,
+                                           bottomTrailingRadius: side == .leading ? inner : outer,
+                                           topTrailingRadius: side == .leading ? inner : outer, style: .continuous)
         Button(action: onOpen) {
             VStack(spacing: 8) {
                 Image(systemName: "lock.fill")
                 Text("Teacher copy")
                     .font(.system(.footnote, design: .default).weight(.bold))
                     .fixedSize()
-                    .rotationEffect(.degrees(-90))
+                    .rotationEffect(.degrees(side == .leading ? -90 : 90))
                     .frame(width: 18, height: 104)
             }
             .foregroundStyle(Theme.privateBrand)
             .frame(width: 34, height: 150)
-            .background(Theme.privateBg, in: UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
-                                                                    bottomTrailingRadius: 12, topTrailingRadius: 12,
-                                                                    style: .continuous))
-            .overlay(UnevenRoundedRectangle(topLeadingRadius: 0, bottomLeadingRadius: 0,
-                                            bottomTrailingRadius: 12, topTrailingRadius: 12, style: .continuous)
-                .stroke(Theme.line, lineWidth: Theme.hairlineWidth))
+            .background(Theme.privateBg, in: shape)
+            .overlay(shape.stroke(Theme.line, lineWidth: Theme.hairlineWidth))
+            .contentShape(shape)
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(DragGesture(minimumDistance: 8, coordinateSpace: .global).onEnded(onDragEnded))
         .accessibilityLabel("Show Teacher copy")
     }
 }
