@@ -31,6 +31,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private let holdGuide = PDFOverlayPageController.makeHoldGuide()
     /// EmberPad's own ink selection, for circle to lasso and the toolbar lasso (EP-29).
     private(set) lazy var inkSelection = InkSelectionController(host: self)
+    /// The eraser stroke in progress while "Erase highlighter only" is on, if any.
+    private var highlighterErase: HighlighterEraseStroke?
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
 
@@ -39,6 +41,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         super.init(nibName: nil, bundle: nil)
         // The toolbar strip is the only tool source on both 17.5 and 18 (no PKToolPicker).
         tools.onToolChange = { [weak self] tool in self?.apply(tool) }
+        tools.onClearPage = { [weak self] in self?.clearPage() }
     }
     required init?(coder: NSCoder) { nil }
 
@@ -137,6 +140,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         publishing = false
+        finishHighlighterErase()
         viewportThrottle.cancel()
         liveStroke = nil
         student.cancelLiveStroke()
@@ -184,6 +188,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         guard let canvas = overlayView as? PKCanvasView else { return }
         // Saving already happened through the model delegate; this callback only releases views.
         let index = session.pdf.index(for: page)
+        if highlighterErase?.canvas === canvas { finishHighlighterErase() }
         inkSelection.canvasWillLeave(canvas)
         if canvases[index] === canvas { canvases.removeValue(forKey: index) }
         self.pdfView.visibleCanvases = Array(canvases.values)
@@ -191,6 +196,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !isReplacingStroke, let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
+        if let erase = highlighterErase, erase.canvas === canvasView {
+            // Only highlighter strokes are on the canvas; the page keeps its set-aside ink.
+            erase.changed = true
+            inkSelection.pageDidChange(page)
+            session.update(HighlighterOnlyErase.merge(before: erase.before, erased: canvasView.drawing), page: page)
+            return
+        }
         let previousCount = session.drawing(on: page).strokes.count
         inkSelection.pageDidChange(page)
         session.update(canvasView.drawing, page: page)
@@ -205,6 +217,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// The single tool path: every live canvas gets the tool; new canvases take
     /// `tools.pencilTool` when they are created.
     func apply(_ tool: any PKTool) {
+        finishHighlighterErase()
         inkSelection.dismiss()
         for canvas in canvases.values { canvas.tool = tool }
         updateCanvasInput()
@@ -219,6 +232,21 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             let focused = candidate === activeCanvas
             candidate.drawingGestureRecognizer.isEnabled = focused && !lasso
             InkSelectionController.lassoRecognizer(on: candidate)?.isEnabled = focused && lasso
+        }
+    }
+
+    func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+        beginHighlighterErase(on: canvasView, undoManager: canvasView.undoManager)
+    }
+
+    /// The eraser lifted. Waits a turn of the run loop, like the straight-line snap, so PencilKit commits the erase
+    /// and closes its undo group before the set-aside ink goes back and the tool switches.
+    func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+        guard tools.current == .eraser else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.finishHighlighterErase()
+            self.tools.eraserLifted()
         }
     }
 
@@ -525,6 +553,84 @@ extension PDFOverlayPageController {
             isReplacingStroke = false
         }
         session.update(drawing, page: page)
+    }
+}
+
+// MARK: - Eraser Phase 4
+
+/// One eraser stroke under "Erase highlighter only": the page as it was at pen-down and the view that shows the
+/// set-aside ink while the canvas holds only highlighter strokes.
+@MainActor
+final class HighlighterEraseStroke {
+    let canvas: PKCanvasView
+    let page: Int
+    let before: PKDrawing
+    let inkLayer: PKCanvasView
+    let undoManager: UndoManager?
+    var changed = false
+
+    init(canvas: PKCanvasView, page: Int, before: PKDrawing, inkLayer: PKCanvasView, undoManager: UndoManager?) {
+        self.canvas = canvas; self.page = page; self.before = before; self.inkLayer = inkLayer; self.undoManager = undoManager
+    }
+}
+
+extension PDFOverlayPageController {
+    /// Pen-down with the eraser and "Erase highlighter only" on: every non-highlighter stroke leaves the canvas for a
+    /// passive layer above it, so PencilKit's eraser can reach only highlighter strokes and the pen ink never flickers.
+    /// Undo registration is held off until lift, when the whole erase becomes one step of EmberPad's own.
+    func beginHighlighterErase(on canvas: PKCanvasView, undoManager: UndoManager?) {
+        guard highlighterErase == nil, tools.current == .eraser, tools.settings.eraseHighlighterOnly,
+              let page = canvases.first(where: { $0.value === canvas })?.key else { return }
+        let before = session.drawing(on: page)
+        let ink = HighlighterOnlyErase.protectedInk(in: before)
+        guard !ink.strokes.isEmpty else { return }
+        let layer = PKCanvasView(frame: canvas.bounds)
+        Self.styleCanvas(layer)
+        layer.isUserInteractionEnabled = false
+        layer.isScrollEnabled = false
+        layer.drawingGestureRecognizer.isEnabled = false
+        layer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        layer.drawing = ink
+        canvas.addSubview(layer)
+        undoManager?.disableUndoRegistration()
+        highlighterErase = HighlighterEraseStroke(canvas: canvas, page: page, before: before, inkLayer: layer, undoManager: undoManager)
+        isReplacingStroke = true
+        canvas.drawing = HighlighterOnlyErase.highlighters(in: canvas.drawing)
+        isReplacingStroke = false
+    }
+
+    /// Lift: the set-aside ink goes back in its place and, if anything was erased, the stroke is one undo step.
+    func finishHighlighterErase() {
+        guard let erase = highlighterErase else { return }
+        highlighterErase = nil
+        let merged = erase.changed ? HighlighterOnlyErase.merge(before: erase.before, erased: erase.canvas.drawing) : erase.before
+        isReplacingStroke = true
+        erase.canvas.drawing = merged
+        isReplacingStroke = false
+        erase.inkLayer.removeFromSuperview()
+        session.update(merged, page: erase.page)
+        guard let undoManager = erase.undoManager else { return }
+        undoManager.enableUndoRegistration()
+        guard erase.changed else { return }
+        undoManager.beginUndoGrouping()
+        registerDrawingSwap(on: undoManager, page: erase.page, restoring: erase.before, then: merged)
+        undoManager.setActionName("Erase")
+        undoManager.endUndoGrouping()
+    }
+
+    /// Clear Page: removes all ink on the focused page as one undo step.
+    func clearPage(undoManager: UndoManager? = nil) {
+        finishHighlighterErase()
+        let page = activeCanvas.flatMap { canvas in canvases.first(where: { $0.value === canvas })?.key } ?? currentPage
+        let before = session.drawing(on: page)
+        guard !before.strokes.isEmpty else { return }
+        let empty = PKDrawing()
+        setDrawing(empty, page: page)
+        guard let undoManager = undoManager ?? canvases[page]?.undoManager else { return }
+        undoManager.beginUndoGrouping()
+        registerDrawingSwap(on: undoManager, page: page, restoring: before, then: empty)
+        undoManager.setActionName("Clear Page")
+        undoManager.endUndoGrouping()
     }
 }
 
