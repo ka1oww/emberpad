@@ -18,7 +18,7 @@ struct LibraryView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var thumbnails: ThumbnailCache
     private let signingExpiryDate: Date?
-    @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @State private var columns = LibraryColumnState()
     @ObservedObject var sync: SyncClient
     @State private var showImport = false
     @State private var showPairing = false
@@ -52,7 +52,7 @@ struct LibraryView: View {
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationSplitView(columnVisibility: $columns.visibility) {
             sidebar
         } detail: {
             NavigationStack {
@@ -68,8 +68,8 @@ struct LibraryView: View {
             Text("The pairing secret is deleted from this iPad. Also choose Forget iPad in EmberPad Companion, then pair again with a new code.")
         }
         .task { await library.refresh() }
-        .onAppear { updateColumnVisibility(for: horizontalSizeClass) }
-        .onChange(of: horizontalSizeClass) { _, sizeClass in updateColumnVisibility(for: sizeClass) }
+        .onAppear { columns.sizeClassChanged(to: horizontalSizeClass) }
+        .onChange(of: horizontalSizeClass) { _, sizeClass in columns.sizeClassChanged(to: sizeClass) }
         .onChange(of: library.sidebarSelection) { _, new in
             if case .subject(let name) = new { library.selectedSubject = name }
             else if new == .allSubjects { library.selectedSubject = nil }
@@ -129,15 +129,6 @@ struct LibraryView: View {
         .buttonStyle(.plain)
         .navigationSplitViewColumnWidth(min: 300, ideal: 300, max: 300)
         .navigationTitle("")
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Sidebar", systemImage: "sidebar.left") { toggleSidebar() }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Import from Files", systemImage: "square.and.arrow.down") { showImport = true }
-                    .disabled(library.isImporting)
-            }
-        }
         .safeAreaInset(edge: .bottom) { sidebarFooter }
     }
 
@@ -246,7 +237,9 @@ struct LibraryView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 22)], spacing: 26) {
                         ForEach(library.visibleCards) { record in
                             LibraryCardCell(record: record, library: library, presentation: presentation,
-                                            thumbnails: thumbnails)
+                                            thumbnails: thumbnails,
+                                            onWorksheetOpen: { columns.worksheetOpened() },
+                                            onWorksheetClose: { columns.worksheetClosed() })
                         }
                     }
                     .padding(.horizontal, 24)
@@ -257,9 +250,7 @@ struct LibraryView: View {
         .background(Theme.bg)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Sidebar", systemImage: "sidebar.left") { toggleSidebar() }
-            }
+            // The system sidebar toggle is the only one; Import from Files lives only here (P2).
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu(library.sortNewestFirst ? "Newest first" : "Oldest first") {
                     Button("Newest first") { library.sortNewestFirst = true }
@@ -360,12 +351,35 @@ struct LibraryView: View {
         .padding(.horizontal, 24)
     }
 
-    private func toggleSidebar() {
-        columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+}
+
+/// The library split view's column visibility (P2: the worksheet gets the whole screen).
+///
+/// Opening a worksheet hides the sidebar in both orientations; Back restores what the
+/// library showed before. A size-class change while a worksheet is open only updates what
+/// Back restores, so rotating never brings the sidebar back over the page.
+struct LibraryColumnState: Equatable {
+    var visibility: NavigationSplitViewVisibility = .all
+    private(set) var isWorksheetOpen = false
+    private var restoreVisibility: NavigationSplitViewVisibility?
+
+    mutating func sizeClassChanged(to sizeClass: UserInterfaceSizeClass?) {
+        let natural: NavigationSplitViewVisibility = sizeClass == .compact ? .detailOnly : .all
+        if isWorksheetOpen { restoreVisibility = natural } else { visibility = natural }
     }
 
-    private func updateColumnVisibility(for sizeClass: UserInterfaceSizeClass?) {
-        columnVisibility = sizeClass == .compact ? .detailOnly : .all
+    mutating func worksheetOpened() {
+        guard !isWorksheetOpen else { return }
+        isWorksheetOpen = true
+        restoreVisibility = visibility
+        visibility = .detailOnly
+    }
+
+    mutating func worksheetClosed() {
+        guard isWorksheetOpen else { return }
+        isWorksheetOpen = false
+        if let restoreVisibility { visibility = restoreVisibility }
+        restoreVisibility = nil
     }
 }
 
@@ -502,6 +516,8 @@ private struct LibraryCardCell: View {
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
     @ObservedObject var thumbnails: ThumbnailCache
+    var onWorksheetOpen: () -> Void = {}
+    var onWorksheetClose: () -> Void = {}
     @StateObject private var flattenedExport = FlattenedExportModel()
 
     var body: some View {
@@ -509,6 +525,8 @@ private struct LibraryCardCell: View {
         let _ = thumbnails.revision(for: record.id)
         NavigationLink {
             EditorScreen(documentID: record.id, library: library, presentation: presentation)
+                .onAppear(perform: onWorksheetOpen)
+                .onDisappear(perform: onWorksheetClose)
         } label: {
             WorksheetCard(record: record, thumbnail: thumbnails.cachedImage(for: record))
         }

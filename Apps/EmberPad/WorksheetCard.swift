@@ -64,7 +64,18 @@ struct WorksheetCard: View {
         return "\(day) · \(record.pageCount) pages"
     }
 
+    /// Always as tall as one badge, so cards without badges keep their titles level with
+    /// their neighbours' (the grid centres cells of different heights).
     private var badgeRow: some View {
+        ZStack(alignment: .leading) {
+            badge("Ink", foreground: .clear, background: .clear, outline: nil)
+                .hidden()
+                .accessibilityHidden(true)
+            badges
+        }
+    }
+
+    private var badges: some View {
         HStack(spacing: 6) {
             if record.status == .olderVersion {
                 badge("Older version", foreground: Theme.text3, background: .clear, outline: Theme.text3)
