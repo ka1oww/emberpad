@@ -156,7 +156,7 @@ private struct ActiveToolMenu: View {
                     .disabled(tools.settings.eraserMode != .partial)
                     .opacity(tools.settings.eraserMode == .partial ? 1 : 0.4)
             case .lasso:
-                Text("Circle ink to select · then drag, or Copy / Duplicate / Delete")
+                Text("Circle ink to select · then drag, or Cut / Copy / Duplicate / Delete")
                     .font(Theme.meta)
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1)
@@ -257,7 +257,7 @@ struct ToolSettingsPopover: View {
                 } header: {
                     Text("Pen gestures")
                 } footer: {
-                    Text("Circle ink with the pen and hold still for half a second to select it.")
+                    Text("Circle ink with the pen, then hold still for half a second, or lift and press the circle, to select it.")
                 }
             case .highlighter:
                 colorSection(.highlighter)

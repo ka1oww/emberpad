@@ -39,13 +39,17 @@ enum SelectionDrag: Equatable {
 /// or rotate handles on the iPadOS versions EmberPad supports, so circle to
 /// lasso and the toolbar lasso both select through this one layer:
 ///
-/// - a held, closed fountain-pen loop (circle to lasso) or a toolbar-lasso
-///   stroke selects the strokes at least half inside it;
+/// - a closed fountain-pen loop held still at its end, or long-pressed with
+///   the Pencil just after it is lifted (circle to lasso, as in GoodNotes), or
+///   a toolbar-lasso stroke selects the strokes at least half inside it;
 /// - the selection shows a dashed accent outline with corner resize handles
 ///   and a rotate handle, over the page but never on the student view;
 /// - drag to move, a corner to resize, the top handle to rotate: each gesture
 ///   is one `PKStroke.transform` change on the selected strokes and one undo step;
-/// - its edit menu offers Copy, Duplicate and Delete, each one undo step.
+/// - its edit menu offers Cut, Copy, Duplicate and Delete, each one undo
+///   step, and sits clear of the rotate handle;
+/// - a finger long-press on a page offers Paste for ink copied in EmberPad,
+///   placed at the touch point as one undo step.
 ///
 /// The selection is dropped when the page's ink changes any other way (a new
 /// stroke, undo or redo), when the tool changes, when its page scrolls away,
@@ -65,6 +69,33 @@ final class InkSelectionController {
     /// Stands in for the canvas's responder-chain undo manager in tests.
     var undoManagerOverride: UndoManager?
     var pasteboard: UIPasteboard = .general
+    /// The time a lifted loop is judged against; tests stand in for the clock.
+    var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// The newest closed fountain-pen loop, while a long-press can still turn it into a selection.
+    private var liftedLoop: LiftedLoop?
+    /// The Paste menu a finger long-press on a page opens.
+    private(set) lazy var pasteMenu = PasteMenu { [weak self] page, point in
+        guard let self else { return }
+        self.paste(page: page, at: point, undoManager: self.undoManager(for: page))
+    }
+
+    /// How long after a loop is lifted a long-press on it still selects, in seconds.
+    static let loopPressWindow: TimeInterval = 4
+    /// How far from the loop's line a long-press still lands on it, in points.
+    static let loopPressRadius: CGFloat = 20
+
+    private struct LiftedLoop {
+        let page: Int
+        let strokeCount: Int
+        let liftedAt: TimeInterval
+        /// The loop itself, so a press only ever takes back this stroke.
+        let stroke: PKStroke
+
+        func isStill(_ other: PKStroke) -> Bool {
+            other.path.creationDate == stroke.path.creationDate && other.path.count == stroke.path.count
+                && other.transform == stroke.transform && other.ink.inkType == stroke.ink.inkType
+        }
+    }
 
     init(host: PDFOverlayPageController) {
         self.host = host
@@ -85,6 +116,8 @@ final class InkSelectionController {
         observer.onPencilDown = { [weak self] in self?.dismiss() }
         observer.onTap = { [weak self] in self?.dismiss() }
         pages.addGestureRecognizer(observer)
+        pasteMenu.install(on: pages)
+        pasteMenu.target = { [weak self] point in self?.pasteTarget(at: point, in: pages) }
     }
 
     /// Gives a new page canvas its toolbar-lasso recogniser, off until the
@@ -170,6 +203,7 @@ final class InkSelectionController {
         let rest = PKDrawing(strokes: Array(strokes.dropLast()))
         let indices = LassoGeometry.selectedIndices(in: rest, lasso: loop)
         guard !indices.isEmpty else { return false }
+        liftedLoop = nil
         host.isReplacingStroke = true
         defer { host.isReplacingStroke = false }
         if let undoManager, undoManager.canUndo {
@@ -187,6 +221,30 @@ final class InkSelectionController {
         guard show(indices, page: page) else { return false }
         host.tools.showToast(symbol: WorksheetTool.lasso.symbol, text: "Circle to lasso · selected")
         return true
+    }
+
+    /// Remembers that the newest stroke on `page`, `strokeCount` strokes in,
+    /// was just lifted, so a long-press on it can still select (GoodNotes'
+    /// "draw a closed circle, lift, then long-press the circle"). Only a
+    /// circle-to-lasso loop is remembered, and only while it is still the
+    /// page's newest stroke.
+    func noteLiftedStroke(_ stroke: PKStroke, page: Int, strokeCount: Int) {
+        guard isLassoLoop(stroke) else { return }
+        liftedLoop = LiftedLoop(page: page, strokeCount: strokeCount, liftedAt: clock(), stroke: stroke)
+    }
+
+    /// Whether a Pencil long-press at `point` (drawing space) on `page` lands
+    /// on the loop just lifted there, in time, with ink inside it. Returns the
+    /// page's stroke count to pass to `lassoNewestStroke`, or nil.
+    func liftedLoopUnderPress(page: Int, at point: CGPoint) -> Int? {
+        guard let loop = liftedLoop, loop.page == page, clock() - loop.liftedAt <= Self.loopPressWindow,
+              let canvas = host?.canvases[page], canvas.drawing.strokes.count == loop.strokeCount,
+              let stroke = canvas.drawing.strokes.last, loop.isStill(stroke), isLassoLoop(stroke) else { return nil }
+        let points = LassoGeometry.drawingPoints(of: stroke)
+        guard LassoGeometry.distance(from: point, toPath: points) <= Self.loopPressRadius,
+              !LassoGeometry.selectedIndices(in: PKDrawing(strokes: canvas.drawing.strokes.dropLast()), lasso: points).isEmpty
+        else { return nil }
+        return loop.strokeCount
     }
 
     // MARK: - Toolbar lasso
@@ -270,10 +328,14 @@ final class InkSelectionController {
         overlay.show(selection.box, on: canvas, presentMenu: true)
     }
 
-    // MARK: - Copy, Duplicate, Delete
+    // MARK: - Cut, Copy, Duplicate, Delete, Paste
 
     private func menuActions() -> [SelectionAction] {
         [
+            SelectionAction(title: "Cut", symbol: "scissors") { [weak self] in
+                guard let self, let page = self.selection?.page else { return }
+                self.cutSelection(undoManager: self.undoManager(for: page))
+            },
             SelectionAction(title: "Copy", symbol: "doc.on.doc") { [weak self] in self?.copySelection() },
             SelectionAction(title: "Duplicate", symbol: "plus.square.on.square") { [weak self] in
                 guard let self, let page = self.selection?.page else { return }
@@ -289,12 +351,60 @@ final class InkSelectionController {
     /// Puts the selected ink on the pasteboard as PencilKit drawing data and
     /// as a PNG for other apps. The selection stays.
     func copySelection() {
-        guard let selection, let canvas = host?.canvases[selection.page] else { return }
+        guard writeSelectionToPasteboard() else { return }
+        host?.tools.showToast(symbol: "doc.on.doc", text: "Copied")
+    }
+
+    /// Copy, then Delete, as one undo step named Cut: undo puts the ink back,
+    /// and the pasteboard keeps it either way.
+    func cutSelection(undoManager: UndoManager?) {
+        guard writeSelectionToPasteboard() else { return }
+        deleteSelection(undoManager: undoManager, actionName: "Cut")
+        host?.tools.showToast(symbol: "scissors", text: "Cut")
+    }
+
+    private func writeSelectionToPasteboard() -> Bool {
+        guard let selection, let canvas = host?.canvases[selection.page] else { return false }
         let drawing = PKDrawing(strokes: SelectionEdit.strokes(of: canvas.drawing, at: selection.indices))
         var item: [String: Any] = [Self.pasteboardType: drawing.dataRepresentation()]
         if let png = Self.image(of: drawing)?.pngData() { item[UTType.png.identifier] = png }
         pasteboard.setItems([item])
-        host?.tools.showToast(symbol: "doc.on.doc", text: "Copied")
+        return true
+    }
+
+    /// Whether the pasteboard holds ink copied in EmberPad. Checking the type
+    /// does not read the pasteboard, so it never asks for paste permission.
+    var canPaste: Bool { pasteboard.contains(pasteboardTypes: [Self.pasteboardType]) }
+
+    /// Adds the copied ink to `page`, centred on `point` (drawing space) and
+    /// kept on the page where it fits, as one undo step named Paste, and
+    /// selects it. Returns false, changing nothing, when there is no ink to paste.
+    @discardableResult
+    func paste(page: Int, at point: CGPoint, undoManager: UndoManager?) -> Bool {
+        guard let host, let canvas = host.canvases[page],
+              let data = pasteboard.data(forPasteboardType: Self.pasteboardType),
+              let clip = try? PKDrawing(data: data), !clip.strokes.isEmpty else { return false }
+        let before = canvas.drawing
+        let (after, indices) = SelectionEdit.pasted(clip, into: before, at: point, page: canvas.bounds)
+        dismiss()
+        host.commitDrawing(after, page: page, replacing: before, actionName: "Paste", undoManager: undoManager)
+        show(indices, page: page)
+        host.tools.showToast(symbol: "doc.on.clipboard", text: "Pasted")
+        return true
+    }
+
+    /// The page and drawing-space point under a long-press at `point` in
+    /// `pages`, when there is ink to paste.
+    private func pasteTarget(at point: CGPoint, in pages: UIView) -> (page: Int, point: CGPoint)? {
+        guard canPaste, let host else { return nil }
+        for (page, canvas) in host.canvases {
+            let local = canvas.convert(point, from: pages)
+            if canvas.bounds.contains(local) {
+                dismiss()
+                return (page, local)
+            }
+        }
+        return nil
     }
 
     /// The ink as it looks on the white page, whatever the app's theme.
@@ -321,12 +431,12 @@ final class InkSelectionController {
     }
 
     /// Removes the selected ink as one undo step.
-    func deleteSelection(undoManager: UndoManager?) {
+    func deleteSelection(undoManager: UndoManager?, actionName: String = "Delete") {
         guard let host, let selection, let canvas = host.canvases[selection.page] else { return }
         let before = canvas.drawing
         let after = SelectionEdit.deleted(before, indices: selection.indices)
         dismiss()
-        host.commitDrawing(after, page: selection.page, replacing: before, actionName: "Delete", undoManager: undoManager)
+        host.commitDrawing(after, page: selection.page, replacing: before, actionName: actionName, undoManager: undoManager)
     }
 }
 
@@ -357,7 +467,8 @@ extension PDFOverlayPageController {
 
 /// The selection's box over the page: a dashed accent outline, a round handle
 /// on each corner to resize and one above the top edge to rotate, plus the
-/// Copy, Duplicate and Delete edit menu. It sits above the PDF view rather
+/// Cut, Copy, Duplicate and Delete edit menu, placed clear of the rotate
+/// handle so a touch on the handle always rotates. It sits above the PDF view rather
 /// than inside a page canvas, so a touch on the selection never reaches
 /// PencilKit (no ink) or the PDF scroll view (no scrolling); everywhere else
 /// it is transparent to touches. It follows the page through scrolling and
@@ -369,6 +480,24 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
     static let handleHitRadius: CGFloat = 22
     /// How far above the top edge the rotate handle sits, on screen.
     static let rotateHandleDistance: CGFloat = 30
+    /// Room the edit menu needs above the selection before it goes below instead.
+    static let menuRoom: CGFloat = 56
+
+    /// Where the edit menu goes: outside `keepClear`, the selection's screen
+    /// rectangle plus every point that grabs its rotate handle, above it when
+    /// `bounds` (the visible area) has room and below the box otherwise.
+    struct MenuPlacement: Equatable {
+        let keepClear: CGRect
+        let below: Bool
+        var sourcePoint: CGPoint { CGPoint(x: keepClear.midX, y: below ? keepClear.maxY : keepClear.minY) }
+    }
+
+    static func menuPlacement(box: CGRect, rotateHandle: CGPoint, in bounds: CGRect) -> MenuPlacement {
+        let reach = handleHitRadius
+        let handle = CGRect(x: rotateHandle.x - reach, y: rotateHandle.y - reach, width: 2 * reach, height: 2 * reach)
+        let keepClear = box.union(handle)
+        return MenuPlacement(keepClear: keepClear, below: keepClear.minY - menuRoom < bounds.minY)
+    }
 
     private(set) weak var canvas: PKCanvasView?
     private(set) var box: SelectionBox?
@@ -392,7 +521,8 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
     private lazy var editMenu = UIEditMenuInteraction(delegate: self)
     private var displayLink: CADisplayLink?
     private var shownCorners: [CGPoint] = []
-    private var menuVisible = false
+    /// The edit menu is on screen.
+    private(set) var menuVisible = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -418,7 +548,7 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
         addInteraction(editMenu)
         isAccessibilityElement = true
         accessibilityLabel = "Selected ink"
-        accessibilityHint = "Copy, Duplicate or Delete from the actions."
+        accessibilityHint = "Cut, Copy, Duplicate or Delete from the actions."
     }
 
     required init?(coder: NSCoder) { nil }
@@ -559,25 +689,15 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
     // MARK: Gestures
 
     @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
-        guard let box else { return }
         let location = pan.location(in: self)
         switch pan.state {
         case .began:
             let moved = pan.translation(in: self)
-            let start = CGPoint(x: location.x - moved.x, y: location.y - moved.y)
-            guard let target = target(at: start) else { return }
-            drag = target
-            dragStart = onCanvas(start)
-            editMenu.dismissMenu()
-            onDragBegan?()
-            update(box, to: location)
+            beginDrag(at: CGPoint(x: location.x - moved.x, y: location.y - moved.y), to: location)
         case .changed:
-            update(box, to: location)
+            continueDrag(to: location)
         case .ended:
-            guard let drag else { return }
-            let delta = delta(for: drag, box: box, to: onCanvas(location))
-            self.drag = nil
-            onDragEnded?(delta, drag)
+            endDrag(at: location)
         case .cancelled, .failed:
             guard drag != nil else { return }
             drag = nil
@@ -587,6 +707,31 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
         default:
             break
         }
+    }
+
+    /// Starts the drag a touch at `start` (overlay coordinates) grabs, now at
+    /// `location`. Returns what it drags, or nil when `start` misses the selection.
+    @discardableResult
+    func beginDrag(at start: CGPoint, to location: CGPoint) -> SelectionDrag? {
+        guard let box, let target = target(at: start) else { return nil }
+        drag = target
+        dragStart = onCanvas(start)
+        editMenu.dismissMenu()
+        onDragBegan?()
+        update(box, to: location)
+        return target
+    }
+
+    func continueDrag(to location: CGPoint) {
+        guard let box else { return }
+        update(box, to: location)
+    }
+
+    func endDrag(at location: CGPoint) {
+        guard let box, let drag else { return }
+        let delta = delta(for: drag, box: box, to: onCanvas(location))
+        self.drag = nil
+        onDragEnded?(delta, drag)
     }
 
     private func update(_ box: SelectionBox, to location: CGPoint) {
@@ -616,10 +761,18 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
 
     // MARK: Edit menu
 
+    /// Where the menu goes for the box as shown now, or nil when nothing is shown.
+    var menuPlacement: MenuPlacement? {
+        guard let box = shownBox, canvas != nil, !screenRect.isNull else { return nil }
+        return Self.menuPlacement(box: screenRect, rotateHandle: rotateHandle(for: box), in: bounds.inset(by: safeAreaInsets))
+    }
+
     private func presentMenu() {
-        guard box != nil, window != nil, !screenRect.isNull else { return }
-        let rect = screenRect
-        editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: rect.midX, y: rect.minY)))
+        guard window != nil, let placement = menuPlacement else { return }
+        let configuration = UIEditMenuConfiguration(identifier: nil, sourcePoint: placement.sourcePoint)
+        // The arrow points at the selection: up from a menu below it, down from one above.
+        configuration.preferredArrowDirection = placement.below ? .up : .down
+        editMenu.presentEditMenu(with: configuration)
     }
 
     func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
@@ -630,8 +783,10 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
         })
     }
 
+    /// The menu lays itself out beside this rectangle, never over it, so the
+    /// rotate handle inside it stays uncovered.
     func editMenuInteraction(_ interaction: UIEditMenuInteraction, targetRectFor configuration: UIEditMenuConfiguration) -> CGRect {
-        screenRect.isNull ? .zero : screenRect
+        menuPlacement?.keepClear ?? .zero
     }
 
     func editMenuInteraction(_ interaction: UIEditMenuInteraction, willPresentMenuFor configuration: UIEditMenuConfiguration,
@@ -653,6 +808,76 @@ private final class DisplayLinkProxy: NSObject {
 
     @objc func tick() {
         MainActor.assumeIsolated { overlay?.refresh(force: false) }
+    }
+}
+
+// MARK: - Paste menu
+
+/// A finger long-press on a page opens a Paste menu at the touch, when there is
+/// EmberPad ink on the pasteboard. The recogniser never cancels or delays a
+/// touch, and a finger that moves fails it, so scrolling and zooming are unchanged.
+@MainActor
+final class PasteMenu: NSObject, @preconcurrency UIEditMenuInteractionDelegate, UIGestureRecognizerDelegate {
+    /// The page and drawing-space point under a long-press, or nil when Paste does not apply there.
+    var target: ((CGPoint) -> (page: Int, point: CGPoint)?)?
+    private let onPaste: (Int, CGPoint) -> Void
+    let longPress = UILongPressGestureRecognizer()
+    private var interaction: UIEditMenuInteraction?
+    /// Where the open menu pastes.
+    private(set) var pending: (page: Int, point: CGPoint)?
+
+    init(onPaste: @escaping (Int, CGPoint) -> Void) {
+        self.onPaste = onPaste
+        super.init()
+        longPress.minimumPressDuration = 0.5
+        longPress.cancelsTouchesInView = false
+        longPress.delaysTouchesBegan = false
+        longPress.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        longPress.delegate = self
+        longPress.addTarget(self, action: #selector(pressed(_:)))
+    }
+
+    func install(on view: UIView) {
+        let interaction = UIEditMenuInteraction(delegate: self)
+        view.addInteraction(interaction)
+        view.addGestureRecognizer(longPress)
+        self.interaction = interaction
+    }
+
+    nonisolated func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                                       shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+    @objc private func pressed(_ press: UILongPressGestureRecognizer) {
+        guard press.state == .began, let view = press.view else { return }
+        present(at: press.location(in: view))
+    }
+
+    /// Opens the Paste menu at `location` in the pages view, when Paste applies
+    /// there. Returns whether it did.
+    @discardableResult
+    func present(at location: CGPoint) -> Bool {
+        guard let target = target?(location) else {
+            pending = nil
+            return false
+        }
+        pending = target
+        interaction?.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: location))
+        return true
+    }
+
+    /// Pastes where the menu was opened; the menu's Paste item calls this.
+    func performPaste() {
+        guard let pending else { return }
+        self.pending = nil
+        onPaste(pending.page, pending.point)
+    }
+
+    func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                             suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard pending != nil else { return nil }
+        return UIMenu(children: [UIAction(title: "Paste", image: UIImage(systemName: "doc.on.clipboard")) { [weak self] _ in
+            self?.performPaste()
+        }])
     }
 }
 
