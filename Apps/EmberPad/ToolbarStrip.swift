@@ -236,6 +236,9 @@ private struct ColorDot: View {
 struct ToolSettingsPopover: View {
     let tool: WorksheetTool
     let tools: ToolState
+    /// Replaces the popover's height, so a screenshot can show the whole list
+    /// that scrolls in the app.
+    var heightOverride: CGFloat?
     @State private var pickedColor: PickedColor?
     @State private var addingColorFor: WorksheetTool?
 
@@ -249,24 +252,35 @@ struct ToolSettingsPopover: View {
                 }
                 colorSection(.pen)
                 Section {
-                    Toggle(isOn: Binding(get: { tools.settings.scribbleToErase }, set: tools.setScribbleToErase)) {
-                        TaggedLabel(title: "Scribble to erase", tag: "Phase 3", stacked: true)
-                    }.disabled(true)
+                    Toggle("Draw and hold: straight line",
+                           isOn: Binding(get: { tools.settings.penDrawAndHold }, set: tools.setPenDrawAndHold))
                     Toggle("Circle to lasso", isOn: Binding(get: { tools.settings.circleToLasso }, set: tools.setCircleToLasso))
+                    // Not built yet: always off, and the switch cannot be turned on.
+                    Toggle(isOn: .constant(false)) {
+                        TaggedLabel(title: "Scribble to erase", tag: "Coming later", stacked: true)
+                            .foregroundStyle(Theme.text3)
+                    }
+                    .disabled(true)
+                    .accessibilityLabel("Scribble to erase, coming later")
                     TaggedRow(title: "Pencil double-tap", tag: "iPad Settings")
                 } header: {
                     Text("Pen gestures")
                 } footer: {
-                    Text("Circle ink with the pen, then hold still for half a second, or lift and press the circle, to select it.")
+                    Text("Hold the Pencil still for half a second at the end of a line and it snaps straight. Circle ink with the pen, then hold still, or lift and press the circle, to select it.")
                 }
             case .highlighter:
                 colorSection(.highlighter)
                 Section {
+                    Toggle("Always straight",
+                           isOn: Binding(get: { tools.settings.highlighterAlwaysStraight }, set: tools.setHighlighterAlwaysStraight))
                     Toggle("Draw and hold: straight line",
                            isOn: Binding(get: { tools.settings.straightHighlighter }, set: tools.setStraightHighlighter))
+                        .disabled(tools.settings.highlighterAlwaysStraight)
                     TaggedRow(title: "Highlight behind ink", tag: "Phase 4")
                 } footer: {
-                    Text("Hold the Pencil still for half a second at the end of a stroke and it snaps straight. Lines within 8° of level lie flat.")
+                    Text(tools.settings.highlighterAlwaysStraight
+                         ? "Every highlighter stroke becomes a straight line from where it starts to where it ends. Lines within 8° of level lie flat."
+                         : "Hold the Pencil still for half a second at the end of a stroke and it snaps straight. Lines within 8° of level lie flat.")
                 }
             case .eraser:
                 Section {
@@ -291,14 +305,14 @@ struct ToolSettingsPopover: View {
         }
         .listStyle(.insetGrouped)
         .environment(\.editMode, .constant(tool == .pen || tool == .highlighter ? .active : .inactive))
-        .frame(width: 320, height: height)
+        .frame(width: 320, height: heightOverride ?? height)
         .addColorSheet(for: $addingColorFor, picked: $pickedColor, tools: tools)
     }
 
     private var height: CGFloat {
         switch tool {
-        case .pen: 560
-        case .highlighter: 540
+        case .pen: 600
+        case .highlighter: 580
         case .eraser: 300
         case .lasso: 230
         }

@@ -37,7 +37,9 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(s.eraserSize, 16)
         XCTAssertEqual(s.eraserMode, .partial)
         XCTAssertTrue(s.straightHighlighter)
-        XCTAssertTrue(s.scribbleToErase)
+        XCTAssertTrue(s.highlighterAlwaysStraight, "GoodNotes' Draw in Straight Line is on")
+        XCTAssertTrue(s.penDrawAndHold, "GoodNotes' pen Draw and Hold is on")
+        XCTAssertFalse(s.scribbleToErase, "scribble to erase is off until it ships")
         XCTAssertTrue(s.circleToLasso)
     }
 
@@ -81,7 +83,8 @@ final class ToolStateTests: XCTestCase {
         tools.setEraserMode(.wholeStroke)
         tools.selectEraserSize(0)
         tools.setStraightHighlighter(false)
-        tools.setScribbleToErase(false)
+        tools.setHighlighterAlwaysStraight(false)
+        tools.setPenDrawAndHold(false)
         tools.setCircleToLasso(false)
 
         let relaunched = ToolState(defaults: defaults)
@@ -98,8 +101,20 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(s.eraserMode, .wholeStroke)
         XCTAssertEqual(s.eraserSizeIndex, 0)
         XCTAssertFalse(s.straightHighlighter)
-        XCTAssertFalse(s.scribbleToErase)
+        XCTAssertFalse(s.highlighterAlwaysStraight)
+        XCTAssertFalse(s.penDrawAndHold)
         XCTAssertFalse(s.circleToLasso)
+    }
+
+    func testScribbleToEraseStoredOnByEarlierBuildsComesBackOff() {
+        // Earlier builds stored scribble to erase as on although nothing implemented it.
+        let stored = #"{"current":"pen","scribbleToErase":true,"straightHighlighter":false}"#
+        defaults.set(Data(stored.utf8), forKey: ToolState.defaultsKey)
+        let s = ToolState(defaults: defaults).settings
+        XCTAssertFalse(s.scribbleToErase)
+        XCTAssertFalse(s.straightHighlighter, "other stored switches are kept")
+        XCTAssertTrue(s.highlighterAlwaysStraight, "a switch earlier builds never stored takes its default")
+        XCTAssertTrue(s.penDrawAndHold)
     }
 
     func testStoredColoursAreReadableHex() throws {
@@ -179,7 +194,7 @@ final class ToolStateTests: XCTestCase {
         tools.onToolChange = { applied.append($0) }
         tools.select(.highlighter)
         tools.selectHighlighterColor(2)
-        tools.setScribbleToErase(false)  // not a tool change
+        tools.setPenDrawAndHold(false)   // not a tool change
         tools.selectPenWidth(2)          // pen is not current
         tools.select(.eraser)
         XCTAssertEqual(applied.count, 3)

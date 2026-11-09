@@ -50,17 +50,18 @@ struct HoldTracker: Equatable {
 /// recogniser and never recognises, cancels, delays or blocks a touch, so ink
 /// latency and delivery are exactly as without it. Its callbacks only report
 /// what happened; deciding what a hold means (straight highlighter, EP-14;
-/// circle to lasso, EP-29) is the owner's job.
+/// straight pen line; circle to lasso, EP-29) is the owner's job.
 ///
 /// `heldAtEnd` stays latched after the touch lifts, until the owner calls
 /// `consumeHold()` or the next touch begins, because PencilKit may commit the
-/// stroke before or after this recogniser sees the touch end.
+/// stroke before or after this recogniser sees the touch end. `pencilStroke`
+/// is latched the same way, for owners that act on every Pencil stroke.
 @MainActor
 final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     /// Called once per touch, when it latches a hold.
     var onHold: ((HoldRecognizer) -> Void)?
-    /// Called for each movement after a hold, while the touch is down.
-    var onMoveAfterHold: ((HoldRecognizer) -> Void)?
+    /// Called for each movement while the touch is down, held or not.
+    var onMove: ((HoldRecognizer) -> Void)?
     /// Called when the tracked touch lifts or is cancelled.
     var onEnd: ((HoldRecognizer) -> Void)?
 
@@ -70,6 +71,19 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     /// The last stroke was held still for `HoldTracker.duration`. Set by
     /// touches; settable in the module so tests can stand in for a Pencil.
     var heldAtEnd = false
+    /// A Pencil touch began on this view since the last `consumeHold()`, so
+    /// the next drawing change is a stroke the teacher just drew (not an undo
+    /// or redo). Cleared if the touch is cancelled. Settable in the module so
+    /// tests can stand in for a Pencil.
+    var pencilStroke = false
+    /// How far the tracked touch has travelled, in points.
+    private(set) var travelled: CGFloat = 0
+    /// When the hold latched, the stroke so far was close to a line
+    /// (`StrokeSnap.isLineLike`). Movement after the hold only moves the
+    /// line's end, so it does not count. Settable in the module for tests.
+    var lineLikeAtHold = false
+    /// The current touch has been held still long enough to count as a hold.
+    var isHeld: Bool { tracker?.held ?? false }
     /// The tracked touch was cancelled rather than lifted.
     private(set) var wasCancelled = false
 
@@ -86,8 +100,11 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         delegate = self
     }
 
-    /// Clears the latched hold so it applies to one stroke only.
-    func consumeHold() { heldAtEnd = false }
+    /// Clears the latched hold and stroke so they apply to one stroke only.
+    func consumeHold() {
+        heldAtEnd = false
+        pencilStroke = false
+    }
 
     // MARK: - Never interfere
 
@@ -108,7 +125,10 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         tracker = HoldTracker(at: point, time: first.timestamp)
         startLocation = point
         currentLocation = point
+        travelled = 0
+        lineLikeAtHold = false
         heldAtEnd = false
+        pencilStroke = true
         wasCancelled = false
         schedule(after: HoldTracker.duration)
     }
@@ -117,11 +137,11 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         super.touchesMoved(touches, with: event)
         guard let touch, touches.contains(touch), var tracker else { return }
         let point = touch.location(in: view)
-        let wasHeld = tracker.held
         let latched = tracker.move(to: point, at: touch.timestamp)
         self.tracker = tracker
+        if let previous = currentLocation { travelled += hypot(point.x - previous.x, point.y - previous.y) }
         currentLocation = point
-        if latched { latch() } else if wasHeld { onMoveAfterHold?(self) }
+        if latched { latch() } else { onMove?(self) }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -139,12 +159,13 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         guard let touch, touches.contains(touch) else { return }
         // A cancelled stroke is not committed, so its hold must not apply to a later one.
         heldAtEnd = false
+        pencilStroke = false
         finish(cancelled: true)
     }
 
     override func reset() {
         super.reset()
-        // `heldAtEnd` survives reset on purpose; see the type's comment.
+        // `heldAtEnd` and `pencilStroke` survive reset on purpose; see the type's comment.
         timer?.invalidate(); timer = nil
         touch = nil
         tracker = nil
@@ -187,6 +208,9 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
 
     private func latch() {
         timer?.invalidate(); timer = nil
+        if let start = startLocation, let current = currentLocation {
+            lineLikeAtHold = StrokeSnap.isLineLike(chord: hypot(current.x - start.x, current.y - start.y), length: travelled)
+        }
         heldAtEnd = true
         onHold?(self)
     }

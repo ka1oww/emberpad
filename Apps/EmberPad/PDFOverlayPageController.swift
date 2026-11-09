@@ -317,7 +317,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 }
 
-// MARK: - Straight-line highlighter (EP-14)
+// MARK: - Straight lines: highlighter (EP-14) and pen draw and hold
 
 extension PDFOverlayPageController {
     /// Every canvas gets a passive hold recogniser beside PencilKit's own; it
@@ -328,7 +328,7 @@ extension PDFOverlayPageController {
             guard let self, !self.circleLassoPress(hold) else { return }
             self.updateHoldGuide(hold)
         }
-        hold.onMoveAfterHold = { [weak self] in self?.updateHoldGuide($0) }
+        hold.onMove = { [weak self] in self?.updateHoldGuide($0) }
         hold.onEnd = { [weak self] _ in self?.holdGuide.removeFromSuperlayer() }
         return hold
     }
@@ -343,12 +343,23 @@ extension PDFOverlayPageController {
         return guide
     }
 
-    /// While a held highlighter stroke is down, a dashed line shows where it
-    /// will snap: from where it began to the (flattened) Pencil position.
+    /// While a stroke that will snap is down, a dashed line shows where it
+    /// will snap: from where it began to the (flattened) Pencil position. That
+    /// is every always-straight highlighter stroke, and a held highlighter or
+    /// pen stroke. A held pen stroke that is not close to a line (a letter, a
+    /// curve, a circle to lasso) shows no guide, because it will not snap.
     private func updateHoldGuide(_ hold: HoldRecognizer) {
-        guard tools.current == .highlighter, tools.settings.straightHighlighter,
-              let canvas = hold.view, let start = hold.startLocation, let current = hold.currentLocation
-        else { return }
+        guard let canvas = hold.view, let start = hold.startLocation, let current = hold.currentLocation else { return }
+        let settings = tools.settings
+        let snaps = switch tools.current {
+        case .highlighter: settings.highlighterAlwaysStraight || (hold.isHeld && settings.straightHighlighter)
+        case .pen: hold.isHeld && settings.penDrawAndHold && hold.lineLikeAtHold
+        case .lasso, .eraser: false
+        }
+        guard snaps else {
+            holdGuide.removeFromSuperlayer()
+            return
+        }
         let path = UIBezierPath()
         path.move(to: start)
         path.addLine(to: StrokeSnap.snappedEnd(from: start, to: current))
@@ -400,22 +411,26 @@ extension PDFOverlayPageController {
         canvas.gestureRecognizers?.lazy.compactMap { $0 as? HoldRecognizer }.first
     }
 
-    /// After PencilKit commits a stroke: if the Pencil was held still at its
-    /// end and it is a highlighter stroke, swap it for a straight one. The
-    /// swap waits a turn of the run loop so PencilKit finishes its commit and
-    /// closes its undo group first; the ink was already drawn, so nothing
-    /// here can delay it.
+    /// After PencilKit commits a stroke, swap it for a straight one when it
+    /// is a highlighter stroke with "Always straight" on, or a highlighter or
+    /// pen stroke held still at its end with its draw-and-hold switch on. A
+    /// held closed pen loop is circle to lasso instead. The swap waits a turn
+    /// of the run loop so PencilKit finishes its commit and closes its undo
+    /// group first; the ink was already drawn, so nothing here can delay it.
     private func straightenIfHeld(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
-        guard let hold = Self.holdRecognizer(on: canvas), hold.heldAtEnd else {
+        guard let hold = Self.holdRecognizer(on: canvas) else { return }
+        let held = hold.heldAtEnd
+        if !held, canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last {
             // Lifted without a hold: a closed loop can still be long-pressed into a selection.
-            if canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last {
-                inkSelection.noteLiftedStroke(stroke, page: page, strokeCount: canvas.drawing.strokes.count)
-            }
-            return
+            inkSelection.noteLiftedStroke(stroke, page: page, strokeCount: canvas.drawing.strokes.count)
         }
-        // A hold applies to the one drawing change it ended, whatever that change was.
+        guard held || hold.pencilStroke else { return }
+        let lineLike = hold.lineLikeAtHold
+        // A hold or stroke applies to the one drawing change it ended, whatever that change was.
         hold.consumeHold()
-        if canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last, inkSelection.isLassoLoop(stroke) {
+        // Undo and redo bring strokes back exactly as they were.
+        if let undoManager = canvas.undoManager, undoManager.isUndoing || undoManager.isRedoing { return }
+        if held, canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last, inkSelection.isLassoLoop(stroke) {
             // Circle to lasso (EP-29): the same wait for PencilKit's commit as the snap below.
             let count = canvas.drawing.strokes.count
             let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
@@ -424,12 +439,28 @@ extension PDFOverlayPageController {
             }
             return
         }
-        guard canvas.drawing.strokes.count == previousCount + 1, tools.settings.straightHighlighter,
-              let stroke = canvas.drawing.strokes.last, stroke.ink.inkType == .marker, let straight = StrokeSnap.straightened(stroke) else { return }
+        guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
+              snapsStraight(stroke, held: held, lineLike: lineLike), let straight = StrokeSnap.straightened(stroke) else { return }
         let count = canvas.drawing.strokes.count
         let undoManager = canvas.undoManager
         DispatchQueue.main.async { [weak self] in
             self?.replaceNewestStroke(page: page, strokeCount: count, with: straight, undoManager: undoManager)
+        }
+    }
+
+    /// Whether a just-committed stroke becomes a straight line.
+    /// `lineLike`: the stroke was close to a line when the hold latched.
+    private func snapsStraight(_ stroke: PKStroke, held: Bool, lineLike: Bool) -> Bool {
+        let settings = tools.settings
+        switch stroke.ink.inkType {
+        case .marker:
+            return tools.current == .highlighter && (settings.highlighterAlwaysStraight || (held && settings.straightHighlighter))
+        case .fountainPen:
+            // Only a stroke already close to a line when held snaps; a held letter,
+            // curve or closed loop stays as written (shapes come later).
+            return tools.current == .pen && held && lineLike && settings.penDrawAndHold
+        default:
+            return false
         }
     }
 
