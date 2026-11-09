@@ -2,10 +2,10 @@ import CoreGraphics
 import Foundation
 import PencilKit
 
-/// Geometry for the straight-line highlighter (EP-14, design 5.4): a held
-/// marker stroke becomes a straight stroke from its first point to its last,
-/// laid flat when it is within ±8° of horizontal. Pure, so tests cover it
-/// without a canvas.
+/// Geometry for straight lines (EP-14, design 5.4): a held marker or pen
+/// stroke, or any marker stroke with "Always straight" on, becomes a straight
+/// stroke from its first point to its last, laid flat when it is within ±8°
+/// of horizontal. Pure, so tests cover it without a canvas.
 enum StrokeSnap {
     /// A line this close to horizontal, in either direction, snaps flat.
     static let flatTolerance: CGFloat = 8
@@ -13,6 +13,24 @@ enum StrokeSnap {
     static let pointSpacing: CGFloat = 4
     /// A held stroke shorter than this is a dot, and stays as drawn.
     static let minimumLength: CGFloat = 2
+
+    /// A held pen stroke snaps only when it is close to a line already: the
+    /// distance between its ends is at least this fraction of its length. A
+    /// wobbly line passes; a held letter, curve or zigzag stays as written.
+    static let lineLikeRatio: CGFloat = 0.8
+
+    /// Whether a stroke `length` long whose ends are `chord` apart is close
+    /// enough to a line to snap.
+    static func isLineLike(chord: CGFloat, length: CGFloat) -> Bool {
+        length >= minimumLength && chord >= lineLikeRatio * length
+    }
+
+    /// Whether the stroke through `points` is close enough to a line to snap.
+    static func isLineLike(_ points: [CGPoint]) -> Bool {
+        guard let first = points.first, let last = points.last else { return false }
+        let length = zip(points, points.dropFirst()).reduce(0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }
+        return isLineLike(chord: hypot(last.x - first.x, last.y - first.y), length: length)
+    }
 
     /// The angle of the line from `start` to `end` away from horizontal, in
     /// degrees from 0 (flat, leftward or rightward) to 90 (vertical).

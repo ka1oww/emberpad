@@ -57,11 +57,17 @@ struct ToolSettings: Codable, Equatable, Sendable {
     var highlighterWidthIndex = Theme.highlighterDefaultWidthIndex
     var eraserMode: EraserMode = .partial
     var eraserSizeIndex = Theme.eraserDefaultSizeIndex
-    /// Draw and hold for a straight highlighter line. Its behaviour ships separately.
+    /// Draw and hold for a straight highlighter line (EP-14).
     var straightHighlighter = true
-    /// Pen gestures, phase 3. Circle to lasso works (EP-29); scribble to erase is
-    /// stored now so the teacher's choice survives until it ships.
-    var scribbleToErase = true
+    /// Every highlighter stroke becomes a straight line, no hold needed, like
+    /// GoodNotes' "Draw in Straight Line". On by default.
+    var highlighterAlwaysStraight = true
+    /// Draw and hold for a straight fountain-pen line, like GoodNotes' pen
+    /// "Draw and Hold". On by default.
+    var penDrawAndHold = true
+    /// Scribble to erase is not built yet, so it is always off and its switch
+    /// is disabled; `normalized()` keeps it off whatever was stored.
+    var scribbleToErase = false
     var circleToLasso = true
 
     /// The design's ink hex values (section 3), which the `pen*` and
@@ -85,14 +91,18 @@ struct ToolSettings: Codable, Equatable, Sendable {
         eraserMode = (try? c.decodeIfPresent(EraserMode.self, forKey: .eraserMode)) ?? d.eraserMode
         eraserSizeIndex = (try? c.decodeIfPresent(Int.self, forKey: .eraserSizeIndex)) ?? d.eraserSizeIndex
         straightHighlighter = (try? c.decodeIfPresent(Bool.self, forKey: .straightHighlighter)) ?? d.straightHighlighter
+        highlighterAlwaysStraight = (try? c.decodeIfPresent(Bool.self, forKey: .highlighterAlwaysStraight)) ?? d.highlighterAlwaysStraight
+        penDrawAndHold = (try? c.decodeIfPresent(Bool.self, forKey: .penDrawAndHold)) ?? d.penDrawAndHold
         scribbleToErase = (try? c.decodeIfPresent(Bool.self, forKey: .scribbleToErase)) ?? d.scribbleToErase
         circleToLasso = (try? c.decodeIfPresent(Bool.self, forKey: .circleToLasso)) ?? d.circleToLasso
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
-    /// lists, and indices past the end of their lists.
+    /// lists, and indices past the end of their lists. Also turns off scribble
+    /// to erase, which earlier builds stored as on although it did nothing.
     func normalized() -> ToolSettings {
         var s = self
+        s.scribbleToErase = false
         s.penColors = Self.cleanPresets(s.penColors, fallback: Self.defaultPenColors)
         s.highlighterColors = Self.cleanPresets(s.highlighterColors, fallback: Self.defaultHighlighterColors)
         s.penColorIndex = Self.clamp(s.penColorIndex, count: s.penColors.count)
@@ -257,7 +267,8 @@ final class ToolState {
     func selectEraserSize(_ index: Int) { update { $0.eraserSizeIndex = index } }
     func setEraserMode(_ mode: EraserMode) { update { $0.eraserMode = mode } }
     func setStraightHighlighter(_ on: Bool) { update { $0.straightHighlighter = on } }
-    func setScribbleToErase(_ on: Bool) { update { $0.scribbleToErase = on } }
+    func setHighlighterAlwaysStraight(_ on: Bool) { update { $0.highlighterAlwaysStraight = on } }
+    func setPenDrawAndHold(_ on: Bool) { update { $0.penDrawAndHold = on } }
     func setCircleToLasso(_ on: Bool) { update { $0.circleToLasso = on } }
 
     func canAddColor(for tool: WorksheetTool) -> Bool {

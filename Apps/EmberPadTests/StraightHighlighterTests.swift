@@ -5,7 +5,8 @@ import EmberSyncKit
 @testable import EmberPad
 
 /// EP-14 acceptance: the snapping geometry, the hold timing, the recogniser's
-/// passivity and the one-undo-step replacement. Every fixture is synthetic.
+/// passivity and the one-undo-step replacement, plus the pen's draw-and-hold
+/// line and the always-straight highlighter. Every fixture is synthetic.
 @MainActor
 final class StraightHighlighterTests: XCTestCase {
 
@@ -284,7 +285,135 @@ final class StraightHighlighterTests: XCTestCase {
         XCTAssertFalse(undo.canRedo)
     }
 
+    // MARK: - Pen draw and hold, and always-straight highlighter
+
+    func testOnlyAStrokeCloseToALineIsLineLike() {
+        let wobbly = (0...40).map { CGPoint(x: CGFloat($0) * 8, y: 4 * sin(CGFloat($0))) }
+        XCTAssertTrue(StrokeSnap.isLineLike(wobbly), "a wobbly line snaps")
+        let arc = (0...40).map { CGPoint(x: 50 * cos(CGFloat($0) * .pi / 40), y: 50 * sin(CGFloat($0) * .pi / 40)) }
+        XCTAssertFalse(StrokeSnap.isLineLike(arc), "a held curve, like a letter c, stays as written")
+        let zigzag = (0...10).map { CGPoint(x: CGFloat($0 % 2) * 60, y: CGFloat($0) * 4) }
+        XCTAssertFalse(StrokeSnap.isLineLike(zigzag))
+        let loop = (0...40).map { CGPoint(x: 40 * cos(CGFloat($0) * .pi / 20), y: 40 * sin(CGFloat($0) * .pi / 20)) }
+        XCTAssertFalse(StrokeSnap.isLineLike(loop), "a closed loop is circle to lasso, never a line")
+        XCTAssertFalse(StrokeSnap.isLineLike([CGPoint(x: 3, y: 3)]))
+        XCTAssertTrue(StrokeSnap.isLineLike(chord: 80, length: 100))
+        XCTAssertFalse(StrokeSnap.isLineLike(chord: 79, length: 100))
+        XCTAssertFalse(StrokeSnap.isLineLike(chord: 1, length: 1), "a dot stays a dot")
+    }
+
+    func testHeldPenLineSnapsStraight() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        let pen = Self.wobblyPen(from: CGPoint(x: 40, y: 220), to: CGPoint(x: 400, y: 226))
+
+        hold.pencilStroke = true
+        hold.heldAtEnd = true
+        hold.lineLikeAtHold = true
+        canvas.drawing = PKDrawing(strokes: [pen])
+        controller.canvasViewDrawingDidChange(canvas)
+        XCTAssertFalse(hold.heldAtEnd)
+        XCTAssertFalse(hold.pencilStroke)
+        await Self.settle()
+
+        let stroke = try XCTUnwrap(canvas.drawing.strokes.last)
+        XCTAssertEqual(canvas.drawing.strokes.count, 1)
+        XCTAssertEqual(stroke.ink.inkType, .fountainPen, "the pen line keeps its ink")
+        XCTAssertTrue(Array(stroke.path).allSatisfy { abs($0.location.y - 220) < 1e-6 }, "the held pen line lies flat")
+        XCTAssertEqual(Array(try XCTUnwrap(session.drawing(on: 0).strokes.last).path).last?.location, CGPoint(x: 400, y: 220))
+    }
+
+    func testUnheldCurvedOrSwitchedOffPenStrokesStayAsWritten() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        let pen = Self.wobblyPen(from: CGPoint(x: 40, y: 220), to: CGPoint(x: 400, y: 226))
+
+        // Written without a hold.
+        hold.pencilStroke = true
+        canvas.drawing = PKDrawing(strokes: [pen])
+        controller.canvasViewDrawingDidChange(canvas)
+        // Held, but not close to a line when the hold latched (a letter or curve).
+        hold.pencilStroke = true
+        hold.heldAtEnd = true
+        hold.lineLikeAtHold = false
+        canvas.drawing = PKDrawing(strokes: [pen, pen])
+        controller.canvasViewDrawingDidChange(canvas)
+        // Held line with the pen's draw-and-hold switch off.
+        controller.tools.setPenDrawAndHold(false)
+        hold.pencilStroke = true
+        hold.heldAtEnd = true
+        hold.lineLikeAtHold = true
+        canvas.drawing = PKDrawing(strokes: [pen, pen, pen])
+        controller.canvasViewDrawingDidChange(canvas)
+        await Self.settle()
+
+        XCTAssertEqual(canvas.drawing.strokes.count, 3)
+        for stroke in canvas.drawing.strokes {
+            XCTAssertEqual(Array(stroke.path).map(\.location), Array(pen.path).map(\.location))
+        }
+    }
+
+    func testAlwaysStraightHighlighterSnapsWithoutAHold() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        controller.tools.select(.highlighter)
+        XCTAssertTrue(controller.tools.settings.highlighterAlwaysStraight)
+        let marker = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 131))
+
+        hold.pencilStroke = true
+        canvas.drawing = PKDrawing(strokes: [marker])
+        controller.canvasViewDrawingDidChange(canvas)
+        XCTAssertFalse(hold.pencilStroke, "a stroke applies to one drawing change")
+        await Self.settle()
+
+        let points = Array(try XCTUnwrap(canvas.drawing.strokes.last).path)
+        XCTAssertTrue(points.allSatisfy { abs($0.location.y - 120) < 1e-6 }, "the unheld highlighter stroke lies flat")
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
+    }
+
+    func testAlwaysStraightLeavesUndoneInkAndSwitchedOffStrokesAlone() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        controller.tools.select(.highlighter)
+        let marker = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 131))
+
+        // A marker stroke coming back without a Pencil stroke (undo, redo, sync) stays as it was.
+        canvas.drawing = PKDrawing(strokes: [marker])
+        controller.canvasViewDrawingDidChange(canvas)
+        // A drawn stroke with "Always straight" and draw and hold both off.
+        controller.tools.setHighlighterAlwaysStraight(false)
+        controller.tools.setStraightHighlighter(false)
+        hold.pencilStroke = true
+        canvas.drawing = PKDrawing(strokes: [marker, marker])
+        controller.canvasViewDrawingDidChange(canvas)
+        await Self.settle()
+
+        XCTAssertEqual(canvas.drawing.strokes.count, 2)
+        for stroke in canvas.drawing.strokes {
+            XCTAssertEqual(Array(stroke.path).map(\.location), Array(marker.path).map(\.location))
+        }
+    }
+
     // MARK: - Fixtures
+
+    /// A synthetic fountain-pen line with the same wobble as `wobblyMarker`.
+    /// Its nib is angled so a level line still shows its width.
+    static func wobblyPen(from start: CGPoint, to end: CGPoint) -> PKStroke {
+        let count = 24
+        let points = (0..<count).map { index -> PKStrokePoint in
+            let t = CGFloat(index) / CGFloat(count - 1)
+            let offset = index == 0 || index == count - 1 ? 0 : 2 * sin(t * 9)
+            return PKStrokePoint(location: CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t + offset),
+                                 timeOffset: Double(index) * 0.02, size: CGSize(width: 3, height: 3),
+                                 opacity: 1, force: 1, azimuth: .pi / 4, altitude: .pi / 3)
+        }
+        return PKStroke(ink: PKInk(.fountainPen, color: UIColor(emberHex: "1E3A8A")!),
+                        path: PKStrokePath(controlPoints: points, creationDate: Date(timeIntervalSince1970: 1_800_000_000)))
+    }
 
     private func point(from start: CGPoint, length: CGFloat, degrees: CGFloat, dx: CGFloat, dy: CGFloat) -> CGPoint {
         let radians = degrees * .pi / 180
