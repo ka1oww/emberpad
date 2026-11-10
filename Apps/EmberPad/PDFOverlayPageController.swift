@@ -47,7 +47,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var inkScaleWork: DispatchWorkItem?
     /// True while EmberPad itself swaps a canvas drawing, so the change is not read as new ink.
     var isReplacingStroke = false
-    private var pendingInkSwaps = 0
+    private var pendingInkSwaps: [Int: Int] = [:]
     /// The thin guide shown while a held highlighter stroke is about to snap straight.
     private let holdGuide = PDFOverlayPageController.makeHoldGuide()
     /// EmberPad's own ink selection, for circle to lasso and the toolbar lasso (EP-29).
@@ -267,19 +267,19 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         // Undo and redo bring strokes back exactly as they were, never tapered twice.
         guard undoManager?.isUndoing != true, undoManager?.isRedoing != true else {
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.pendingInkSwaps == 0, let canvas = self.canvases[page] else { return }
+                guard let self, (self.pendingInkSwaps[page] ?? 0) == 0, let canvas = self.canvases[page] else { return }
                 self.restoreClearInk(on: canvas, page: page)
             }
             return
         }
         let count = canvas.drawing.strokes.count
         let settings = tools.settings
-        pendingInkSwaps += 1
+        pendingInkSwaps[page, default: 0] += 1
         // A turn of the run loop later, as the snaps: PencilKit closes its undo group first, and the live pen has
         // seen the lift, which can reach it just after the commit.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.pendingInkSwaps -= 1
+            self.pendingInkSwaps[page, default: 1] -= 1
             let live = self.livePen.commit(page: page, now: self.livePenClock())
             self.scheduleLivePenExpiry()
             if !taken {
@@ -291,7 +291,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                                              undoManager: undoManager, actionName: "Ink")
                 }
             }
-            if let canvas = self.canvases[page] { self.restoreClearInk(on: canvas, page: page) }
+            if (self.pendingInkSwaps[page] ?? 0) == 0, let canvas = self.canvases[page] {
+                self.restoreClearInk(on: canvas, page: page)
+            }
         }
     }
 
