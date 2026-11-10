@@ -1,5 +1,4 @@
 import SwiftUI
-import PDFKit
 import EmberSyncKit
 
 // EP61: Add Page, laid out like GoodNotes' Add Page popover: Before / After / Last Page, a row of recent paper
@@ -69,7 +68,8 @@ struct AddPageChoice: Codable, Equatable {
     }
 }
 
-/// A small picture of a paper, drawn from the same page the worksheet gets.
+/// A small picture of a paper. The worksheet's real 5 mm grid shrinks below a pixel at this size, so the preview
+/// draws the same pattern at a pitch that stays visible, in the paper's colour and proportions.
 struct PaperPreview: View {
     let template: PaperTemplate
     var width: CGFloat = 64
@@ -77,31 +77,44 @@ struct PaperPreview: View {
     var body: some View {
         let size = template.pageSize
         let height = (width * size.height / size.width).rounded()
-        Group {
-            if let image = Self.image(template, width: width) {
-                Image(uiImage: image).resizable()
-            } else {
-                Color.white
+        Canvas { context, canvas in
+            let paper = template.color == .yellow ? PaperTemplateRenderer.yellowPaper : UIColor.white
+            context.fill(Path(CGRect(origin: .zero, size: canvas)), with: .color(Color(paper)))
+            let pitch = canvas.width / 10
+            let line = Color(red: 0xC4 / 255, green: 0xC4 / 255, blue: 0xC4 / 255)
+            switch template.kind {
+            case .blank:
+                break
+            case .squared:
+                var path = Path()
+                for x in PaperTemplateRenderer.lines(across: canvas.width, pitch: pitch) {
+                    path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: canvas.height))
+                }
+                for y in PaperTemplateRenderer.lines(across: canvas.height, pitch: pitch) {
+                    path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: canvas.width, y: y))
+                }
+                context.stroke(path, with: .color(line), lineWidth: 0.5)
+            case .dotted:
+                for x in PaperTemplateRenderer.lines(across: canvas.width, pitch: pitch) {
+                    for y in PaperTemplateRenderer.lines(across: canvas.height, pitch: pitch) {
+                        context.fill(Path(ellipseIn: CGRect(x: x - 0.75, y: y - 0.75, width: 1.5, height: 1.5)),
+                                     with: .color(Color(red: 0xA6 / 255, green: 0xA6 / 255, blue: 0xA6 / 255)))
+                    }
+                }
+            case .ruled:
+                var path = Path()
+                var y = pitch * 2
+                while y < canvas.height - pitch / 2 {
+                    path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: canvas.width, y: y))
+                    y += pitch * 1.4
+                }
+                context.stroke(path, with: .color(line), lineWidth: 0.5)
             }
         }
         .frame(width: width, height: height)
         .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous).stroke(Theme.line, lineWidth: Theme.hairlineWidth))
         .accessibilityHidden(true)
-    }
-
-    @MainActor private static var cache: [String: UIImage] = [:]
-
-    @MainActor
-    static func image(_ template: PaperTemplate, width: CGFloat) -> UIImage? {
-        let key = "\(template.kind)-\(template.size)-\(template.orientation)-\(template.color)-\(width)"
-        if let hit = cache[key] { return hit }
-        guard let page = PaperTemplateRenderer.page(for: template) else { return nil }
-        let size = template.pageSize
-        // Twice the scale of the thumbnail, so the 5 mm grid stays visible.
-        let image = page.thumbnail(of: CGSize(width: width * 3, height: width * 3 * size.height / size.width), for: .mediaBox)
-        cache[key] = image
-        return image
     }
 }
 
@@ -110,7 +123,14 @@ struct AddPagePopover: View {
     @Binding var choice: AddPageChoice
     /// Adds a page of this paper at the chosen position, then the popover closes.
     let add: (PaperTemplate) -> Void
-    @State private var showsTemplates = false
+    @State private var showsTemplates: Bool
+
+    /// `showsTemplates` opens the popover on More Templates (screenshots use it).
+    init(choice: Binding<AddPageChoice>, showsTemplates: Bool = false, add: @escaping (PaperTemplate) -> Void) {
+        _choice = choice
+        self.add = add
+        _showsTemplates = State(initialValue: showsTemplates)
+    }
 
     var body: some View {
         NavigationStack {

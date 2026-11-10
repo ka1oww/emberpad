@@ -156,6 +156,10 @@ final class PageChromeState: ObservableObject {
     @Published private(set) var pagesPopover: PagesPopoverSource?
     /// Scrolls the worksheet; the editor sets it once its renderer exists.
     var jumpToPage: ((Int) -> Void)?
+    /// The header's Add Page popover is open (EP61).
+    @Published var addPageOpen = false
+    /// Adds a page of this paper at the remembered position, as a tap on a recent paper does; the editor sets it.
+    var addPage: ((PaperTemplate) -> Void)?
     private var pillTask: Task<Void, Never>?
     private let pillLifetime: Duration
 
@@ -243,7 +247,6 @@ struct EditorScreen: View {
     @StateObject private var flattenedExport = FlattenedExportModel()
     /// The remembered Add Page choice (EP61).
     @State private var addPageChoice = AddPageChoice.load()
-    @State private var showsAddPage = false
     /// True while a page edit saves and the worksheet reopens on its new pages.
     @State private var editingPages = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -349,6 +352,7 @@ extension EditorScreen {
         made.startPage = startPage
         made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
         chrome.jumpToPage = { [weak made] page in made?.goToPage(page) }
+        chrome.addPage = { template in addPage(template) }
         renderer = made
     }
 
@@ -373,7 +377,7 @@ extension EditorScreen {
     /// Adds a page of `template` at the remembered position relative to the page in view.
     private func addPage(_ template: PaperTemplate) {
         guard let session else { return }
-        showsAddPage = false
+        chrome.addPageOpen = false
         addPageChoice.used(template)
         let index = addPageChoice.position.index(current: chrome.currentPage, count: session.pdf.pageCount)
         editPages(.insert(template, at: index), show: index)
@@ -459,10 +463,10 @@ extension EditorScreen {
         }
         .accessibilityLabel(teacherCard.toggleAccessibilityLabel)
         // EP61: GoodNotes' Add Page slot, after the Teacher copy book.
-        Button { showsAddPage = true } label: { HeaderIcon(symbol: "doc.badge.plus") }
+        Button { chrome.addPageOpen = true } label: { HeaderIcon(symbol: "doc.badge.plus") }
             .accessibilityLabel("Add Page")
             .disabled(!canAddPages)
-            .popover(isPresented: $showsAddPage, arrowEdge: .top) {
+            .popover(isPresented: $chrome.addPageOpen, arrowEdge: .top) {
                 AddPagePopover(choice: $addPageChoice) { template in addPage(template) }
             }
         Menu {
