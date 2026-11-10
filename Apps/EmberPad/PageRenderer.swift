@@ -369,7 +369,7 @@ extension EditorScreen {
                 old.retire()
                 install(next, startPage: min(max(page, 0), next.pdf.pageCount - 1))
             } catch {
-                old.setPageInput(true)
+                if library.liveSession(for: documentID) != nil { old.setPageInput(true) }
             }
         }
     }

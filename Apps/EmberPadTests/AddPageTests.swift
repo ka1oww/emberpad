@@ -153,6 +153,24 @@ final class AddPageTests: XCTestCase {
         try await library.close(record.id)
     }
 
+    func testFailedReloadAfterEditLeavesNoLiveSession() async throws {
+        let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
+        let record = try await importWorksheet(store)
+        let library = await makeLibrary(store: store)
+        let first = try await library.open(record.id)
+        first.update(ink(100), page: 0)
+        try await first.flush()
+        let inkFile = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }.first { $0.lastPathComponent == "pdf-0.drawing" })
+        try Data("not a drawing".utf8).write(to: inkFile)
+        do {
+            _ = try await library.editPages(record.id, .insert(.a3Squared, at: 3))
+            XCTFail("The reload reads the corrupt ink")
+        } catch {}
+        XCTAssertTrue(first.isRetired)
+        XCTAssertNil(library.liveSession(for: record.id))
+    }
+
     func testPaperIsDrawnAtGoodNotesGridAndSizes() throws {
         let page = try XCTUnwrap(PaperTemplateRenderer.page(for: .a3Squared))
         XCTAssertEqual(page.bounds(for: .mediaBox).size, a3)
