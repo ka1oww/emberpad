@@ -601,7 +601,11 @@ final class ShapeToolTests: XCTestCase {
     static func render(_ drawing: PKDrawing, bounds: CGRect, scale: CGFloat) -> CGImage {
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
-        let ink = drawing.image(from: bounds, scale: scale)
+        // Render on white in light appearance, so dark appearance cannot invert black ink.
+        var ink = UIImage()
+        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+            ink = drawing.image(from: bounds, scale: scale)
+        }
         let image = UIGraphicsImageRenderer(size: bounds.size, format: format).image { context in
             UIColor.white.setFill()
             context.fill(CGRect(origin: .zero, size: bounds.size))
