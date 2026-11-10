@@ -113,7 +113,7 @@ private final class CaptureGuardHostingController: HeaderStatusBarHostingControl
         registerForTraitChanges([UITraitSceneCaptureState.self]) { (controller: CaptureGuardHostingController, _: UITraitCollection) in
             controller.updateCaptureNowAndAfterSettling()
         }
-        updateCapture()
+        updateCaptureNowAndAfterSettling()
     }
     override func viewDidAppear(_ animated: Bool) { super.viewDidAppear(animated); updateCapture() }
     /// Re-reads capture and attached screens. Mirroring flips the capture trait, and a screen or
@@ -125,13 +125,18 @@ private final class CaptureGuardHostingController: HeaderStatusBarHostingControl
     }
     private func updateCaptureNowAndAfterSettling() {
         updateCapture()
-        Task { @MainActor [weak self] in
+        settleTask?.cancel()
+        environment.presentation.screensSettled = false
+        settleTask = Task { @MainActor [weak self] in
             for delay in [300, 1000] {
                 try? await Task.sleep(for: .milliseconds(delay))
+                guard !Task.isCancelled else { return }
                 self?.updateCapture()
             }
+            self?.environment.presentation.screensSettled = true
         }
     }
+    private var settleTask: Task<Void, Never>?
     private var screenObservers: [NSObjectProtocol] = []
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)

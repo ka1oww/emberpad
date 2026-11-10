@@ -290,6 +290,9 @@ final class PresentationState: ObservableObject {
     @Published var captureActive = false
     /// The iPad has a second screen attached (AirPlay or HDMI mirroring, or an extended display).
     @Published var otherDisplayAttached = false
+    /// False from the moment capture starts until the screen list has settled, so a mirrored screen that is not
+    /// listed yet still hides the Teacher copy.
+    @Published var screensSettled = true
     @Published var externalSceneCount = 0
     /// True while the worksheet's slate-blue header fills the top of the screen, so the
     /// main scene draws the status bar in white over it (EP54).
@@ -321,7 +324,7 @@ final class PresentationState: ObservableObject {
 
     var policy: PresentationPolicy {
         PresentationPolicy(otherDisplayAttached: otherDisplayAttached, externalSceneCount: externalSceneCount,
-                           mainSceneActive: mainSceneActive)
+                           mainSceneActive: mainSceneActive, captureUnsettled: captureActive && !screensSettled)
     }
 }
 

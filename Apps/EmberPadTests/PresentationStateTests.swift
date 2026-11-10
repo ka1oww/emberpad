@@ -43,6 +43,22 @@ final class PresentationStateTests: XCTestCase {
         XCTAssertFalse(state.policy.hidePrivateContent)
     }
 
+    func testTeacherCopyStaysHiddenUntilScreensSettleAfterCaptureStarts() throws {
+        let state = PresentationState()
+        state.mainSceneActive = true
+        state.captureActive = true
+        state.screensSettled = false
+        XCTAssertTrue(state.policy.hidePrivateContent)
+
+        state.screensSettled = true
+        XCTAssertFalse(state.policy.hidePrivateContent)
+
+        state.screensSettled = false
+        state.otherDisplayAttached = true
+        state.screensSettled = true
+        XCTAssertTrue(state.policy.hidePrivateContent)
+    }
+
     func testScreenRecordingAloneKeepsPrivateContentShown() {
         // EP54: the iPad's own Screen Recording captures the screen but attaches no other screen.
         let state = PresentationState()

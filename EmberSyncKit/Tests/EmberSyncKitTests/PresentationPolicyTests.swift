@@ -14,6 +14,11 @@ struct PresentationPolicyTests {
         #expect(!PresentationPolicy(otherDisplayAttached: false, externalSceneCount: 0, mainSceneActive: true).hidePrivateContent)
     }
 
+    @Test func captureStartedButScreensNotSettledMasksPrivatePane() {
+        #expect(PresentationPolicy(otherDisplayAttached: false, externalSceneCount: 0, mainSceneActive: true, captureUnsettled: true).hidePrivateContent)
+        #expect(!PresentationPolicy(otherDisplayAttached: false, externalSceneCount: 1, mainSceneActive: true, captureUnsettled: true).hidePrivateContent)
+    }
+
     @Test func inactiveAlwaysMasksPrivateContentAndPausesStudents() {
         let policy = PresentationPolicy(otherDisplayAttached: false, externalSceneCount: 1, mainSceneActive: false)
         #expect(policy.hidePrivateContent)

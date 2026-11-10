@@ -6,10 +6,12 @@ public struct PresentationPolicy: Equatable, Sendable {
 
     /// `otherDisplayAttached` is true while the iPad has a second screen (AirPlay or HDMI mirroring, or an
     /// extended display). With no student view on it, that screen can show the whole iPad screen to the class,
-    /// so private content is hidden. Screen Recording alone attaches no screen and hides nothing (EP54): the
-    /// teacher records their own lesson, and only what the class sees must stay free of answers.
-    public init(otherDisplayAttached: Bool, externalSceneCount: Int, mainSceneActive: Bool) {
-        hidePrivateContent = !mainSceneActive || (otherDisplayAttached && externalSceneCount == 0)
+    /// so private content is hidden. `captureUnsettled` is true from the moment the screen is captured until the
+    /// screen list has settled, when a mirrored screen may not be listed yet, so it hides too. Once settled,
+    /// Screen Recording alone attaches no screen and hides nothing (EP54): the teacher records their own lesson,
+    /// and only what the class sees must stay free of answers.
+    public init(otherDisplayAttached: Bool, externalSceneCount: Int, mainSceneActive: Bool, captureUnsettled: Bool = false) {
+        hidePrivateContent = !mainSceneActive || ((otherDisplayAttached || captureUnsettled) && externalSceneCount == 0)
         pauseStudentView = !mainSceneActive
     }
 
