@@ -177,6 +177,17 @@ struct LibraryStoreTests {
         #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("loose.pdf").path))
     }
 
+    @Test func aMissingInboxScansAsEmptyAndIsNeverCreated() throws {
+        let parent = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let inbox = parent.appendingPathComponent("Inbox", isDirectory: true)
+        #expect(try InboxScanner.items(in: inbox).isEmpty)
+        #expect(try InboxScanner.libraryDelivery(in: inbox) == nil)
+        #expect(!FileManager.default.fileExists(atPath: inbox.path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: parent.path).isEmpty)
+    }
+
     @Test func collidingSourceIdentitiesSurviveReimportAndNaturalSuffixes() async throws {
         let input = temporaryRoot()
         let libraryRoot = temporaryRoot()

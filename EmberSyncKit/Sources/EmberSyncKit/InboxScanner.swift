@@ -12,9 +12,11 @@ public struct InboxItem: Sendable {
 public enum InboxScanner {
     /// Read-only scan of loose PDFs. Callers remove a delivery only after durable, validated import succeeds.
     /// The reserved `EmberLibrary` folder holds the library delivery (see `libraryDelivery(in:)`) and is skipped.
+    /// A missing `root` scans as empty and is never created: on a real iPad `Documents/Inbox` is reserved by iOS,
+    /// which places files there itself and refuses to let the app create the folder (the Simulator does not).
     public static func items(in root: URL) throws -> [InboxItem] {
         let files = FileManager.default
-        try files.createDirectory(at: root, withIntermediateDirectories: true)
+        guard (try? files.attributesOfItem(atPath: root.path)) != nil else { return [] }
         try LibraryStore.requireDirectory(root)
         var result: [InboxItem] = []
         func visit(_ directory: URL, components: [String]) throws {
