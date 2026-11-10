@@ -247,13 +247,15 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     /// After PencilKit commits a new fountain-pen stroke, swaps it for the
-    /// same stroke with the pen's tip sharpness (`PenFeel`), as one undo step
-    /// named "Ink", the same way the straight highlighter swaps its line. The
-    /// live ink was PencilKit's own; only the stroke ends change, after lift.
+    /// same stroke drawn with the GoodNotes-style pen feel (`PenFeel`: width,
+    /// nib and tip sharpness), as one undo step named "Ink", the same way the
+    /// straight highlighter swaps its line. The live ink was PencilKit's own;
+    /// the stroke takes its final shape after lift.
     private func applyPenFeel(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
         guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
               stroke.ink.inkType == .fountainPen,
-              let reshaped = PenFeel.reshaped(stroke, settings: tools.settings.penFeel) else { return }
+              let reshaped = PenFeel.reshaped(stroke, settings: tools.settings.penFeel,
+                                              toolWidth: tools.settings.penWidth) else { return }
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         // Undo and redo bring strokes back exactly as they were, never tapered twice.
         guard undoManager?.isUndoing != true, undoManager?.isRedoing != true else { return }
@@ -680,7 +682,11 @@ extension PDFOverlayPageController {
             return true
         }
         guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
-              snapsStraight(stroke, held: held, lineLike: lineLike), let straight = StrokeSnap.straightened(stroke) else { return false }
+              snapsStraight(stroke, held: held, lineLike: lineLike), var straight = StrokeSnap.straightened(stroke) else { return false }
+        if straight.ink.inkType == .fountainPen {
+            // A held pen line takes the same pen feel as the handwriting around it, in the same one swap.
+            straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth) ?? straight
+        }
         let count = canvas.drawing.strokes.count
         let undoManager = canvas.undoManager
         DispatchQueue.main.async { [weak self] in

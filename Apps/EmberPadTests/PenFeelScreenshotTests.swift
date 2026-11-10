@@ -3,8 +3,9 @@ import XCTest
 import PencilKit
 @testable import EmberPad
 
-/// Proof captures for fountain pen tip sharpness: synthetic writing committed
-/// through the real worksheet controller at 0%, 50% (the default) and 100%,
+/// Proof captures for the fountain pen's feel: synthetic writing committed
+/// through the real worksheet controller at Tip sharpness 0%, 50% and 100%
+/// (the default),
 /// and the pen settings popover. PNGs go to the test host's temporary
 /// directory and are attached to the result. With `PENFEEL_SHOT_DIR` set
 /// (`TEST_RUNNER_PENFEEL_SHOT_DIR` for xcodebuild), each state writes a
@@ -42,20 +43,24 @@ final class PenFeelScreenshotTests: XCTestCase {
         }
         await pause(0.5)
         XCTAssertEqual(session.drawing(on: 0).strokes.count, strokes.count)
-        // The 0% row is as written; the dots and short ticks keep round ends in every row.
+        // Every row takes the pen's width; the 0% row keeps blunt ends and sharper rows have thinner tips.
         let perRow = Self.writing(top: 0).count
-        XCTAssertEqual(strokes[0].path.first?.size, Self.writing(top: 150)[0].path.first?.size)
+        XCTAssertNotEqual(strokes[0].path.first?.size, Self.writing(top: 150)[0].path.first?.size)
         XCTAssertLessThan(try XCTUnwrap(strokes[perRow].path.first).size.width,
                           try XCTUnwrap(strokes[0].path.first).size.width)
-        let labels = ["Tip sharpness 0%", "50% (default)", "100%"]
+        XCTAssertLessThan(try XCTUnwrap(strokes[2 * perRow].path.first).size.width,
+                          try XCTUnwrap(strokes[perRow].path.first).size.width)
+        let labels = ["Tip sharpness 0%", "50%", "100% (default)"]
         for (row, text) in labels.enumerated() {
             let label = UILabel()
             label.text = text
             label.font = .preferredFont(forTextStyle: .headline)
             label.textColor = .systemOrange
             label.sizeToFit()
+            // The canvas zooms with the page (EP-49), so a page point sits at zoomScale times it.
             let pagePoint = CGPoint(x: 40, y: 110 + CGFloat(row) * 190)
-            label.frame.origin = canvas.convert(pagePoint, to: window)
+            let canvasPoint = CGPoint(x: pagePoint.x * canvas.zoomScale, y: pagePoint.y * canvas.zoomScale)
+            label.frame.origin = canvas.convert(canvasPoint, to: window)
             window.addSubview(label)
         }
         await pause(0.3)
