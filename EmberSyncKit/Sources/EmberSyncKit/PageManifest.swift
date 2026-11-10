@@ -3,7 +3,8 @@ import CoreGraphics
 
 // EP61: a worksheet's pages. `original.pdf` never changes, so pages the teacher adds (squared, blank, dotted or
 // ruled paper) live only in `pages.json` beside it, and ink is stored per page id in `ink/<id>.drawing`, so adding
-// or removing a page never moves another page's ink.
+// or removing a page never moves another page's ink. EP62 adds a page's order, rotation, bookmark and paper change
+// to the same file.
 
 /// A paper template for a page added to a worksheet, like GoodNotes' Paper templates.
 public struct PaperTemplate: Codable, Hashable, Sendable {
@@ -44,13 +45,21 @@ public struct PageEntry: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     /// The zero-based page of `original.pdf` this page shows, or nil for a template page.
     public let pdfPage: Int?
-    /// The paper this added page is drawn on, or nil for a PDF page.
-    public let template: PaperTemplate?
+    /// The paper this added page is drawn on, or nil for a PDF page. Change Template swaps it (EP62).
+    public var template: PaperTemplate?
     /// The page has saved ink.
     public var hasInk: Bool
+    /// EP62: quarter turns clockwise the teacher added (0, 90, 180 or 270 degrees), on top of any rotation the PDF
+    /// page has of its own. The page's ink is stored unrotated, so it always fits the page as the PDF draws it, and
+    /// is turned with the page wherever it is shown.
+    public var rotation: Int
+    /// EP62: the page is bookmarked (GoodNotes' favourite).
+    public var isBookmarked: Bool
 
-    public init(id: String, pdfPage: Int?, template: PaperTemplate?, hasInk: Bool) {
+    public init(id: String, pdfPage: Int?, template: PaperTemplate?, hasInk: Bool, rotation: Int = 0,
+                isBookmarked: Bool = false) {
         self.id = id; self.pdfPage = pdfPage; self.template = template; self.hasInk = hasInk
+        self.rotation = rotation; self.isBookmarked = isBookmarked
     }
 
     public static func originalID(pdfPage: Int) -> String { "pdf-\(pdfPage)" }
@@ -66,11 +75,45 @@ public struct PageEntry: Codable, Equatable, Sendable, Identifiable {
     /// One of the PDF's own pages, which can never be removed. Added pages (templates and duplicates) can.
     public var isOriginal: Bool { pdfPage.map { id == Self.originalID(pdfPage: $0) } ?? false }
 
+    /// The page's added rotation in quarter turns clockwise, 0 to 3.
+    public var quarterTurns: Int { ((rotation / 90) % 4 + 4) % 4 }
+
+    /// The rotation after turning `quarterTurns` more quarter turns clockwise (negative turns counterclockwise).
+    public static func rotation(_ rotation: Int, turnedBy quarterTurns: Int) -> Int {
+        (((rotation / 90 + quarterTurns) % 4 + 4) % 4) * 90
+    }
+
     /// Ids are file names, so only plain characters are accepted.
     static func isSafeID(_ id: String) -> Bool {
         !id.isEmpty && id.count <= 64 && id.unicodeScalars.allSatisfy {
             CharacterSet.alphanumerics.contains($0) && $0.isASCII || $0 == "-"
         }
+    }
+
+    static let rotations: Set<Int> = [0, 90, 180, 270]
+
+    // `rotation` and `bookmarked` are written only when set, so a page nobody turned or bookmarked encodes exactly as
+    // before EP62, and a `pages.json` written before them reads as unturned and unbookmarked.
+    private enum CodingKeys: String, CodingKey { case id, pdfPage, template, hasInk, rotation, bookmarked }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        pdfPage = try c.decodeIfPresent(Int.self, forKey: .pdfPage)
+        template = try c.decodeIfPresent(PaperTemplate.self, forKey: .template)
+        hasInk = try c.decode(Bool.self, forKey: .hasInk)
+        rotation = try c.decodeIfPresent(Int.self, forKey: .rotation) ?? 0
+        isBookmarked = try c.decodeIfPresent(Bool.self, forKey: .bookmarked) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(pdfPage, forKey: .pdfPage)
+        try c.encodeIfPresent(template, forKey: .template)
+        try c.encode(hasInk, forKey: .hasInk)
+        if rotation != 0 { try c.encode(rotation, forKey: .rotation) }
+        if isBookmarked { try c.encode(true, forKey: .bookmarked) }
     }
 }
 
@@ -94,17 +137,28 @@ public struct PageManifest: Codable, Equatable, Sendable {
     public var ids: [String] { pages.map(\.id) }
     public func index(of id: String) -> Int? { pages.firstIndex { $0.id == id } }
     public var hasAddedPages: Bool { pages.contains { !$0.isOriginal } }
-    /// Ink anywhere, or a page the teacher added: either is work a re-delivered PDF must never replace.
-    public var hasTeacherContent: Bool { pages.contains { $0.hasInk } || hasAddedPages }
+    /// EP62: the PDF's own pages are no longer in PDF order, because a page was moved.
+    public var isReordered: Bool {
+        let order = pages.filter(\.isOriginal).compactMap(\.pdfPage)
+        return order != order.sorted()
+    }
+    /// EP62: a page was turned.
+    public var hasRotatedPages: Bool { pages.contains { $0.rotation != 0 } }
+    /// The worksheet is laid out differently from its PDF: pages added, moved or turned.
+    public var hasCustomLayout: Bool { hasAddedPages || isReordered || hasRotatedPages }
+    /// Ink anywhere, or pages the teacher added, moved or turned: work a re-delivered PDF must never replace.
+    /// Bookmarks alone are not: they only help find a page.
+    public var hasTeacherContent: Bool { pages.contains { $0.hasInk } || hasCustomLayout }
 
-    /// Every page of the PDF appears exactly once as an original, in PDF order; every id is unique and safe; and
-    /// every entry is either a PDF page or a template page.
+    /// Every page of the PDF appears exactly once as an original (in any order, since EP62 pages can be moved);
+    /// every id is unique and safe; every entry is either a PDF page or a template page; and every rotation is a
+    /// quarter turn.
     public func isValid(pdfPageCount: Int) -> Bool {
         guard format == Self.currentFormat, Set(ids).count == pages.count,
               pages.allSatisfy({ PageEntry.isSafeID($0.id) && (($0.pdfPage == nil) != ($0.template == nil)) }),
+              pages.allSatisfy({ PageEntry.rotations.contains($0.rotation) }),
               pages.allSatisfy({ $0.pdfPage.map { (0..<pdfPageCount).contains($0) } ?? true }) else { return false }
-        // The PDF's own pages keep their order: pages are only ever added between them.
-        return pages.filter(\.isOriginal).compactMap(\.pdfPage) == Array(0..<pdfPageCount)
+        return pages.filter(\.isOriginal).compactMap(\.pdfPage).sorted() == Array(0..<pdfPageCount)
     }
 }
 

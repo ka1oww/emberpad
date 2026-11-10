@@ -6,15 +6,19 @@ import EmberSyncKit
 /// Model lifetime is the library's lifetime, independent of page overlay creation and eviction.
 ///
 /// EP61: a session's pages are fixed. `pdf` holds them in manifest order (added paper pages inserted in memory only),
-/// and ink is saved by page id, so a save that lands after the pages change still reaches the right page. Adding or
-/// removing a page retires this session and opens a new one on the new manifest.
+/// and ink is saved by page id, so a save that lands after the pages change still reaches the right page. Adding,
+/// removing, moving or turning a page, or changing its paper, retires this session and opens a new one on the new
+/// manifest; only a bookmark changes in place (EP62).
+///
+/// EP62: `drawings` are as shown, on the turned page. A turned page's ink is turned back before it is saved, so the
+/// library always holds it unturned (see `PageInkRotation`).
 @MainActor
 final class DocumentSession: ObservableObject {
     let record: DocumentRecord
     let pdf: PDFDocument
     let originalURL: URL
-    /// The worksheet's pages, in the order `pdf` holds them.
-    let pages: PageManifest
+    /// The worksheet's pages, in the order `pdf` holds them. Only bookmarks change during a session.
+    @Published private(set) var pages: PageManifest
     /// Distinguishes this open from a later reopen of the same document, so cached student-view ink is never reused.
     let instanceID = UUID()
     private let store: LibraryStore
@@ -41,6 +45,17 @@ final class DocumentSession: ObservableObject {
 
     /// The page at `index` in reading order, if any.
     func page(at index: Int) -> PageEntry? { pages.pages.indices.contains(index) ? pages.pages[index] : nil }
+
+    /// Takes the bookmarks of `stored`, the manifest the library just wrote, page by page id. Anything else that
+    /// differs would need a new session, so it is ignored.
+    func takeBookmarks(from stored: PageManifest) {
+        let marked = Dictionary(stored.pages.map { ($0.id, $0.isBookmarked) }, uniquingKeysWith: { first, _ in first })
+        for index in pages.pages.indices {
+            if let isBookmarked = marked[pages.pages[index].id], pages.pages[index].isBookmarked != isBookmarked {
+                pages.pages[index].isBookmarked = isBookmarked
+            }
+        }
+    }
 
     /// Stops taking ink. Called after a final flush, when a page edit opens a new session on the new pages.
     func retire() {
@@ -82,9 +97,10 @@ final class DocumentSession: ObservableObject {
                 (page: page, drawing: drawing(on: page), revision: pageRevisions[page])
             }
             for value in pages {
-                guard let pageID = self.page(at: value.page)?.id else { continue }
-                try await store.saveDrawing(value.drawing.dataRepresentation(), documentID: record.id,
-                                            pageID: pageID, hasInk: !value.drawing.strokes.isEmpty)
+                guard let entry = self.page(at: value.page) else { continue }
+                let stored = PageInkRotation.stored(value.drawing, entry: entry, page: pdf.page(at: value.page))
+                try await store.saveDrawing(stored.dataRepresentation(), documentID: record.id,
+                                            pageID: entry.id, hasInk: !value.drawing.strokes.isEmpty)
                 if pageRevisions[value.page] == value.revision { dirty.remove(value.page) }
             }
             saveError = nil

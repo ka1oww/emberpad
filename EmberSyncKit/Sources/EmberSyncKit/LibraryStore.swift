@@ -224,7 +224,8 @@ public actor LibraryStore {
         var manifest = try pageManifest(for: record)
         guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
         let source = manifest.pages[index]
-        let copy = PageEntry(id: UUID().uuidString, pdfPage: source.pdfPage, template: source.template, hasInk: source.hasInk)
+        let copy = PageEntry(id: UUID().uuidString, pdfPage: source.pdfPage, template: source.template, hasInk: source.hasInk,
+                             rotation: source.rotation)
         record.hasInk = true
         try write(record)
         // The ink is in place before the manifest names the copy, so the copy never shows up without it.
@@ -251,6 +252,78 @@ public actor LibraryStore {
         record.hasInk = manifest.hasTeacherContent
         try write(record)
         return manifest
+    }
+
+    /// EP62: bookmarks page `pageID`, or removes its bookmark. Returns the new manifest.
+    @discardableResult
+    public func setBookmark(_ isBookmarked: Bool, pageID: String, documentID: UUID) throws -> PageManifest {
+        let record = try read(documentID)
+        guard record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        var manifest = try pageManifest(for: record)
+        guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
+        guard manifest.pages[index].isBookmarked != isBookmarked else { return manifest }
+        manifest.pages[index].isBookmarked = isBookmarked
+        // A bookmark only helps find a page, so it leaves the worksheet's protection as it is.
+        try writePageManifest(manifest, documentID)
+        return manifest
+    }
+
+    /// EP62: turns page `pageID` by `quarterTurns` clockwise (negative turns go counterclockwise). Only `pages.json`
+    /// changes: the page's ink stays stored unrotated and turns with the page wherever it is shown, so the rotation
+    /// is one atomic write. Returns the new manifest.
+    @discardableResult
+    public func rotatePage(_ pageID: String, quarterTurns: Int, documentID: UUID) throws -> PageManifest {
+        var record = try read(documentID)
+        guard record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        var manifest = try pageManifest(for: record)
+        guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
+        manifest.pages[index].rotation = PageEntry.rotation(manifest.pages[index].rotation, turnedBy: quarterTurns)
+        try commit(manifest, record: &record)
+        return manifest
+    }
+
+    /// EP62: moves page `pageID` to zero-based `index` in reading order, ink and all. Returns the new manifest.
+    @discardableResult
+    public func movePage(_ pageID: String, to index: Int, documentID: UUID) throws -> PageManifest {
+        var record = try read(documentID)
+        guard record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        var manifest = try pageManifest(for: record)
+        guard let from = manifest.index(of: pageID), manifest.pages.indices.contains(index) else {
+            throw LibraryError.pageOutOfRange
+        }
+        manifest.pages.insert(manifest.pages.remove(at: from), at: index)
+        try commit(manifest, record: &record)
+        return manifest
+    }
+
+    /// EP62: draws added paper page `pageID` on `template` instead, keeping its ink. The PDF's own pages, and
+    /// copies of them, keep their page. Returns the new manifest.
+    @discardableResult
+    public func changeTemplate(_ pageID: String, to template: PaperTemplate, documentID: UUID) throws -> PageManifest {
+        var record = try read(documentID)
+        guard record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        var manifest = try pageManifest(for: record)
+        guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
+        guard manifest.pages[index].template != nil else { throw LibraryError.pageKeepsItsPaper }
+        manifest.pages[index].template = template
+        try commit(manifest, record: &record)
+        return manifest
+    }
+
+    /// Writes `manifest` with `record.hasInk` kept in step: it is set before a write that makes the layout the
+    /// teacher's work, so a crash in between overprotects the worksheet rather than letting an update replace it,
+    /// and cleared only after a write that leaves nothing to protect.
+    private func commit(_ manifest: PageManifest, record: inout DocumentRecord) throws {
+        let protected = manifest.hasTeacherContent
+        if protected && !record.hasInk {
+            record.hasInk = true
+            try write(record)
+        }
+        try writePageManifest(manifest, record.id)
+        if !protected && record.hasInk {
+            record.hasInk = false
+            try write(record)
+        }
     }
 
     /// The journal of a migration in progress: the moves it makes and the manifest it commits.

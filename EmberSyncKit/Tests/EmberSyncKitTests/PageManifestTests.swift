@@ -221,7 +221,11 @@ struct PageManifestTests {
         #expect(!PageManifest(pages: [.pdf(0), PageEntry(id: "both", pdfPage: 0, template: .a3Squared, hasInk: false)])
             .isValid(pdfPageCount: 1))
         #expect(PageManifest(pages: [.template(.a3Squared), .pdf(0)]).isValid(pdfPageCount: 1))
-        #expect(!PageManifest(pages: [.pdf(1), .pdf(0)]).isValid(pdfPageCount: 2))
+        // EP62: the PDF's pages may be moved, but each still appears exactly once, turned only in quarter turns.
+        #expect(PageManifest(pages: [.pdf(1), .pdf(0)]).isValid(pdfPageCount: 2))
+        #expect(!PageManifest(pages: [.pdf(1), .pdf(1)]).isValid(pdfPageCount: 2))
+        #expect(!PageManifest(pages: [PageEntry(id: "pdf-0", pdfPage: 0, template: nil, hasInk: false, rotation: 45)])
+            .isValid(pdfPageCount: 1))
     }
 
     @Test func insertPositionsAndPaperSizes() {

@@ -1,5 +1,6 @@
 import UIKit
 import PDFKit
+import PencilKit
 import EmberSyncKit
 
 // EP61: pages added to a worksheet. Paper pages are drawn as one-page PDFs here and inserted into the open
@@ -92,16 +93,25 @@ enum PaperTemplateRenderer {
 
 /// Builds the worksheet a teacher sees from `original.pdf` and its page manifest.
 enum WorksheetPages {
-    /// Inserts every added page into `pdf`, which holds exactly the PDF's own pages, so the document reads in
-    /// manifest order. Only the in-memory document changes. Throws when the PDF and the manifest disagree.
+    /// Lays `pdf`, which holds exactly the PDF's own pages, out in manifest order: added pages inserted, moved pages
+    /// in their place (EP62) and turned pages turned. Only the in-memory document changes. Throws when the PDF and the
+    /// manifest disagree.
     static func apply(_ manifest: PageManifest, to pdf: PDFDocument) throws {
         let originals = manifest.pages.filter(\.isOriginal).count
         guard pdf.pageCount == originals, manifest.isValid(pdfPageCount: originals) else { throw LibraryError.invalidDocument }
         // Taken before anything is inserted, so a duplicate finds the page it copies wherever that page ends up.
         let originalPages = (0..<originals).compactMap { pdf.page(at: $0) }
-        for (index, entry) in manifest.pages.enumerated() where !entry.isOriginal {
+        guard originalPages.count == originals else { throw LibraryError.invalidDocument }
+        let reordered = manifest.isReordered
+        if reordered {
+            // A moved PDF page: lay every page out afresh. The PDF's own page objects are put back, not copied.
+            for index in stride(from: pdf.pageCount - 1, through: 0, by: -1) { pdf.removePage(at: index) }
+        }
+        for (index, entry) in manifest.pages.enumerated() where reordered || !entry.isOriginal {
             let page: PDFPage?
-            if let template = entry.template {
+            if entry.isOriginal, let source = entry.pdfPage {
+                page = originalPages[source]
+            } else if let template = entry.template {
                 page = PaperTemplateRenderer.page(for: template)
             } else if let source = entry.pdfPage, originalPages.indices.contains(source) {
                 // A duplicate of one of the PDF's own pages.
@@ -112,6 +122,12 @@ enum WorksheetPages {
             guard let page else { throw LibraryError.invalidDocument }
             pdf.insert(page, at: index)
         }
+        guard pdf.pageCount == manifest.count else { throw LibraryError.invalidDocument }
+        // EP62: the teacher's quarter turns, on top of any rotation the PDF page has of its own.
+        for (index, entry) in manifest.pages.enumerated() where entry.rotation != 0 {
+            guard let page = pdf.page(at: index) else { throw LibraryError.invalidDocument }
+            page.rotation = (page.rotation + entry.rotation) % 360
+        }
     }
 
     /// Opens `url` and applies `manifest`, for export and backup, which never share the editor's document.
@@ -119,5 +135,56 @@ enum WorksheetPages {
         guard let pdf = PDFDocument(url: url), !pdf.isLocked else { throw FlattenedExportError.unreadablePDF }
         try apply(manifest, to: pdf)
         return pdf
+    }
+}
+
+/// EP62: a turned page's ink. Ink is stored as drawn on the unturned page (the page as its PDF or paper draws it), so
+/// a rotation is one write of `pages.json` and stored ink always fits its page. On screen, in the student view and in
+/// exports it is turned with the page into the page's displayed space, origin top left.
+enum PageInkRotation {
+    /// Maps the unturned page's ink space, `unturned` points in size, onto the page turned `quarterTurns` clockwise.
+    /// Every coefficient is 0 or ±1, so a turn and its reverse cancel exactly.
+    static func transform(quarterTurns: Int, unturned: CGSize) -> CGAffineTransform {
+        var transform = CGAffineTransform.identity
+        var size = unturned
+        for _ in 0..<(((quarterTurns % 4) + 4) % 4) {
+            // A quarter turn clockwise in top-left coordinates: (x, y) goes to (height - y, x).
+            transform = transform.concatenating(CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: size.height, ty: 0))
+            size = CGSize(width: size.height, height: size.width)
+        }
+        return transform
+    }
+
+    /// The unturned page's size, given its displayed size and the turns applied to it.
+    static func unturnedSize(displayed: CGSize, quarterTurns: Int) -> CGSize {
+        quarterTurns % 2 == 0 ? displayed : CGSize(width: displayed.height, height: displayed.width)
+    }
+
+    /// Stored ink to the ink on screen, for `entry` shown as `page` (already turned).
+    static func displayed(_ drawing: PKDrawing, entry: PageEntry?, page: PDFPage?) -> PKDrawing {
+        guard let entry, entry.quarterTurns != 0, let page, !drawing.strokes.isEmpty else { return drawing }
+        let unturned = unturnedSize(displayed: page.displayedSize, quarterTurns: entry.quarterTurns)
+        return drawing.transformed(using: transform(quarterTurns: entry.quarterTurns, unturned: unturned))
+    }
+
+    /// The ink on screen to the ink to store, the reverse of `displayed`.
+    static func stored(_ drawing: PKDrawing, entry: PageEntry?, page: PDFPage?) -> PKDrawing {
+        guard let entry, entry.quarterTurns != 0, let page, !drawing.strokes.isEmpty else { return drawing }
+        // Turning the displayed page the rest of the way round brings it back to unturned.
+        return drawing.transformed(using: transform(quarterTurns: 4 - entry.quarterTurns, unturned: page.displayedSize))
+    }
+
+    /// Stored ink, keyed by page index, as it shows on `pdf`'s turned pages. For export and backup, which read ink
+    /// from the library.
+    static func displayed(_ drawings: [Int: Data], manifest: PageManifest, pdf: PDFDocument) throws -> [Int: Data] {
+        guard manifest.hasRotatedPages else { return drawings }
+        var turned = drawings
+        for (index, data) in drawings {
+            guard let entry = manifest.pages.indices.contains(index) ? manifest.pages[index] : nil, entry.quarterTurns != 0 else { continue }
+            let drawing: PKDrawing
+            do { drawing = try PKDrawing(data: data) } catch { throw FlattenedExportError.corruptInk(page: index) }
+            turned[index] = displayed(drawing, entry: entry, page: pdf.page(at: index)).dataRepresentation()
+        }
+        return turned
     }
 }

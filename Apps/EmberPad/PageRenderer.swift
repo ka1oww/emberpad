@@ -160,6 +160,16 @@ final class PageChromeState: ObservableObject {
     @Published var addPageOpen = false
     /// Adds a page of this paper at the remembered position, as a tap on a recent paper does; the editor sets it.
     var addPage: ((PaperTemplate) -> Void)?
+    /// More › Go to Page's number field is up (EP62).
+    @Published var goToPageOpen = false
+    /// More › Change Template's paper picker is up for the page in view (EP62).
+    @Published var changeTemplateOpen = false
+    /// The page tools for the page in view, as their buttons call them; the editor sets them (EP62).
+    var toggleBookmark: (() -> Void)?
+    var rotatePage: ((_ clockwise: Bool) -> Void)?
+    var changeTemplate: ((PaperTemplate) -> Void)?
+    /// A thumbnail's menu or ribbon, as the Pages popover calls it.
+    var pageAction: ((PageNavigatorAction) -> Void)?
     private var pillTask: Task<Void, Never>?
     private let pillLifetime: Duration
 
@@ -249,6 +259,8 @@ struct EditorScreen: View {
     @State private var addPageChoice = AddPageChoice.load()
     /// True while a page edit saves and the worksheet reopens on its new pages.
     @State private var editingPages = false
+    /// What is typed into Go to Page (EP62).
+    @State private var goToPageText = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dismiss) private var dismiss
@@ -318,6 +330,17 @@ struct EditorScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         .flattenedExportSheet(flattenedExport)
         .onChange(of: addPageChoice) { _, choice in choice.save() }
+        .alert("Go to Page", isPresented: $chrome.goToPageOpen) {
+            let count = session?.pdf.pageCount ?? 0
+            TextField(PageNumberField.range(pageCount: count), text: $goToPageText)
+                .keyboardType(.numberPad)
+            Button("Go") {
+                if let index = PageNumberField.index(from: goToPageText, pageCount: count) { chrome.jumpToPage?(index) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Page \(PageNumberField.range(pageCount: session?.pdf.pageCount ?? 0))")
+        }
         .task {
             do {
                 let opened = try await library.open(documentID)
@@ -353,7 +376,33 @@ extension EditorScreen {
         made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
         chrome.jumpToPage = { [weak made] page in made?.goToPage(page) }
         chrome.addPage = { template in addPage(template) }
+        chrome.toggleBookmark = { toggleBookmark(chrome.currentPage) }
+        chrome.rotatePage = { clockwise in rotatePage(clockwise: clockwise) }
+        chrome.changeTemplate = { template in changeTemplate(template) }
+        chrome.pageAction = { action in pageAction(action) }
         renderer = made
+    }
+
+    /// The page in view's entry in the manifest.
+    private var currentEntry: PageEntry? { session?.page(at: chrome.currentPage) }
+
+    /// Bookmarks page `index`, or removes its bookmark. The worksheet stays as it is (EP62).
+    private func toggleBookmark(_ index: Int) {
+        guard canAddPages, let page = session?.page(at: index) else { return }
+        Task { await library.setBookmark(!page.isBookmarked, pageID: page.id, in: documentID) }
+    }
+
+    /// Turns the page in view a quarter turn, its ink with it (EP62).
+    private func rotatePage(clockwise: Bool) {
+        guard canAddPages, let page = currentEntry else { return }
+        editPages(.rotate(page.id, clockwise: clockwise), show: chrome.currentPage)
+    }
+
+    /// Draws the page in view, an added paper page, on `template` instead (EP62).
+    private func changeTemplate(_ template: PaperTemplate) {
+        chrome.changeTemplateOpen = false
+        guard canAddPages, let page = currentEntry, let current = page.template, current != template else { return }
+        editPages(.changeTemplate(page.id, template), show: chrome.currentPage)
     }
 
     /// Saves the page in view's ink, changes the pages, then reopens the worksheet on its new pages with `show` in
@@ -396,6 +445,11 @@ extension EditorScreen {
         case .delete(let index):
             guard let page = session.page(at: index), !page.isOriginal else { return }
             editPages(.remove(page.id), show: index)
+        case .toggleBookmark(let index):
+            toggleBookmark(index)
+        case .move(let index, let target):
+            guard let page = session.page(at: index), (0..<session.pdf.pageCount).contains(target), target != index else { return }
+            editPages(.move(page.id, to: target), show: target)
         }
     }
 
@@ -462,6 +516,13 @@ extension EditorScreen {
             HeaderIcon(symbol: "book", isOn: teacherCard.isOpen)
         }
         .accessibilityLabel(teacherCard.toggleAccessibilityLabel)
+        // EP62: GoodNotes' bookmark, just before Add Page.
+        if let session {
+            BookmarkHeaderButton(session: session, page: chrome.currentPage) { toggleBookmark(chrome.currentPage) }
+                .disabled(!canAddPages)
+        } else {
+            HeaderIcon(symbol: "bookmark").disabled(true).accessibilityLabel("Bookmark page")
+        }
         // EP61: GoodNotes' Add Page slot, after the Teacher copy book.
         Button { chrome.addPageOpen = true } label: { HeaderIcon(symbol: "doc.badge.plus") }
             .accessibilityLabel("Add Page")
@@ -479,6 +540,7 @@ extension EditorScreen {
         }
         .accessibilityLabel("Sharing: \(pillState.accessibilityText)")
         Menu {
+            pageRows
             WorksheetSharingRows(framing: $presentation.studentFraming)
             Button {} label: {
                 HStack { Text("Record lesson"); Spacer(); PhaseTag(text: "Phase 3") }
@@ -488,6 +550,40 @@ extension EditorScreen {
             HeaderIcon(symbol: "ellipsis")
         }
         .accessibilityLabel("More options")
+        .popover(isPresented: $chrome.changeTemplateOpen, arrowEdge: .top) {
+            if let template = currentEntry?.template {
+                NavigationStack {
+                    PaperTemplatePicker(initial: template, title: "Change Template") { changeTemplate($0) }
+                }
+                .frame(width: 380, height: 440)
+                .tint(Theme.accent)
+            }
+        }
+    }
+
+    /// GoodNotes' page section at the top of More (EP62): the page in view's Rotate Page, Change Template (added
+    /// paper only) and Go to Page.
+    @ViewBuilder
+    private var pageRows: some View {
+        Section("Page \(chrome.currentPage + 1)") {
+            Menu {
+                Button("Rotate Clockwise", systemImage: "rotate.right") { rotatePage(clockwise: true) }
+                Button("Rotate Counterclockwise", systemImage: "rotate.left") { rotatePage(clockwise: false) }
+            } label: {
+                Label("Rotate Page", systemImage: "rotate.right")
+            }
+            .disabled(!canAddPages)
+            Button("Change Template…", systemImage: "square.grid.3x3") {
+                // Let the menu finish closing before the popover presents.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { chrome.changeTemplateOpen = true }
+            }
+            .disabled(!canAddPages || currentEntry?.template == nil)
+            Button("Go to Page…", systemImage: "arrow.right.doc.on.clipboard") {
+                goToPageText = ""
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { chrome.goToPageOpen = true }
+            }
+            .disabled(session == nil || renderer == nil)
+        }
     }
 
     @ViewBuilder
@@ -508,6 +604,20 @@ extension EditorScreen {
             Text("Export This Page")
         }
         .disabled(session?.record.role != .student || flattenedExport.isExporting)
+    }
+}
+
+/// The header's bookmark for the page in view: an outline, filled once the page is bookmarked (EP62).
+private struct BookmarkHeaderButton: View {
+    @ObservedObject var session: DocumentSession
+    let page: Int
+    let toggle: () -> Void
+
+    var body: some View {
+        let isBookmarked = session.page(at: page)?.isBookmarked == true
+        Button(action: toggle) { HeaderIcon(symbol: isBookmarked ? "bookmark.fill" : "bookmark") }
+            .accessibilityLabel(isBookmarked ? "Remove bookmark" : "Bookmark page")
+            .accessibilityAddTraits(isBookmarked ? .isSelected : [])
     }
 }
 
