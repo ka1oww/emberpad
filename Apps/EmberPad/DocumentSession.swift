@@ -4,11 +4,17 @@ import PencilKit
 import EmberSyncKit
 
 /// Model lifetime is the library's lifetime, independent of page overlay creation and eviction.
+///
+/// EP61: a session's pages are fixed. `pdf` holds them in manifest order (added paper pages inserted in memory only),
+/// and ink is saved by page id, so a save that lands after the pages change still reaches the right page. Adding or
+/// removing a page retires this session and opens a new one on the new manifest.
 @MainActor
 final class DocumentSession: ObservableObject {
     let record: DocumentRecord
     let pdf: PDFDocument
     let originalURL: URL
+    /// The worksheet's pages, in the order `pdf` holds them.
+    let pages: PageManifest
     /// Distinguishes this open from a later reopen of the same document, so cached student-view ink is never reused.
     let instanceID = UUID()
     private let store: LibraryStore
@@ -23,9 +29,24 @@ final class DocumentSession: ObservableObject {
     var drawingDidChange: ((Int, PKDrawing) -> Void)?
     var hasUnsavedInk: Bool { !dirty.isEmpty }
 
-    init(record: DocumentRecord, pdf: PDFDocument, originalURL: URL, drawings: [Int: PKDrawing], store: LibraryStore) {
+    /// Set once a page edit replaced this session. A retired session takes no more ink.
+    private(set) var isRetired = false
+
+    init(record: DocumentRecord, pdf: PDFDocument, originalURL: URL, pages: PageManifest? = nil,
+         drawings: [Int: PKDrawing], store: LibraryStore) {
         self.record = record; self.pdf = pdf; self.originalURL = originalURL
+        self.pages = pages ?? .original(pageCount: pdf.pageCount)
         self.drawings = drawings; self.store = store
+    }
+
+    /// The page at `index` in reading order, if any.
+    func page(at index: Int) -> PageEntry? { pages.pages.indices.contains(index) ? pages.pages[index] : nil }
+
+    /// Stops taking ink. Called after a final flush, when a page edit opens a new session on the new pages.
+    func retire() {
+        isRetired = true
+        debounce?.cancel()
+        drawingDidChange = nil
     }
 
     func drawing(on page: Int) -> PKDrawing { drawings[page] ?? PKDrawing() }
@@ -33,6 +54,7 @@ final class DocumentSession: ObservableObject {
     func inkRevision(on page: Int) -> UInt64 { pageRevisions[page] ?? 0 }
 
     func update(_ drawing: PKDrawing, page: Int) {
+        guard !isRetired, self.page(at: page) != nil else { return }
         drawings[page] = drawing
         revision &+= 1
         pageRevisions[page] = revision
@@ -60,8 +82,9 @@ final class DocumentSession: ObservableObject {
                 (page: page, drawing: drawing(on: page), revision: pageRevisions[page])
             }
             for value in pages {
+                guard let pageID = self.page(at: value.page)?.id else { continue }
                 try await store.saveDrawing(value.drawing.dataRepresentation(), documentID: record.id,
-                                            page: value.page, hasInk: !value.drawing.strokes.isEmpty)
+                                            pageID: pageID, hasInk: !value.drawing.strokes.isEmpty)
                 if pageRevisions[value.page] == value.revision { dirty.remove(value.page) }
             }
             saveError = nil

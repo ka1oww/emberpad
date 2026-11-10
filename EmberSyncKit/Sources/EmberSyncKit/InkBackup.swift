@@ -71,11 +71,11 @@ public struct InkBackupHeader: Codable, Equatable, Sendable {
 // MARK: - The ink package
 
 /// The `.emberink` file: one Student copy's ink, every inked page's `PKDrawing.dataRepresentation()` exactly as
-/// the library stores it in `page-<n>.drawing`. JSON with sorted keys and no clock values, so unchanged ink always
+/// the library stores it in `ink/<page id>.drawing`. JSON with sorted keys and no clock values, so unchanged ink always
 /// encodes to the same bytes and the same SHA-256, which is how a sync knows nothing changed.
 public struct InkPackage: Codable, Equatable, Sendable {
     public struct Page: Codable, Equatable, Sendable {
-        /// Zero-based page index, the `n` of `page-<n>.drawing`.
+        /// Zero-based page index in reading order, added pages included.
         public let page: Int
         public let drawing: Data
     }
@@ -90,16 +90,24 @@ public struct InkPackage: Codable, Equatable, Sendable {
     /// The SHA-256 of the PDF version this ink was drawn on: restore the ink onto that version only.
     public let pdfSHA256: ContentHash
     public let pages: [Page]
+    /// EP61: the worksheet's pages in order, present only when pages were added to it, so a restore knows which
+    /// index is which PDF page or paper. A worksheet with only its PDF's pages encodes exactly as before.
+    public let layout: [PageEntry]?
 
     public init(record: DocumentRecord, drawings: [Int: Data]) {
+        self.init(record: record, manifest: .original(pageCount: record.pageCount), drawings: drawings)
+    }
+
+    public init(record: DocumentRecord, manifest: PageManifest, drawings: [Int: Data]) {
         format = Self.currentFormat
         documentID = record.id
         title = record.title
         subject = record.subject
-        pageCount = record.pageCount
+        pageCount = manifest.count
         pdfSHA256 = record.source.sha256
-        pages = drawings.filter { (0..<record.pageCount).contains($0.key) }.sorted { $0.key < $1.key }
+        pages = drawings.filter { (0..<manifest.count).contains($0.key) }.sorted { $0.key < $1.key }
             .map { Page(page: $0.key, drawing: $0.value) }
+        layout = manifest.hasAddedPages ? manifest.pages : nil
     }
 
     public func encoded() throws -> Data {
@@ -114,8 +122,8 @@ public struct InkPackage: Codable, Equatable, Sendable {
         return package
     }
 
-    /// The library's file name for a page's drawing, for a restore.
-    public static func drawingFileName(page: Int) -> String { "page-\(page).drawing" }
+    /// The library's file name for the drawing of a page with id `pageID`, for a restore.
+    public static func drawingFileName(pageID: String) -> String { "ink/\(pageID).drawing" }
 }
 
 // MARK: - What the iPad remembers
@@ -188,8 +196,9 @@ public protocol InkBackupSource: Sendable {
 /// its flattened PDF, skipping whatever the ledger says the Mac already holds for the current ink. Ink is read from
 /// the library's saved drawings (the sync saves open pages first), never from the screen, and is only read.
 public actor InkBackupQueue: InkBackupSource {
-    /// Renders the flattened PDF from the record and its drawings. Throwing skips that copy this time.
-    public typealias Flatten = @Sendable (DocumentRecord, [Int: Data]) async throws -> Data
+    /// Renders the flattened PDF from the record, its pages and their drawings (keyed by page index in reading
+    /// order). Throwing skips that copy this time.
+    public typealias Flatten = @Sendable (DocumentRecord, PageManifest, [Int: Data]) async throws -> Data
 
     private let store: LibraryStore
     private let ledgerURL: URL
@@ -229,22 +238,25 @@ public actor InkBackupQueue: InkBackupSource {
 
     private func enqueue(_ record: DocumentRecord) async {
         var drawings: [Int: Data] = [:]
+        let manifest: PageManifest
         do {
-            for page in record.inkPages.sorted() {
-                if let data = try await store.drawing(documentID: record.id, page: page) { drawings[page] = data }
+            manifest = try await store.pageManifest(documentID: record.id)
+            for (index, page) in manifest.pages.enumerated() where page.hasInk {
+                if let data = try await store.drawing(documentID: record.id, pageID: page.id) { drawings[index] = data }
             }
         } catch {
             skipped += 1
             return
         }
-        guard !drawings.isEmpty, let package = try? InkPackage(record: record, drawings: drawings).encoded() else { return }
+        guard !drawings.isEmpty,
+              let package = try? InkPackage(record: record, manifest: manifest, drawings: drawings).encoded() else { return }
         let inkHash = ContentHash.digest(package)
         if !ledger.holds(record.id, .ink, inkHash: inkHash) {
             queued.append(InkBackupUpload(header: InkBackupHeader(kind: .ink, record: record), bytes: package, inkHash: inkHash))
         }
         if !ledger.holds(record.id, .flattened, inkHash: inkHash) {
             do {
-                let pdf = try await flatten(record, drawings)
+                let pdf = try await flatten(record, manifest, drawings)
                 queued.append(InkBackupUpload(header: InkBackupHeader(kind: .flattened, record: record), bytes: pdf, inkHash: inkHash))
             } catch {
                 skipped += 1

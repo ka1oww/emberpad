@@ -57,6 +57,9 @@ final class PageThumbnailStore: ObservableObject {
         self.width = width; self.scale = scale
     }
 
+    /// Forgets every thumbnail, for when the worksheet's pages change (EP61).
+    func reset() { images = [:] }
+
     func image(for page: Int, in session: DocumentSession) -> UIImage? {
         guard let pdfPage = session.pdf.page(at: page) else { return nil }
         let key = Key(page: page, inkRevision: session.inkRevision(on: page))
@@ -69,13 +72,27 @@ final class PageThumbnailStore: ObservableObject {
     }
 }
 
+/// What a thumbnail's long-press menu, or the "+" tile, asks for (EP61). Pages are zero-based.
+enum PageNavigatorAction: Equatable {
+    case addBefore(Int)
+    case addAfter(Int)
+    case duplicate(Int)
+    case delete(Int)
+    /// The "+" tile: a page at the end.
+    case addLast
+}
+
 /// The page-thumbnail popover: every page of the worksheet with its ink, the current page
-/// outlined. Tapping a page jumps to it and closes the popover.
+/// outlined. Tapping a page jumps to it and closes the popover. On a Student copy, a "+" tile adds a page at the
+/// end, and a long press on a page adds a page before or after it, duplicates it, or deletes a page Ember added.
 struct PageNavigatorView: View {
     @ObservedObject var session: DocumentSession
     @ObservedObject var thumbnails: PageThumbnailStore
     let currentPage: Int
     let onSelect: (Int) -> Void
+    /// Nil where pages cannot be changed (a Teacher copy).
+    var onAction: ((PageNavigatorAction) -> Void)? = nil
+    @State private var pendingDelete: Int?
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: thumbnails.width, maximum: thumbnails.width + 16), spacing: 16)]
@@ -103,7 +120,11 @@ struct PageNavigatorView: View {
                                               width: thumbnails.width) {
                                 onSelect(index)
                             }
+                            .contextMenu { if let onAction { menu(for: index, onAction) } }
                             .id(index)
+                        }
+                        if let onAction {
+                            AddPageTile(width: thumbnails.width) { onAction(.addLast) }
                         }
                     }
                     .padding(16)
@@ -113,6 +134,50 @@ struct PageNavigatorView: View {
         }
         .frame(minWidth: 340, idealWidth: 360, minHeight: 300, idealHeight: 520)
         .background(Theme.bg)
+        .confirmationDialog(pendingDelete.map { "Delete Page \($0 + 1)?" } ?? "",
+                            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+                            titleVisibility: .visible) {
+            Button("Delete Page", role: .destructive) {
+                if let page = pendingDelete { onAction?(.delete(page)) }
+                pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("The page and its ink are deleted.")
+        }
+    }
+
+    @ViewBuilder
+    private func menu(for index: Int, _ onAction: @escaping (PageNavigatorAction) -> Void) -> some View {
+        Button("Add Page Before", systemImage: "arrow.up.doc") { onAction(.addBefore(index)) }
+        Button("Add Page After", systemImage: "arrow.down.doc") { onAction(.addAfter(index)) }
+        Button("Duplicate", systemImage: "plus.square.on.square") { onAction(.duplicate(index)) }
+        // Only pages added in Ember Slate can go; the worksheet's own pages always stay.
+        if session.page(at: index)?.isOriginal == false {
+            Divider()
+            Button("Delete Page", systemImage: "trash", role: .destructive) { pendingDelete = index }
+        }
+    }
+}
+
+/// The "+" tile after the last thumbnail.
+private struct AddPageTile: View {
+    let width: CGFloat
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(Theme.line, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    .aspectRatio(1 / 1.414, contentMode: .fit)
+                    .frame(width: width)
+                    .overlay(Image(systemName: "plus").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.accent))
+                Text(" ").font(.system(.footnote)).padding(.vertical, 2)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add page at the end")
     }
 }
 

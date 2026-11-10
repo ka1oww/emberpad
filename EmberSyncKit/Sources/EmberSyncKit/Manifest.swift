@@ -3,7 +3,7 @@ import CryptoKit
 
 public enum LibraryError: Error, LocalizedError, Sendable, Equatable {
     case invalidPath, invalidHash, invalidManifest, invalidDocument, documentMissing, pageOutOfRange, hashMismatch, documentInUse
-    case inkProtected, teacherCopyReadOnly
+    case inkProtected, teacherCopyReadOnly, pageNotRemovable
     public var errorDescription: String? {
         switch self {
         case .invalidPath: "The worksheet path is not a safe relative path."
@@ -16,6 +16,7 @@ public enum LibraryError: Error, LocalizedError, Sendable, Equatable {
         case .documentInUse: "Close the open worksheet before filing its updated PDF. The delivered copy is kept for the next Inbox check."
         case .inkProtected: "This worksheet has ink, so it is kept as it is and an update is filed beside it."
         case .teacherCopyReadOnly: "Teacher copies cannot be annotated in this version. This ink was not saved."
+        case .pageNotRemovable: "Only pages added in Ember Slate can be deleted. The worksheet's own pages stay."
         }
     }
 }

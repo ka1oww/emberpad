@@ -14,6 +14,12 @@ protocol WorksheetPageRenderer: AnyObject {
     func goToPage(_ index: Int)
     /// Sets the PencilKit tool on every page canvas, called through `ToolState.onToolChange`.
     func apply(_ tool: any PKTool)
+    /// Turns touch and Pencil input on the pages off while a page edit saves (EP61), and back on if it fails.
+    func setPageInput(_ enabled: Bool)
+    /// A page edit replaced this renderer: drop its undo history, which names pages by their old positions.
+    func retire()
+    /// The page to show first, before the view has appeared.
+    var startPage: Int? { get set }
 }
 
 /// This is the replacement point for report option B. Ink and persistence belong to DocumentSession.
@@ -150,6 +156,10 @@ final class PageChromeState: ObservableObject {
     @Published private(set) var pagesPopover: PagesPopoverSource?
     /// Scrolls the worksheet; the editor sets it once its renderer exists.
     var jumpToPage: ((Int) -> Void)?
+    /// The header's Add Page popover is open (EP61).
+    @Published var addPageOpen = false
+    /// Adds a page of this paper at the remembered position, as a tap on a recent paper does; the editor sets it.
+    var addPage: ((PaperTemplate) -> Void)?
     private var pillTask: Task<Void, Never>?
     private let pillLifetime: Duration
 
@@ -235,6 +245,10 @@ struct EditorScreen: View {
     /// Identifies this editor to `PresentationState`, which only lets the editor that set the answers clear them.
     @State private var answersOwner = UUID()
     @StateObject private var flattenedExport = FlattenedExportModel()
+    /// The remembered Add Page choice (EP61).
+    @State private var addPageChoice = AddPageChoice.load()
+    /// True while a page edit saves and the worksheet reopens on its new pages.
+    @State private var editingPages = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dismiss) private var dismiss
@@ -255,10 +269,13 @@ struct EditorScreen: View {
     }
 
     private func pageNavigator(_ session: DocumentSession) -> some View {
-        PageNavigatorView(session: session, thumbnails: pageThumbnails, currentPage: chrome.currentPage) { index in
-            chrome.selectPage(index)
-        }
+        PageNavigatorView(session: session, thumbnails: pageThumbnails, currentPage: chrome.currentPage,
+                          onSelect: { index in chrome.selectPage(index) },
+                          onAction: canAddPages ? { action in pageAction(action) } : nil)
     }
+
+    /// Only a Student copy takes added pages; a Teacher copy stays exactly as delivered.
+    private var canAddPages: Bool { session?.record.role == .student && pagesAvailable && !editingPages }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -267,7 +284,10 @@ struct EditorScreen: View {
             if let session { InkSaveBanner(session: session) }
             ZStack(alignment: .topLeading) {
                 if let renderer, let session {
-                    if presentation.policy.rendersOnMainScreen(session.record) { PageRendererHost(renderer: renderer) }
+                    if presentation.policy.rendersOnMainScreen(session.record) {
+                        // A page edit opens a new session and renderer; the id swaps the hosted controller with it.
+                        PageRendererHost(renderer: renderer).id(session.instanceID)
+                    }
                     else {
                         // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
                         PrivatePlaceholder(text: "Teacher copy · private. Hidden while another screen shows this iPad, or while inactive.")
@@ -288,7 +308,8 @@ struct EditorScreen: View {
                                                              mainSceneActive: presentation.mainSceneActive,
                                                              privateAnswerURL: presentation.privateAnswerURL),
                                            documentTitle: session.record.title,
-                                           card: teacherCard)
+                                           card: teacherCard,
+                                           hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil)
                 }
             }
             .overlay(alignment: .top) { ToolToastOverlay(toast: tools.toast) }
@@ -296,6 +317,7 @@ struct EditorScreen: View {
         // The worksheet header replaces the system nav bar (EP54, laid out like GoodNotes).
         .toolbar(.hidden, for: .navigationBar)
         .flattenedExportSheet(flattenedExport)
+        .onChange(of: addPageChoice) { _, choice in choice.save() }
         .task {
             do {
                 let opened = try await library.open(documentID)
@@ -306,11 +328,7 @@ struct EditorScreen: View {
                 presentation.showPrivateAnswers(answers, owner: answersOwner)
                 teacherCard.worksheetOpened(hasTeacherCopy: answers != nil)
                 LastWorksheet().opened(opened.record)
-                session = opened
-                let made = PageRendererFactory.make(session: opened, student: presentation.student, tools: tools)
-                made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
-                chrome.jumpToPage = { [weak made] page in made?.goToPage(page) }
-                renderer = made
+                install(opened, startPage: nil)
             } catch { errorMessage = error.localizedDescription }
         }
         .onDisappear {
@@ -327,6 +345,60 @@ struct EditorScreen: View {
 }
 
 extension EditorScreen {
+    private func install(_ opened: DocumentSession, startPage: Int?) {
+        session = opened
+        pageThumbnails.reset()
+        let made = PageRendererFactory.make(session: opened, student: presentation.student, tools: tools)
+        made.startPage = startPage
+        made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
+        chrome.jumpToPage = { [weak made] page in made?.goToPage(page) }
+        chrome.addPage = { template in addPage(template) }
+        renderer = made
+    }
+
+    /// Saves the page in view's ink, changes the pages, then reopens the worksheet on its new pages with `show` in
+    /// view. Ink input is off throughout, so no stroke lands on a page that is moving.
+    private func editPages(_ edit: LibraryController.PageEdit, show page: Int) {
+        guard let old = renderer, session != nil, !editingPages else { return }
+        editingPages = true
+        old.setPageInput(false)
+        Task {
+            defer { editingPages = false }
+            do {
+                let next = try await library.editPages(documentID, edit)
+                old.retire()
+                install(next, startPage: min(max(page, 0), next.pdf.pageCount - 1))
+            } catch {
+                if library.liveSession(for: documentID) != nil { old.setPageInput(true) }
+            }
+        }
+    }
+
+    /// Adds a page of `template` at the remembered position relative to the page in view.
+    private func addPage(_ template: PaperTemplate) {
+        guard let session else { return }
+        chrome.addPageOpen = false
+        addPageChoice.used(template)
+        let index = addPageChoice.position.index(current: chrome.currentPage, count: session.pdf.pageCount)
+        editPages(.insert(template, at: index), show: index)
+    }
+
+    private func pageAction(_ action: PageNavigatorAction) {
+        guard let session else { return }
+        let template = addPageChoice.current
+        switch action {
+        case .addBefore(let index): editPages(.insert(template, at: index), show: index)
+        case .addAfter(let index): editPages(.insert(template, at: index + 1), show: index + 1)
+        case .addLast: editPages(.insert(template, at: session.pdf.pageCount), show: session.pdf.pageCount)
+        case .duplicate(let index):
+            guard let page = session.page(at: index) else { return }
+            editPages(.duplicate(page.id), show: index + 1)
+        case .delete(let index):
+            guard let page = session.page(at: index), !page.isOriginal else { return }
+            editPages(.remove(page.id), show: index)
+        }
+    }
+
     /// The Ember title bar (EP54 layout, EP57 colours): back, library sidebar, pages and export on the
     /// left; the title with its menu in the centre; undo, redo, Teacher copy, the
     /// student view and More on the right.
@@ -390,6 +462,13 @@ extension EditorScreen {
             HeaderIcon(symbol: "book", isOn: teacherCard.isOpen)
         }
         .accessibilityLabel(teacherCard.toggleAccessibilityLabel)
+        // EP61: GoodNotes' Add Page slot, after the Teacher copy book.
+        Button { chrome.addPageOpen = true } label: { HeaderIcon(symbol: "doc.badge.plus") }
+            .accessibilityLabel("Add Page")
+            .disabled(!canAddPages)
+            .popover(isPresented: $chrome.addPageOpen, arrowEdge: .top) {
+                AddPagePopover(choice: $addPageChoice) { template in addPage(template) }
+            }
         Menu {
             WorksheetSharingRows(framing: $presentation.studentFraming)
         } label: {

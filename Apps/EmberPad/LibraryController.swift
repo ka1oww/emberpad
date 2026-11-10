@@ -232,14 +232,16 @@ final class LibraryController: ObservableObject {
         if let session = sessions[id], session.record.source.sha256 == record.source.sha256 { return session }
         let url = try await store.originalURL(documentID: id)
         guard let pdf = PDFDocument(url: url), !pdf.isLocked, pdf.pageCount == record.pageCount else { throw LibraryError.invalidDocument }
+        let pages = try await store.pageManifest(documentID: id)
+        try WorksheetPages.apply(pages, to: pdf)
         var drawings: [Int: PKDrawing] = [:]
-        for page in 0..<record.pageCount {
-            if let data = try await store.drawing(documentID: id, page: page) {
+        for (index, page) in pages.pages.enumerated() {
+            if let data = try await store.drawing(documentID: id, pageID: page.id) {
                 // Never substitute an empty drawing for corrupt saved ink.
-                drawings[page] = try PKDrawing(data: data)
+                drawings[index] = try PKDrawing(data: data)
             }
         }
-        let session = DocumentSession(record: record, pdf: pdf, originalURL: url, drawings: drawings, store: store)
+        let session = DocumentSession(record: record, pdf: pdf, originalURL: url, pages: pages, drawings: drawings, store: store)
         sessions[id] = session
         return session
     }
@@ -254,6 +256,41 @@ final class LibraryController: ObservableObject {
 
     /// The open editor session for `id`, if any. Export reads its in-memory ink.
     func liveSession(for id: UUID) -> DocumentSession? { sessions[id] }
+
+    /// A change to an open worksheet's pages (EP61).
+    enum PageEdit: Equatable {
+        /// A new page of `template` paper at zero-based `index`.
+        case insert(PaperTemplate, at: Int)
+        /// A copy of page `id`, paper and ink, straight after it.
+        case duplicate(String)
+        /// Removes added page `id` and its ink.
+        case remove(String)
+    }
+
+    /// Applies `edit` to the open worksheet `id` and returns the session that replaces its current one. The current
+    /// session's ink is saved first; only once the edit is stored is that session retired, so a failed edit leaves
+    /// the worksheet open as it was. The caller stops ink input before calling, so no stroke lands in between.
+    func editPages(_ id: UUID, _ edit: PageEdit) async throws -> DocumentSession {
+        guard let current = sessions[id] else { throw LibraryError.documentMissing }
+        do {
+            try await current.flush()
+            switch edit {
+            case .insert(let template, let index): try await store.insertPage(template, at: index, documentID: id)
+            case .duplicate(let pageID): try await store.duplicatePage(pageID, documentID: id)
+            case .remove(let pageID): try await store.removePage(pageID, documentID: id)
+            }
+        } catch {
+            showError(error.localizedDescription)
+            throw error
+        }
+        current.retire()
+        sessions[id] = nil
+        do { return try await loadSession(id) }
+        catch {
+            showError(error.localizedDescription)
+            throw error
+        }
+    }
 
     func close(_ id: UUID) async throws {
         do {

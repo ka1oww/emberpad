@@ -161,6 +161,15 @@ enum TeacherCopyCardContent: Equatable {
     }
 }
 
+/// EP61: which Teacher copy page answers a worksheet page. Pairing is by the PDF's own pages, so a page added in
+/// Ember Slate (blank or squared paper) has none; a duplicate of a PDF page keeps its page's answers.
+enum TeacherCopyAnswerPage {
+    static func pdfPage(for page: PageEntry?) -> Int? {
+        guard let page else { return 0 }
+        return page.pdfPage
+    }
+}
+
 // MARK: - Views
 
 /// The panel plus the edge grabber that replaces it when it is hidden, like iPadOS Slide Over: drag the header off
@@ -170,6 +179,8 @@ struct TeacherCopyCardOverlay: View {
     let content: TeacherCopyCardContent
     let documentTitle: String
     let card: TeacherCopyCardState
+    /// False on a page added in Ember Slate, which the Teacher copy has no page for.
+    var hasAnswerPage = true
     @State private var dragTranslation: CGFloat = 0
 
     var body: some View {
@@ -180,7 +191,7 @@ struct TeacherCopyCardOverlay: View {
             let x = TeacherCopyCardGeometry.draggedX(side: side, translation: dragTranslation, panelSize: panelSize, in: container)
             ZStack(alignment: .topLeading) {
                 if card.isOpen {
-                    TeacherCopyCard(content: content, documentTitle: documentTitle, side: side,
+                    TeacherCopyCard(content: content, documentTitle: documentTitle, side: side, hasAnswerPage: hasAnswerPage,
                                     onClose: { withAnimation(.snappy) { card.close() } },
                                     onMove: { withAnimation(.snappy) { card.dock(side.opposite) } },
                                     onDragChanged: { dragTranslation = $0.translation.width },
@@ -228,6 +239,7 @@ struct TeacherCopyCard: View {
     let content: TeacherCopyCardContent
     let documentTitle: String
     var side: TeacherCopyPanelSide = .trailing
+    var hasAnswerPage = true
     let onClose: () -> Void
     var onMove: () -> Void = {}
     var onDragChanged: (DragGesture.Value) -> Void = { _ in }
@@ -239,7 +251,7 @@ struct TeacherCopyCard: View {
             TeacherCopyCardHeader(documentTitle: documentTitle, onClose: onClose)
                 .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
                     .onChanged(onDragChanged).onEnded(onDragEnded))
-            TeacherCopyCardBody(content: content)
+            TeacherCopyCardBody(content: content, hasAnswerPage: hasAnswerPage)
         }
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: TeacherCopyCardGeometry.cornerRadius, style: .continuous))
@@ -287,11 +299,14 @@ struct TeacherCopyCardHeader: View {
 /// The body switches on `content`, so only `.pdf` ever builds a PDF view; the other states draw no answers.
 struct TeacherCopyCardBody: View {
     let content: TeacherCopyCardContent
+    var hasAnswerPage = true
 
     var body: some View {
         switch content {
         case .pdf(let url):
+            // The answers stay loaded under the note, so they are where they were on the next PDF page.
             ReadOnlyPDF(url: url).accessibilityLabel("Private teacher answers")
+                .overlay { if !hasAnswerPage { NoAnswerPageState() } }
         case .hidden(let reason):
             AnswersHiddenState(reason: reason)
         case .noTeacherCopy:
@@ -313,6 +328,22 @@ struct AnswersHiddenState: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
         .background(Theme.privateBg.opacity(0.55))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Shown over the answers while the worksheet is on a page added in Ember Slate.
+struct NoAnswerPageState: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "doc.badge.plus").font(.system(size: 34)).foregroundStyle(Theme.text3)
+            Text("No answer page").font(Theme.cardTitle).foregroundStyle(Theme.text)
+            Text("This page was added in Ember Slate, so the Teacher copy has no page for it.")
+                .font(Theme.pageMeta).foregroundStyle(Theme.text2).multilineTextAlignment(.center)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.canvas)
         .accessibilityElement(children: .combine)
     }
 }
