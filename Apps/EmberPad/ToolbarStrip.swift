@@ -161,7 +161,7 @@ private struct ActiveToolMenu: View {
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1)
             case .laser:
-                Text("Dot · point with the Pencil · nothing is written")
+                Text("\(tools.settings.laserMode.title) · point with the Pencil · nothing is written")
                     .font(Theme.meta)
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1)
@@ -321,10 +321,13 @@ struct ToolSettingsPopover: View {
                 }
             case .laser:
                 Section {
-                    CheckRow(title: "Dot", checked: true) {}
-                    TaggedRow(title: "Trail", tag: "Later")
+                    ForEach(LaserMode.allCases, id: \.self) { mode in
+                        CheckRow(title: mode.title, checked: tools.settings.laserMode == mode) { tools.setLaserMode(mode) }
+                    }
                 } footer: {
-                    Text("A red dot follows the Pencil on this iPad and on the student view. Lift and it goes. It is never saved as ink.")
+                    Text(tools.settings.laserMode == .trail
+                         ? "The Pencil leaves a red glowing trail on this iPad and on the student view. It fades away by itself and is never saved as ink."
+                         : "A red dot follows the Pencil on this iPad and on the student view. Lift and it goes. It is never saved as ink.")
                 }
             }
         }

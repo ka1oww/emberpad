@@ -24,6 +24,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     let laser = LaserPointerRecognizer()
     /// The laser dot on this iPad, above the pages. Internal for tests.
     let laserDot = PDFOverlayPageController.makeLaserDot()
+    /// Trail mode's fading line on this iPad, under the dot, in this controller's view coordinates. Internal for tests.
+    let laserTrailLayer = LaserTrailLayer()
+    private var laserTrail = LaserTrail<Int>()
+    /// The clock the trail fades by. Internal so tests can fade it without waiting.
+    var laserClock: () -> TimeInterval = { CACurrentMediaTime() }
+    private var laserTrailLink: CADisplayLink?
     private var currentPage = 0
     /// Off from the moment the worksheet starts leaving, so a late throttled frame cannot put a page back on the
     /// student view after the editor has cleared it.
@@ -105,6 +111,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         laser.onEvent = { [weak self] event in self?.laserEvent(event) }
         laser.delegate = self
         pdfView.addGestureRecognizer(laser)
+        laserTrailLayer.zPosition = 9
+        view.layer.addSublayer(laserTrailLayer)
         view.layer.addSublayer(laserDot)
         updateCanvasInput()
         publishPage()
@@ -154,6 +162,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         liveStroke = nil
         student.cancelLiveStroke()
         hideLaser(animated: false)
+        clearLaserTrail()
     }
 
     deinit {
@@ -267,7 +276,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             InkSelectionController.lassoRecognizer(on: candidate)?.isEnabled = focused && lasso
         }
         if laser.isEnabled != pointing { laser.isEnabled = pointing }
-        if !pointing { hideLaser(animated: false) }
+        if !pointing { hideLaser(animated: false); clearLaserTrail() }
     }
 
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
@@ -375,20 +384,68 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     // MARK: Laser pointer (P6)
 
     /// A Pencil sample or lift from the laser recogniser, `location` in the PDF view's coordinates. The dot follows
-    /// the Pencil on this iPad and, over a page, on the student view. Nothing here touches a drawing. Internal for tests.
+    /// the Pencil on this iPad and, over a page, on the student view. In Trail mode the dot also leaves a fading line
+    /// on both. Nothing here touches a drawing. Internal for tests.
     func laserEvent(_ event: LaserPointerRecognizer.Event) {
+        let trail = tools.settings.laserMode == .trail
         switch event {
         case .moved(let location):
-            showLaserDot(at: view.convert(location, from: pdfView))
+            let inView = view.convert(location, from: pdfView)
+            showLaserDot(at: inView)
+            if trail {
+                laserTrail.add(inView, on: 0, at: laserClock())
+                renderLaserTrail()
+            } else {
+                laserTrail.breakLine()
+            }
             if publishing, let (page, point) = pageLocation(of: location) {
                 student.pointLaser(session: session, pageIndex: page, location: point)
+                if trail { student.extendLaserTrail(session: session, pageIndex: page, location: point) }
+                else { student.breakLaserTrail() }
             } else {
                 student.hideLaser()
+                student.breakLaserTrail()
             }
         case .lifted:
             hideLaser(animated: true)
+            laserTrail.breakLine()
+            student.breakLaserTrail()
         }
     }
+
+    /// Brings the iPad trail up to the clock: fully faded points go, the rest are redrawn at their new opacity. The
+    /// display link stops once nothing is left. Internal so tests can step the fade.
+    func tickLaserTrail() {
+        laserTrail.prune(now: laserClock())
+        renderLaserTrail()
+    }
+
+    private func renderLaserTrail() {
+        let now = laserClock()
+        laserTrailLayer.frame = view.bounds
+        laserTrailLayer.render(laserTrail.pieces(now: now).map { ($0.from, $0.to, $0.opacity) },
+                               width: LaserTrailStyle.presenterWidth)
+        if laserTrail.isEmpty {
+            laserTrailLink?.invalidate()
+            laserTrailLink = nil
+        } else if laserTrailLink == nil {
+            let link = CADisplayLink(target: LaserTrailTicker(self), selector: #selector(LaserTrailTicker.tick(_:)))
+            link.add(to: .main, forMode: .common)
+            laserTrailLink = link
+        }
+    }
+
+    /// The laser was put away or the worksheet is leaving: the trail goes at once, here and on the student view.
+    private func clearLaserTrail() {
+        laserTrail = LaserTrail()
+        laserTrailLayer.clear()
+        laserTrailLink?.invalidate()
+        laserTrailLink = nil
+        student.clearLaserTrail()
+    }
+
+    /// Whether any of the iPad's laser trail is drawn, for tests.
+    var laserTrailVisible: Bool { !laserTrailLayer.isEmpty }
 
     /// The page under `location` (PDF view coordinates) and the point in that page's ink space, which is its canvas's
     /// coordinates: the same space as the committed drawing and live ink.
@@ -767,5 +824,17 @@ extension PDFPage {
     var displayedSize: CGSize {
         let size = bounds(for: .cropBox).size
         return rotation % 180 == 0 ? size : CGSize(width: size.height, height: size.width)
+    }
+}
+
+/// Holds the controller weakly for the trail's display link, which retains its target until invalidated.
+@MainActor
+private final class LaserTrailTicker: NSObject {
+    private weak var controller: PDFOverlayPageController?
+    init(_ controller: PDFOverlayPageController) { self.controller = controller }
+    /// A link whose controller has gone stops itself.
+    @objc func tick(_ link: CADisplayLink) {
+        guard let controller else { return link.invalidate() }
+        controller.tickLaserTrail()
     }
 }
