@@ -18,6 +18,14 @@ protocol WorksheetPageRenderer: AnyObject {
     func setPageInput(_ enabled: Bool)
     /// A page edit replaced this renderer: drop its undo history, which names pages by their old positions.
     func retire()
+    /// Read-only mode (EP63): no Pencil or touch input changes the ink or the selection while it is on; scrolling and
+    /// zooming still work.
+    func setReadOnly(_ readOnly: Bool)
+    /// Highlights the search matches on their pages, `current` (an index into `matches`) more strongly (EP63). An
+    /// empty list clears them.
+    func highlightSearch(_ matches: [PDFSelection], current: Int?)
+    /// Scrolls the worksheet to show a search match.
+    func reveal(_ match: PDFSelection)
     /// The page to show first, before the view has appeared.
     var startPage: Int? { get set }
 }
@@ -170,6 +178,9 @@ final class PageChromeState: ObservableObject {
     var changeTemplate: ((PaperTemplate) -> Void)?
     /// A thumbnail's menu or ribbon, as the Pages popover calls it.
     var pageAction: ((PageNavigatorAction) -> Void)?
+    /// Read-only mode (EP63), GoodNotes' header toggle: the header greys, the tool row and undo/redo go, and the pages
+    /// take no ink or page edits. It starts off each time a worksheet opens.
+    @Published var readOnly = false
     private var pillTask: Task<Void, Never>?
     private let pillLifetime: Duration
 
@@ -234,20 +245,23 @@ struct EditorScreen: View {
     /// Shows or hides the library sidebar beside the worksheet; nil where there is no sidebar.
     let toggleSidebar: (() -> Void)?
 
-    /// `chrome` is injectable so a test can open the Pages popover the way a tap does.
+    /// `chrome` and `search` are injectable so a test can open the Pages and Search popovers the way a tap does.
     @MainActor
     init(documentID: UUID, library: LibraryController, presentation: PresentationState,
-         chrome: PageChromeState? = nil, toggleSidebar: (() -> Void)? = nil) {
+         chrome: PageChromeState? = nil, search: WorksheetSearchModel? = nil, toggleSidebar: (() -> Void)? = nil) {
         self.documentID = documentID
         self.library = library
         self.presentation = presentation
         self.toggleSidebar = toggleSidebar
         _chrome = StateObject(wrappedValue: chrome ?? PageChromeState())
+        _search = StateObject(wrappedValue: search ?? WorksheetSearchModel())
     }
     @State private var session: DocumentSession?
     @State private var renderer: (any WorksheetPageRenderer)?
     @State private var errorMessage: String?
     @StateObject private var chrome: PageChromeState
+    /// The header's in-document search (EP63).
+    @StateObject private var search: WorksheetSearchModel
     @StateObject private var pageThumbnails = PageThumbnailStore()
     @State private var tools = ToolState()
     // The card's open state and its corner per orientation, persisted across launches (design 6.3).
@@ -286,13 +300,15 @@ struct EditorScreen: View {
                           onAction: canAddPages ? { action in pageAction(action) } : nil)
     }
 
-    /// Only a Student copy takes added pages; a Teacher copy stays exactly as delivered.
-    private var canAddPages: Bool { session?.record.role == .student && pagesAvailable && !editingPages }
+    /// Only a Student copy takes added pages; a Teacher copy stays exactly as delivered. Read-only mode takes no page
+    /// tools at all (EP63).
+    private var canAddPages: Bool { session?.record.role == .student && pagesAvailable && !editingPages && !chrome.readOnly }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            ToolbarStrip(tools: tools)
+            // Read-only (EP63) hides the tool row, as GoodNotes does.
+            if !chrome.readOnly { ToolbarStrip(tools: tools) }
             if let session { InkSaveBanner(session: session) }
             ZStack(alignment: .topLeading) {
                 if let renderer, let session {
@@ -330,6 +346,12 @@ struct EditorScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         .flattenedExportSheet(flattenedExport)
         .onChange(of: addPageChoice) { _, choice in choice.save() }
+        .onChange(of: chrome.readOnly) { _, readOnly in
+            if readOnly { tools.settingsTool = nil }
+            renderer?.setReadOnly(readOnly)
+        }
+        // Matches show page text, so search follows the main-screen policy like the pages and thumbnails.
+        .onChange(of: pagesAvailable) { _, available in if !available { search.close() } }
         .alert("Go to Page", isPresented: $chrome.goToPageOpen) {
             let count = session?.pdf.pageCount ?? 0
             TextField(PageNumberField.range(pageCount: count), text: $goToPageText)
@@ -357,6 +379,7 @@ struct EditorScreen: View {
         .onDisappear {
             LastWorksheet().closed(documentID)
             chrome.cancel()
+            search.close()
             tools.cancelToast()
             tools.settingsTool = nil
             presentation.student.clear()
@@ -380,7 +403,12 @@ extension EditorScreen {
         chrome.rotatePage = { clockwise in rotatePage(clockwise: clockwise) }
         chrome.changeTemplate = { template in changeTemplate(template) }
         chrome.pageAction = { action in pageAction(action) }
+        made.setReadOnly(chrome.readOnly)
+        search.highlight = { [weak made] matches, current in made?.highlightSearch(matches, current: current) }
+        search.reveal = { [weak made] match in made?.reveal(match) }
         renderer = made
+        // A page edit reopens the worksheet on a new PDF: an open search runs again on its pages.
+        search.attach(opened.pdf)
     }
 
     /// The page in view's entry in the manifest.
@@ -453,9 +481,9 @@ extension EditorScreen {
         }
     }
 
-    /// The Ember title bar (EP54 layout, EP57 colours): back, library sidebar, pages and export on the
-    /// left; the title with its menu in the centre; undo, redo, Teacher copy, the
-    /// student view and More on the right.
+    /// The Ember title bar (EP54 layout, EP57 colours): back, library sidebar, pages, search and export on the
+    /// left; the title with its menu in the centre; undo, redo, Teacher copy, bookmark, Add Page, read-only, the
+    /// student view and More on the right. Read-only greys the bar and drops undo and redo (EP63).
     private var header: some View {
         HeaderBarLayout {
             HStack(spacing: WorksheetHeaderMetrics.iconSpacing) { leadingActions }
@@ -465,7 +493,11 @@ extension EditorScreen {
         .padding(.horizontal, WorksheetHeaderMetrics.edgeInset)
         .frame(maxWidth: .infinity)
         .frame(height: WorksheetHeaderMetrics.barHeight)
-        .background(Theme.headerBar.ignoresSafeArea(edges: .top))
+        .background((chrome.readOnly ? Theme.headerBarReadOnly : Theme.headerBar).ignoresSafeArea(edges: .top))
+        // With the tool row gone, the read-only bar keeps the row's hairline under it.
+        .overlay(alignment: .bottom) {
+            if chrome.readOnly { Rectangle().fill(Theme.line).frame(height: Theme.hairlineWidth) }
+        }
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
     }
@@ -483,6 +515,13 @@ extension EditorScreen {
             .disabled(!pagesAvailable)
             .popover(isPresented: chrome.isShowingPages(from: .toolbar), arrowEdge: .top) {
                 if let session { pageNavigator(session) }
+            }
+        // EP63: GoodNotes' Search, after the page grid.
+        Button { search.isOpen = true } label: { HeaderIcon(symbol: "magnifyingglass") }
+            .accessibilityLabel("Search")
+            .disabled(!pagesAvailable)
+            .popover(isPresented: $search.isOpen, arrowEdge: .top) {
+                WorksheetSearchPopover(search: search)
             }
         Menu {
             exportRows
@@ -506,10 +545,13 @@ extension EditorScreen {
 
     @ViewBuilder
     private var trailingActions: some View {
-        Button { renderer?.undo() } label: { HeaderIcon(symbol: "arrow.uturn.backward") }
-            .accessibilityLabel("Undo")
-        Button { renderer?.redo() } label: { HeaderIcon(symbol: "arrow.uturn.forward") }
-            .accessibilityLabel("Redo")
+        // Read-only hides undo and redo, as GoodNotes does (EP63).
+        if !chrome.readOnly {
+            Button { renderer?.undo() } label: { HeaderIcon(symbol: "arrow.uturn.backward") }
+                .accessibilityLabel("Undo")
+            Button { renderer?.redo() } label: { HeaderIcon(symbol: "arrow.uturn.forward") }
+                .accessibilityLabel("Redo")
+        }
         Button {
             withAnimation { teacherCard.toggle() }
         } label: {
@@ -530,6 +572,12 @@ extension EditorScreen {
             .popover(isPresented: $chrome.addPageOpen, arrowEdge: .top) {
                 AddPagePopover(choice: $addPageChoice) { template in addPage(template) }
             }
+        // EP63: GoodNotes' read-only toggle, after Add Page. Its icon says what a tap does: stop editing, or edit.
+        Button { chrome.readOnly.toggle() } label: {
+            HeaderIcon(symbol: chrome.readOnly ? "pencil.tip.crop.circle" : "pencil.slash")
+        }
+        .accessibilityLabel(chrome.readOnly ? "Edit" : "Read-only mode")
+        .accessibilityHint(chrome.readOnly ? "Shows the tools so the pages take ink again" : "Hides the tools so the pages take no ink")
         Menu {
             WorksheetSharingRows(framing: $presentation.studentFraming)
         } label: {

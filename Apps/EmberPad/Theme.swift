@@ -123,6 +123,8 @@ enum Theme {
     static let onHeaderBar = accent
     /// The worksheet title on the header bar.
     static let headerTitleColor = text
+    /// The title bar in read-only mode (EP63): grey, as GoodNotes greys its bar, so it is plain the pages take no ink.
+    static let headerBarReadOnly = surface2
     /// A pressed-in look for a header toggle that is on (the Teacher copy panel).
     static let headerBarActive = accentSoft
     /// The tool row under the header bar, on the same surface as the bar.
