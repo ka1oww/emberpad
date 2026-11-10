@@ -113,10 +113,12 @@ final class ThemeTokenTests: XCTestCase {
 
     func testDefaultPencilToolsUseInkTokens() throws {
         let defaults = ToolSettings()
-        let fountain = try XCTUnwrap(defaults.pencilTool(for: .pen) as? PKInkingTool)
-        XCTAssertEqual(fountain.inkType, .fountainPen)
-        assertEqual(rgba(fountain.color, style: .light), hex("#1B1B1B"), "penBlack", "light")
-        XCTAssertEqual(fountain.width, Theme.penWidths[Theme.penDefaultWidthIndex])
+        // The pen writes live as a thin monoline and takes the fountain-pen feel on lift (EP53).
+        let pen = try XCTUnwrap(defaults.pencilTool(for: .pen) as? PKInkingTool)
+        XCTAssertEqual(pen.inkType, PenFeel.liveInkType)
+        assertEqual(rgba(pen.color, style: .light), hex("#1B1B1B"), "penBlack", "light")
+        XCTAssertEqual(pen.width, PenFeel.liveToolWidth(forPenWidth: Theme.penWidths[Theme.penDefaultWidthIndex]))
+        XCTAssertEqual(defaults.penWidth, Theme.penWidths[Theme.penDefaultWidthIndex])
 
         let highlighter = try XCTUnwrap(defaults.pencilTool(for: .highlighter) as? PKInkingTool)
         XCTAssertEqual(highlighter.inkType, .marker)

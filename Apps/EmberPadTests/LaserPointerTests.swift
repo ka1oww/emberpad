@@ -54,7 +54,7 @@ final class LaserPointerTests: XCTestCase {
         tools.select(.pen)
         XCTAssertEqual(applied.count, 2)
         XCTAssertNil(applied.first as? PKInkingTool)
-        XCTAssertEqual((applied.last as? PKInkingTool)?.inkType, .fountainPen)
+        XCTAssertEqual((applied.last as? PKInkingTool)?.inkType, PenFeel.liveInkType)
     }
 
     // MARK: Recogniser and controller

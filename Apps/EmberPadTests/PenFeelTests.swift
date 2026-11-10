@@ -218,6 +218,55 @@ final class PenFeelTests: XCTestCase {
         XCTAssertGreaterThan(Array(barb.path)[15].size.width - 2, 0.5 * (body - 2))
     }
 
+    // MARK: - Live line and clean ink (EP53)
+
+    func testLiftedPencilKitInkDrawsAsOneCleanLineWithoutABeadedHalo() throws {
+        let drawing = try PKDrawing(data: XCTUnwrap(Data(base64Encoded: Self.pencilKitFountainStroke)))
+        let written = try XCTUnwrap(drawing.strokes.first)
+        let fresh = PKInk(.fountainPen, color: written.ink.color)
+        XCTAssertEqual(written.ink.inkType, .fountainPen)
+        XCTAssertNotEqual(written.ink.requiredContentVersion, fresh.requiredContentVersion,
+                          "PencilKit commits live strokes with its older fountain-pen ink")
+        let toolWidth: CGFloat = 2.5
+        let reshaped = try XCTUnwrap(PenFeel.reshaped(written, settings: PenFeelSettings(tipSharpness: 1), toolWidth: toolWidth))
+        XCTAssertEqual(reshaped.ink.inkType, .fountainPen)
+        XCTAssertEqual(reshaped.ink.requiredContentVersion, fresh.requiredContentVersion, "the pen feel draws with a new ink")
+        XCTAssertEqual(reshaped.randomSeed, written.randomSeed)
+
+        // The older ink's seeded grain breaks a line this thin into beads with about half the ink.
+        let ink = Self.columnInk(reshaped)
+        XCTAssertLessThan(ink.variation, 0.05, "the line is even, with no beads along its edge")
+        XCTAssertEqual(ink.mean, PenFeel.widthPerToolWidth * toolWidth, accuracy: 0.2 * PenFeel.widthPerToolWidth * toolWidth,
+                       "the line carries its full width of ink")
+    }
+
+    func testThePenWritesAThinMonolineThatTakesTheFountainPenFeelOnLift() throws {
+        var live = Self.line(length: 300, size: 2.5)
+        live.ink = PKInk(PenFeel.liveInkType, color: .emberPenBlack)
+        let reshaped = try XCTUnwrap(PenFeel.reshaped(live, settings: PenFeelSettings(tipSharpness: 1), toolWidth: 2.5))
+        XCTAssertEqual(reshaped.ink.inkType, .fountainPen)
+        XCTAssertEqual(reshaped.ink.color, live.ink.color)
+        XCTAssertLessThan(try XCTUnwrap(reshaped.path.first).size.width, Array(reshaped.path)[30].size.width, "pointed ends")
+
+        var other = Self.line(length: 300, size: 2.5)
+        other.ink = PKInk(.pen, color: .emberPenBlack)
+        XCTAssertNil(PenFeel.reshaped(other, settings: PenFeelSettings(tipSharpness: 1), toolWidth: 2.5),
+                     "other pens are not the pen's")
+    }
+
+    func testTheLiveLineIsAsWideAsTheLiftedStrokeAtEveryPenWidth() throws {
+        for penWidth in Theme.penWidths {
+            let tool = PenFeel.liveTool(color: .emberPenBlack, penWidth: penWidth)
+            XCTAssertEqual(tool.inkType, .monoline)
+            // PencilKit records a live monoline point 2 + w across for tool width w and draws it 2 × w (EP53).
+            var live = Self.line(length: 300, size: 2 + tool.width)
+            live.ink = tool.ink
+            let lifted = try XCTUnwrap(PenFeel.reshaped(live, settings: PenFeelSettings(tipSharpness: 1), toolWidth: penWidth))
+            let liveInk = Self.columnInk(live).mean, liftedInk = Self.columnInk(lifted).mean
+            XCTAssertEqual(liveInk, liftedInk, accuracy: 0.15 * liftedInk, "no jump in width at lift for pen width \(penWidth)")
+        }
+    }
+
     // MARK: - Worksheet commit hook
 
     func testLiftedFountainPenStrokeIsReshapedAsOneUndoStep() async throws {
@@ -256,6 +305,27 @@ final class PenFeelTests: XCTestCase {
         undo.undo()
         XCTAssertEqual(canvas.drawing.strokes.count, 0, "the earlier stroke is its own step")
         XCTAssertFalse(undo.canUndo)
+    }
+
+    func testLiftedLiveMonolineIsSwappedForTheFountainPenStrokeAsOneUndoStep() async throws {
+        let (controller, session) = try await Self.makeController()
+        let canvas = try Self.canvas(controller, session)
+        let undo = Self.undoManager(controller)
+        XCTAssertEqual((controller.tools.settings.pencilTool(for: .pen) as? PKInkingTool)?.inkType, PenFeel.liveInkType)
+        var live = Self.line(length: 300, size: 3, y: 120)
+        live.ink = PKInk(PenFeel.liveInkType, color: .emberPenBlack)
+        Self.commit(PKDrawing(strokes: [live]), on: canvas, controller, undo: undo)
+        await Self.settle()
+
+        let lifted = try XCTUnwrap(canvas.drawing.strokes.last)
+        XCTAssertEqual(canvas.drawing.strokes.count, 1)
+        XCTAssertEqual(lifted.ink.inkType, .fountainPen)
+        XCTAssertEqual(lifted.ink.requiredContentVersion, PKInk(.fountainPen, color: .emberPenBlack).requiredContentVersion)
+        XCTAssertEqual(session.drawing(on: 0).strokes.last?.ink.inkType, .fountainPen, "the session saves the fountain-pen stroke")
+        XCTAssertEqual(Array(lifted.path).map(\.location), Array(live.path).map(\.location))
+        XCTAssertEqual(undo.undoActionName, "Ink")
+        undo.undo()
+        XCTAssertEqual(canvas.drawing.strokes.count, 0, "one undo removes the stroke and its swap")
     }
 
     func testHighlighterIsLeftAsDrawnAndBluntTipsStillTakeTheLineWidth() async throws {
@@ -319,6 +389,47 @@ final class PenFeelTests: XCTestCase {
         return PKStroke(ink: PKInk(.fountainPen, color: .emberPenBlack),
                         path: PKStrokePath(controlPoints: points, creationDate: Date(timeIntervalSince1970: 1_800_000_000)),
                         transform: transform)
+    }
+
+    /// One fountain-pen stroke as PencilKit committed it from a Simulator drag across a page (EP53), before any pen
+    /// feel: 24 points, its older live ink and its own random seed. Synthetic, not the captain's writing.
+    static let pencilKitFountainStroke = """
+        d3Jk8AIACAASEAAAAAAAAAAAAAAAAAAAAAASEOXU8DIUHkG9kQfbbHYkqV8aBggAEAAYABoGCAEQARgBIjwKFA2HFtk9FYcW2T0dhxbZPSUAAIA/\
+        Ehljb20uYXBwbGUuaW5rLmZvdW50YWlucGVuGANBAAAAAAAABEAqoQQKEMGKm5MADUHoq0X+/0+5frcSBggAEAEYARoGCAAQARgAIAAqvQMKEBDv\
+        jD5imk4WhSfUy1d9bW0R1SFpvX5RyEEYGCAHKPgPMhLoAwAAAAAAAAAA/38AAIA/AAA6gANZnW9CjsbvQgAAAABn8WNAtdSDQo7G70KA82g+cnpj\
+        QFjpjELR/e5CHDm5Pvu2Y0DxWJdCr2HuQnAXDj9HFWNA/gKpQiny7ULigVs/vD1jQHkbuEJVbO1C/6uJP7h3Y0DDV8FCl6PsQu77nD8DimNArG3P\
+        QnUH7EIxDbw/GyNjQDs420LZ2utCMV/SP5CjY0AFqutCGxLrQgU09D9Mw2NA07PzQl5J6kIC9QRACRhjQOc4AENeSepCEsoQQFCWY0ADgwVDoIDp\
+        QuBvGkALoGNAk2QLQ6CA6UKMIyhAgzNjQKTxEkPit+hCKKY5QOd4Y0BuyRVDwBvoQuRYPkBgImNAWHEdQyTv50JONU1A5z9jQFEjIkNmJudCiJxW\
+        QJStY0ANnChDh2zmQkj3Y0BfQWNARQ4wQ6ld5kKbuHNACCpjQH3MN0PrlOVC0KKCQC6UY0BHpDpDyfjkQpeBhkDoGGNAb79CQy3M5EIsRY5AwzNj\
+        QLDfR0NvA+RCJqqTQMnZY0BAAUgWMhQNAABoQhUAAOJCHQAAEEMlAAAAQUCgmobC0wR6Hg0AAIA/FQAAAAAdAAAAACUAAIA+LQAAAAA1AAAAADoG\
+        CAAQABgAQhBoFIrNrUlI0Lmtdazgd2al
+        """
+
+    /// The ink in each pixel column across the middle 60% of a near-horizontal stroke, rendered at about the iPad's
+    /// page scale: mean in page points, and its coefficient of variation along the stroke.
+    static func columnInk(_ stroke: PKStroke, scale: CGFloat = 2.55) -> (mean: Double, variation: Double) {
+        let bounds = stroke.renderBounds.insetBy(dx: -4, dy: -4).integral
+        var image = UIImage()
+        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+            image = PKDrawing(strokes: [stroke]).image(from: bounds, scale: scale)
+        }
+        guard let cg = image.cgImage else { return (0, 1) }
+        let width = cg.width, height = cg.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return (0, 1) }
+        let columns = (Int(Double(width) * 0.2)..<Int(Double(width) * 0.8)).map { x in
+            (0..<height).reduce(0.0) { $0 + Double(pixels[($1 * width + x) * 4 + 3]) / 255 } / Double(scale)
+        }
+        let mean = columns.reduce(0, +) / Double(max(columns.count, 1))
+        let spread = (columns.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(max(columns.count, 1))).squareRoot()
+        return (mean, mean > 0 ? spread / mean : 1)
     }
 
     private static func undoManager(_ controller: PDFOverlayPageController) -> UndoManager {

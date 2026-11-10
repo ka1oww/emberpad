@@ -102,8 +102,11 @@ final class InkSelectionController {
         let stroke: PKStroke
 
         func isStill(_ other: PKStroke) -> Bool {
+            // The pen feel swaps the lifted monoline for a fountain-pen stroke with the same points, so both count.
             other.path.creationDate == stroke.path.creationDate && other.path.count == stroke.path.count
-                && other.transform == stroke.transform && other.ink.inkType == stroke.ink.inkType
+                && other.transform == stroke.transform
+                && (other.ink.inkType == stroke.ink.inkType
+                    || PenFeel.isPenInk(other.ink.inkType) && PenFeel.isPenInk(stroke.ink.inkType))
         }
     }
 
@@ -193,11 +196,11 @@ final class InkSelectionController {
 
     // MARK: - Circle to lasso
 
-    /// Whether a held stroke is a circle-to-lasso loop: a fountain-pen
-    /// stroke, not cut by the eraser, ending near its own start, with the
+    /// Whether a held stroke is a circle-to-lasso loop: a pen stroke (live
+    /// monoline or fountain pen), not cut by the eraser, ending near its own start, with the
     /// Pen gestures switch on.
     func isLassoLoop(_ stroke: PKStroke) -> Bool {
-        guard host?.tools.settings.circleToLasso == true, stroke.ink.inkType == .fountainPen, stroke.mask == nil
+        guard host?.tools.settings.circleToLasso == true, PenFeel.isPenInk(stroke.ink.inkType), stroke.mask == nil
         else { return false }
         return LassoGeometry.isClosedLoop(LassoGeometry.drawingPoints(of: stroke))
     }

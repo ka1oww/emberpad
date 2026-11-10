@@ -48,9 +48,11 @@ final class ToolStateTests: XCTestCase {
         s.penColorIndex = 2
         s.penWidthIndex = 2
         let pen = try XCTUnwrap(s.pencilTool(for: .pen) as? PKInkingTool)
-        XCTAssertEqual(pen.inkType, .fountainPen)
+        // The pen writes as a thin monoline and takes the fountain-pen feel on lift (EP53).
+        XCTAssertEqual(pen.inkType, .monoline)
         XCTAssertEqual(pen.color.emberHex, "B23A2E")
-        XCTAssertEqual(pen.width, 4)
+        XCTAssertEqual(pen.width, PenFeel.liveToolWidth(forPenWidth: 4))
+        XCTAssertEqual(s.penWidth, 4)
 
         s.highlighterColorIndex = 1
         s.highlighterWidthIndex = 2
@@ -286,7 +288,7 @@ final class ToolStateTests: XCTestCase {
             try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: XCTUnwrap(session.pdf.page(at: index))) as? PageInkView)?.canvas)
         }
         for canvas in canvases {
-            XCTAssertEqual(try XCTUnwrap(canvas.tool as? PKInkingTool).inkType, .fountainPen)
+            XCTAssertEqual(try XCTUnwrap(canvas.tool as? PKInkingTool).inkType, PenFeel.liveInkType)
         }
         tools.select(.highlighter)
         tools.selectHighlighterColor(1)

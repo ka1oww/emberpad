@@ -106,7 +106,8 @@ final class LiveInkTests: XCTestCase {
     func testOnlyInkingToolsDrawLiveInk() throws {
         let settings = ToolSettings()
         let pen = try XCTUnwrap(LiveInkStyle(tool: settings.pencilTool(for: .pen)))
-        XCTAssertEqual(pen.width, settings.penWidth)
+        // The provisional line is as wide as the iPad's live monoline, the reshaped stroke's middle width (EP53).
+        XCTAssertEqual(pen.width, PenFeel.widthPerToolWidth * settings.penWidth, accuracy: 1e-6)
         let marker = try XCTUnwrap(LiveInkStyle(tool: settings.pencilTool(for: .highlighter)))
         XCTAssertEqual(marker.width, settings.highlighterWidth)
         var alpha: CGFloat = 0
