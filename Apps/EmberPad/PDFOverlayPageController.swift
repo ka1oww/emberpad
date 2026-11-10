@@ -54,6 +54,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private(set) lazy var inkSelection = InkSelectionController(host: self)
     /// The eraser stroke in progress while "Erase highlighter only" is on, if any.
     private var highlighterErase: HighlighterEraseStroke?
+    /// Read-only mode (EP63): the pages take no ink, lasso, eraser, laser, paste or undo. Internal for tests.
+    private(set) var readOnly = false
+    /// Two-finger double tap undoes, three-finger double tap redoes. Internal for tests.
+    let undoTap = UITapGestureRecognizer()
+    let redoTap = UITapGestureRecognizer()
+    /// The Pencil's double tap and squeeze. Internal for tests.
+    let pencilInteraction = UIPencilInteraction()
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
     var startPage: Int?
@@ -107,17 +114,16 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         viewportObservers.append(NotificationCenter.default.addObserver(forName: .PDFViewScaleChanged, object: pdfView, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.scheduleInkScale() }
         })
-        let undoTap = UITapGestureRecognizer(target: self, action: #selector(undoGesture))
+        undoTap.addTarget(self, action: #selector(undoGesture))
         undoTap.numberOfTapsRequired = 2; undoTap.numberOfTouchesRequired = 2
-        let redoTap = UITapGestureRecognizer(target: self, action: #selector(redoGesture))
+        redoTap.addTarget(self, action: #selector(redoGesture))
         redoTap.numberOfTapsRequired = 2; redoTap.numberOfTouchesRequired = 3
         pdfView.addGestureRecognizer(undoTap); pdfView.addGestureRecognizer(redoTap)
         inkSelection.install(in: view, pages: pdfView)
         // Without a PKToolPicker nothing else answers the Pencil, so EmberPad follows
         // the iPad's double-tap and squeeze preferences itself (design 5.4).
-        let pencil = UIPencilInteraction()
-        pencil.delegate = self
-        view.addInteraction(pencil)
+        pencilInteraction.delegate = self
+        view.addInteraction(pencilInteraction)
         // On the PDF view, an ancestor of every page canvas, so one recogniser sees every page's Pencil touches.
         liveInk.strokeTarget = { [weak self] touch in self?.liveInkCanvas(for: touch) }
         liveInk.onStroke = { [weak self] event in self?.liveInkEvent(event) }
@@ -321,8 +327,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         showLivePen(page: page)
     }
 
-    func undo() { activeCanvas?.undoManager?.undo() }
-    func redo() { activeCanvas?.undoManager?.redo() }
+    func undo() { if !readOnly { activeCanvas?.undoManager?.undo() } }
+    func redo() { if !readOnly { activeCanvas?.undoManager?.redo() } }
     @objc private func undoGesture() { undo() }
     @objc private func redoGesture() { redo() }
 
@@ -340,11 +346,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// recogniser is off and the lasso recogniser takes the Pencil instead.
     /// With the laser pointer (P6) no canvas takes the Pencil at all: the
     /// laser recogniser on the PDF view does, so nothing is ever inked.
+    /// In read-only mode (EP63) nothing takes the Pencil, so it scrolls the pages as a finger does.
     private func updateCanvasInput() {
-        let lasso = tools.current == .lasso
-        let pointing = tools.current == .laser
+        let lasso = tools.current == .lasso && !readOnly
+        let pointing = tools.current == .laser && !readOnly
         for candidate in canvases.values {
-            let focused = candidate === activeCanvas
+            let focused = candidate === activeCanvas && !readOnly
             candidate.drawingGestureRecognizer.isEnabled = focused && !lasso && !pointing
             InkSelectionController.lassoRecognizer(on: candidate)?.isEnabled = focused && lasso
         }
@@ -383,11 +390,75 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             studentPage = page
             publishPage()
         }
-        updateCanvasInput()
+        // The tool first: setting it can turn PencilKit's drawing recogniser back on, which the input rules then settle.
         canvas.tool = tools.pencilTool
-        // First responder keeps undo on the touched page.
-        canvas.becomeFirstResponder()
+        updateCanvasInput()
+        // First responder keeps undo on the touched page. Read-only leaves it unset, so no keyboard or system undo
+        // gesture reaches the ink.
+        if !readOnly { canvas.becomeFirstResponder() }
     }
+
+    /// Read-only mode (EP63), as GoodNotes': the pages keep scrolling, zooming and following page jumps, but nothing
+    /// writes, erases, selects, pastes, points the laser or undoes. A stroke in progress is dropped, and an open
+    /// selection closes. The undo history is kept for when editing comes back.
+    func setReadOnly(_ readOnly: Bool) {
+        guard readOnly != self.readOnly else { return }
+        self.readOnly = readOnly
+        if readOnly {
+            finishHighlighterErase()
+            inkSelection.dismiss()
+            liveStroke = nil
+            student.cancelLiveStroke()
+            if let page = livePen.writing?.page {
+                livePen.cancel()
+                showLivePen(page: page)
+            }
+            holdGuide.removeFromSuperlayer()
+            activeCanvas?.resignFirstResponder()
+        }
+        undoTap.isEnabled = !readOnly
+        redoTap.isEnabled = !readOnly
+        pencilInteraction.isEnabled = !readOnly
+        inkSelection.pasteMenu.longPress.isEnabled = !readOnly
+        updateCanvasInput()
+        if !readOnly, let activeCanvas { activeCanvas.becomeFirstResponder() }
+    }
+
+    // MARK: Search (EP63)
+
+    /// The search highlights are PDFKit's own, drawn by the PDF view under the ink; they never reach the stored PDF,
+    /// the thumbnails or the student view, which draw the pages themselves.
+    func highlightSearch(_ matches: [PDFSelection], current: Int?) {
+        guard !matches.isEmpty else {
+            pdfView.highlightedSelections = nil
+            return
+        }
+        pdfView.highlightedSelections = matches.enumerated().compactMap { index, match in
+            guard let marked = match.copy() as? PDFSelection else { return nil }
+            marked.color = index == current ? Self.currentMatchColor : Self.matchColor
+            return marked
+        }
+    }
+
+    /// Scrolls the match to about 40% down the view, below the Search popover hanging from the header, rather than to
+    /// the very top where the popover would cover it.
+    func reveal(_ match: PDFSelection) {
+        guard let page = match.pages.first, page.rotation == 0, pdfView.scaleFactor > 0 else {
+            pdfView.go(to: match)
+            return
+        }
+        var target = match.bounds(for: page)
+        // Page space runs upwards, so a taller rect reaches above the match and the scroll stops that far above it.
+        target.size.height += pdfView.bounds.height * Self.revealDrop / pdfView.scaleFactor
+        pdfView.go(to: target, on: page)
+    }
+
+    /// How far down the view a revealed search match lands, as a fraction of its height.
+    static let revealDrop: CGFloat = 0.4
+
+    /// Every match, as a highlighter would mark it; the chosen one a stronger orange.
+    static let matchColor = UIColor(red: 1, green: 0.85, blue: 0.2, alpha: 0.45)
+    static let currentMatchColor = UIColor(red: 1, green: 0.55, blue: 0.1, alpha: 0.6)
 
     func setPageInput(_ enabled: Bool) {
         if !enabled {
@@ -707,7 +778,11 @@ extension PDFOverlayPageController {
     /// pen stroke. A held pen stroke that is not close to a line (a letter, a
     /// curve, a circle to lasso) shows no guide, because it will not snap.
     private func updateHoldGuide(_ hold: HoldRecognizer) {
-        guard let canvas = hold.view, let start = hold.startLocation, let current = hold.currentLocation else { return }
+        // Read-only: a Pencil scrolling the page draws nothing, not even a guide.
+        guard !readOnly, let canvas = hold.view, let start = hold.startLocation, let current = hold.currentLocation else {
+            holdGuide.removeFromSuperlayer()
+            return
+        }
         let settings = tools.settings
         let snaps = switch tools.current {
         case .highlighter: settings.highlighterAlwaysStraight || (hold.isHeld && settings.straightHighlighter)
@@ -753,7 +828,7 @@ extension PDFOverlayPageController {
     /// Returns whether it selected.
     @discardableResult
     func circleLassoPress(on canvas: PKCanvasView, at point: CGPoint) -> Bool {
-        guard tools.current == .pen || tools.current == .highlighter,
+        guard !readOnly, tools.current == .pen || tools.current == .highlighter,
               let page = canvases.first(where: { $0.value === canvas })?.key,
               let count = inkSelection.liftedLoopUnderPress(page: page, at: point) else { return false }
         if canvas.drawingGestureRecognizer.isEnabled {
@@ -966,6 +1041,7 @@ extension PDFOverlayPageController {
 
     /// Clear Page: removes all ink on the focused page as one undo step.
     func clearPage(undoManager: UndoManager? = nil) {
+        guard !readOnly else { return }
         finishHighlighterErase()
         let page = activeCanvas.flatMap { canvas in canvases.first(where: { $0.value === canvas })?.key } ?? currentPage
         let before = session.drawing(on: page)
