@@ -69,10 +69,10 @@ final class PenFeelTests: XCTestCase {
         XCTAssertEqual(Array(thin.path).map(\.size), Array(bold.path).map(\.size),
                        "PencilKit's own swelling and scale no longer decide the width")
         // Moving sideways at force 1.2 with the middle pen width.
-        let expected = PenFeel.widthPerToolWidth * 2.5 * PenFeel.pressureFactor(force: 1.2, sensitivity: 0) * PenFeel.nibFactor(direction: 0)
+        let expected = PenFeel.widthPerToolWidth * 2.5 * PenFeel.pressureFactor(force: 1.2, sensitivity: 0) * PenFeel.nibFactor(direction: 0, sensitivity: 0)
         let middle = Array(thin.path)[30]
         XCTAssertEqual(middle.size.width, PenFeel.pencilKitSize(forWidth: expected), accuracy: 1e-6)
-        XCTAssertEqual(expected, 1.04, accuracy: 0.04, "about GoodNotes' 1 pt at the captain's setting")
+        XCTAssertEqual(expected, 1.35, accuracy: 0.05, "about GoodNotes' 1.22 pt (0.3 mm) at the captain's setting, average force")
         let wider = try XCTUnwrap(PenFeel.reshaped(Self.line(length: 300), settings: settings, toolWidth: 4))
         XCTAssertGreaterThan(Array(wider.path)[30].size.width, middle.size.width, "a wider pen draws wider")
     }
@@ -88,14 +88,28 @@ final class PenFeelTests: XCTestCase {
         XCTAssertEqual(PenFeel.pencilKitSize(forWidth: 0), 2 + PenFeel.hairline / 2, "a tip never vanishes")
     }
 
-    func testUpRightDiagonalsAreSlightlyThinner() {
-        let thin = PenFeel.nibFactor(direction: PenFeel.thinDirection)
-        let thick = PenFeel.nibFactor(direction: PenFeel.thinDirection + .pi / 2)
+    func testUpRightDiagonalsAreSlightlyThinnerAtMax() {
+        let thin = PenFeel.nibFactor(direction: PenFeel.thinDirection, sensitivity: 1)
+        let thick = PenFeel.nibFactor(direction: PenFeel.thinDirection + .pi / 2, sensitivity: 1)
         XCTAssertEqual(thin, PenFeel.thinRatio, accuracy: 1e-9)
         XCTAssertEqual(thick, 1, accuracy: 1e-9)
-        XCTAssertEqual(PenFeel.nibFactor(direction: 0.3), PenFeel.nibFactor(direction: 0.3 + .pi), accuracy: 1e-9,
-                       "the nib is the same both ways along a line")
+        XCTAssertEqual(PenFeel.nibFactor(direction: 0.3, sensitivity: 1), PenFeel.nibFactor(direction: 0.3 + .pi, sensitivity: 1),
+                       accuracy: 1e-9, "the nib is the same both ways along a line")
         XCTAssertGreaterThan(PenFeel.thinRatio, 0.8, "GoodNotes' fountain pen varies only mildly with direction")
+    }
+
+    func testAtMinTheLineIsEvenInEveryDirection() {
+        // EP60: GoodNotes at Pressure Min draws the same width every way, within 4%.
+        let factors = stride(from: 0.0, to: Double.pi, by: Double.pi / 36).map {
+            PenFeel.nibFactor(direction: CGFloat($0), sensitivity: 0)
+        }
+        XCTAssertLessThanOrEqual(factors.max()! / factors.min()!, 1.045, "every direction within about 4%")
+        let horizontal = PenFeel.nibFactor(direction: 0, sensitivity: 0)
+        let vertical = PenFeel.nibFactor(direction: .pi / 2, sensitivity: 0)
+        XCTAssertLessThanOrEqual(horizontal / vertical, 1.04)
+        XCTAssertLessThan(PenFeel.nibFactor(direction: PenFeel.thinDirection, sensitivity: 0.5),
+                          PenFeel.nibFactor(direction: PenFeel.thinDirection, sensitivity: 0),
+                          "more sensitivity brings back the nib")
     }
 
     func testPressureAtMinBarelyChangesTheWidth() {
@@ -127,7 +141,7 @@ final class PenFeelTests: XCTestCase {
             XCTAssertLessThanOrEqual(abs(axes[i] - axes[i - 1]), .pi / 2 + 1e-9, "no half-turn flips between neighbours")
         }
         let sizes = points.map(\.size.width)
-        let body = PenFeel.pencilKitSize(forWidth: PenFeel.widthPerToolWidth * 2.5 * PenFeel.thinRatio * PenFeel.pressureFactor(force: 1.2, sensitivity: 0))
+        let body = PenFeel.pencilKitSize(forWidth: PenFeel.widthPerToolWidth * 2.5 * PenFeel.thinRatio(sensitivity: 0) * PenFeel.pressureFactor(force: 1.2, sensitivity: 0))
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(sizes.min()), body - 0.05, "the turns are not pinched")
     }
 

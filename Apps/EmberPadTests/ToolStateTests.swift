@@ -28,7 +28,7 @@ final class ToolStateTests: XCTestCase {
     func testDefaultsMatchTheDesign() {
         let s = ToolState(defaults: defaults).settings
         XCTAssertEqual(s.current, .pen)
-        XCTAssertEqual(s.penColors, ["1B1B1B", "1E3A8A", "B23A2E"])
+        XCTAssertEqual(s.penColors, ["000000", "1E3A8A", "B23A2E"])
         XCTAssertEqual(s.highlighterColors, ["FACC15", "4ADE80", "F472B6"])
         XCTAssertEqual(Theme.penWidths, [1.5, 2.5, 4])
         XCTAssertEqual(Theme.highlighterWidths, [12, 18, 26])
@@ -97,7 +97,7 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(s.highlighterColors.last, "123456")
         XCTAssertEqual(s.highlighterColorIndex, 3)
         XCTAssertEqual(s.highlighterWidthIndex, 2)
-        XCTAssertEqual(s.penColors, ["1B1B1B", "1E3A8A", "B23A2E", "ABCDEF"])
+        XCTAssertEqual(s.penColors, ["000000", "1E3A8A", "B23A2E", "ABCDEF"])
         XCTAssertEqual(s.penColorIndex, 1)
         XCTAssertEqual(s.penWidthIndex, 0)
         XCTAssertEqual(s.eraserMode, .wholeStroke)
@@ -119,12 +119,22 @@ final class ToolStateTests: XCTestCase {
         XCTAssertTrue(s.penDrawAndHold)
     }
 
+    func testStoredOldDefaultBlackBecomesPureBlack() {
+        // Builds before EP60 stored the default black as 1B1B1B; it follows the new pure-black default.
+        let stored = #"{"current":"pen","penColors":["1B1B1B","1E3A8A","1b1b1b","1B1B1C"],"penColorIndex":0}"#
+        defaults.set(Data(stored.utf8), forKey: ToolState.defaultsKey)
+        let s = ToolState(defaults: defaults).settings
+        XCTAssertEqual(s.penColors, ["000000", "1E3A8A", "000000", "1B1B1C"], "only exactly 1B1B1B changes")
+        XCTAssertEqual(s.penColor.emberHex, "000000")
+        XCTAssertEqual(s.highlighterColors, ToolSettings.defaultHighlighterColors)
+    }
+
     func testStoredColoursAreReadableHex() throws {
         let tools = ToolState(defaults: defaults)
         tools.addColor(UIColor(red: 1, green: 0.5, blue: 0, alpha: 0.3), for: .pen)
         let data = try XCTUnwrap(defaults.data(forKey: ToolState.defaultsKey))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(json["penColors"] as? [String], ["1B1B1B", "1E3A8A", "B23A2E", "FF8000"])
+        XCTAssertEqual(json["penColors"] as? [String], ["000000", "1E3A8A", "B23A2E", "FF8000"])
     }
 
     func testCorruptStorageFallsBackToDefaults() {
@@ -163,7 +173,7 @@ final class ToolStateTests: XCTestCase {
         let tools = ToolState(defaults: defaults)
         tools.selectPenColor(2) // red
         tools.moveColors(for: .pen, from: [2], to: 0)
-        XCTAssertEqual(tools.settings.penColors, ["B23A2E", "1B1B1B", "1E3A8A"])
+        XCTAssertEqual(tools.settings.penColors, ["B23A2E", "000000", "1E3A8A"])
         XCTAssertEqual(tools.settings.penColorIndex, 0)
 
         tools.removeColors(for: .pen, at: [1])
