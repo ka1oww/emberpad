@@ -77,13 +77,20 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// Eraser Phase 4 (GoodNotes' Auto-Deselect): lifting the eraser goes back to the tool used before it. Off by default.
     var eraserBackToLastTool = false
     /// The fountain pen's GoodNotes-style feel (`PenFeel`), applied when the
-    /// Pencil lifts. Tip sharpness ships; pressure sensitivity (0 = Min) is
-    /// stored for a later package and not applied yet.
+    /// Pencil lifts: tip sharpness (default 100%, GoodNotes' maximum) and
+    /// pressure sensitivity (default 0 = Min; no slider shows it).
     var penTipSharpness = PenFeelSettings().tipSharpness
     var penPressureSensitivity = PenFeelSettings().pressureSensitivity
+    /// Whether the teacher has moved the Tip sharpness slider. Builds before
+    /// EP51 did not store this and defaulted to 50%, so a stored 50% without it
+    /// is that old default and decodes to today's default instead.
+    var penTipSharpnessChosen = false
     /// The laser pointer's Dot or Trail mode (P6). Dot by default, so the pointer is unchanged until the teacher
     /// picks Trail.
     var laserMode: LaserMode = .dot
+
+    /// Tip sharpness's default before EP51 (`penTipSharpnessChosen`).
+    static let legacyDefaultTipSharpness = 0.5
 
     /// The design's ink hex values (section 3), which the `pen*` and
     /// `highlighter*` colour sets approximate to three decimals.
@@ -112,7 +119,14 @@ struct ToolSettings: Codable, Equatable, Sendable {
         circleToLasso = (try? c.decodeIfPresent(Bool.self, forKey: .circleToLasso)) ?? d.circleToLasso
         eraseHighlighterOnly = (try? c.decodeIfPresent(Bool.self, forKey: .eraseHighlighterOnly)) ?? d.eraseHighlighterOnly
         eraserBackToLastTool = (try? c.decodeIfPresent(Bool.self, forKey: .eraserBackToLastTool)) ?? d.eraserBackToLastTool
-        penTipSharpness = (try? c.decodeIfPresent(Double.self, forKey: .penTipSharpness)) ?? d.penTipSharpness
+        let storedSharpness = try? c.decodeIfPresent(Double.self, forKey: .penTipSharpness)
+        let chosen = try? c.decodeIfPresent(Bool.self, forKey: .penTipSharpnessChosen)
+        if let storedSharpness, chosen == true || (chosen == nil && storedSharpness != Self.legacyDefaultTipSharpness) {
+            penTipSharpness = storedSharpness
+            penTipSharpnessChosen = true
+        } else {
+            penTipSharpness = d.penTipSharpness
+        }
         penPressureSensitivity = (try? c.decodeIfPresent(Double.self, forKey: .penPressureSensitivity)) ?? d.penPressureSensitivity
         laserMode = (try? c.decodeIfPresent(LaserMode.self, forKey: .laserMode)) ?? d.laserMode
     }
@@ -319,7 +333,12 @@ final class ToolState {
     func setCircleToLasso(_ on: Bool) { update { $0.circleToLasso = on } }
     func setEraseHighlighterOnly(_ on: Bool) { update { $0.eraseHighlighterOnly = on } }
     func setEraserBackToLastTool(_ on: Bool) { update { $0.eraserBackToLastTool = on } }
-    func setPenTipSharpness(_ value: Double) { update { $0.penTipSharpness = value } }
+    func setPenTipSharpness(_ value: Double) {
+        update {
+            $0.penTipSharpness = value
+            $0.penTipSharpnessChosen = true
+        }
+    }
     func setPenPressureSensitivity(_ value: Double) { update { $0.penPressureSensitivity = value } }
     func setLaserMode(_ mode: LaserMode) { update { $0.laserMode = mode } }
 

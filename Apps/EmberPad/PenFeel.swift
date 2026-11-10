@@ -7,64 +7,101 @@ import PencilKit
 /// committed stroke after the Pencil lifts, the way `StrokeSnap` replaces a
 /// held highlighter stroke.
 ///
-/// Only Tip sharpness ships. Pressure sensitivity is stored so the teacher's
-/// choice is already in place, but nothing reads it yet: rewriting pressure
-/// after lift reflows the whole stroke, which needs device calibration (the
-/// Debug pen feel probe) and the teacher's own judgement first.
+/// The target is GoodNotes' Fountain Pen at Tip Sharpness maximum and
+/// Pressure Sensitivity minimum, the captain's setting, measured from a
+/// screen recording (EP51): a fine, even line about 1 pt wide at the middle
+/// pen width, only slightly thinner on up-right diagonals, that barely swells
+/// with pressure and thins to sharp points over about 9 pt at each end. PencilKit's own
+/// fountain pen is much bolder and its nib follows the Pencil's azimuth (thin
+/// one way, about four times as thick across it), so after lift every point's
+/// width is rebuilt from the pen width, pressure and stroke direction, and its
+/// nib is turned across the stroke so PencilKit draws exactly that width.
 struct PenFeelSettings: Codable, Equatable, Sendable {
-    /// 0 = PencilKit's own round stroke ends, 1 = sharp, pointed ends.
-    var tipSharpness: Double = 0.5
-    /// 0 = "Min", 1 = "Max". Stored for a later package; not applied.
+    /// 0 = blunt ends, 1 = sharp, pointed ends (GoodNotes' maximum).
+    var tipSharpness: Double = 1
+    /// 0 = "Min" (pressure barely changes the width), 1 = "Max".
     var pressureSensitivity: Double = 0
-
-    /// Round ends: PencilKit's stroke, untouched.
-    var isIdentity: Bool { tipSharpness <= 0 }
 }
 
 enum PenFeel {
     /// The popover's slider: 0…100% in quarter steps, five ticks.
     static let sliderStep = 0.25
 
-    /// PencilKit's committed renderer draws almost nothing for a point size
-    /// at or below about 2 (EP pen feel scout, E1b: rendered thickness is
-    /// roughly 2 × (size − 2) pt). The taper shrinks only the part of each
-    /// size above this floor, so a tapered end thins to a hairline instead of
-    /// vanishing. Simulator-measured; the Debug pen feel probe records the
-    /// device's real sizes to confirm it.
-    static let visibilityFloor: CGFloat = 2.25
+    // MARK: Width
 
-    /// A stroke shorter than this many median widths keeps its ends round, so
-    /// dots, arrowheads, charges and decimal points survive.
-    static let shortStrokeWidths: CGFloat = 3
+    /// Drawn width, in page points, of a stroke at average pressure moving in
+    /// the nib's thickest direction, per point of pen width: the middle width
+    /// (2.5) draws about 1 pt, as GoodNotes does at the captain's setting.
+    static let widthPerToolWidth: CGFloat = 0.40
 
-    /// At 100% sharpness the tip keeps this share of the size above the floor.
-    static let sharpestTip: CGFloat = 0.08
+    /// The thinnest line PencilKit is asked to draw, in points, so a pointed
+    /// tip never disappears.
+    static let hairline: CGFloat = 0.1
 
-    /// How far from each end the taper reaches, in points, for a stroke whose
-    /// median point size is `width`.
-    static func taperLength(width: CGFloat, sharpness: Double) -> CGFloat {
-        CGFloat(clamped(sharpness)) * max(6 * width, 8)
+    /// The nib's thinnest stroke direction, in page coordinates (y down): up
+    /// and to the right, 65° above the horizontal.
+    static let thinDirection: CGFloat = -65 * .pi / 180
+    /// Width along `thinDirection` relative to the width across it. GoodNotes'
+    /// fountain pen varies only mildly with direction.
+    static let thinRatio: CGFloat = 0.85
+
+    /// The PencilKit point size that draws a line `width` points wide when the
+    /// fountain pen's nib lies across the stroke. The committed renderer draws
+    /// 2 × (size − 2) points there (measured in the Simulator for EP51).
+    static func pencilKitSize(forWidth width: CGFloat) -> CGFloat { 2 + max(width, hairline) / 2 }
+
+    /// The nib's width factor for a stroke moving at `direction` (radians,
+    /// page coordinates): `thinRatio` along `thinDirection`, 1 across it.
+    static func nibFactor(direction: CGFloat) -> CGFloat {
+        let a = direction - thinDirection
+        return sqrt(sin(a) * sin(a) + thinRatio * thinRatio * cos(a) * cos(a))
     }
 
-    /// The size multiplier at `distance` points from the nearer stroke end:
-    /// 1 everywhere at sharpness 0, falling smoothly to `sharpestTip`-ish at
-    /// the very end as sharpness rises. `length` overrides the reach.
+    /// The width factor for Pencil `force` (1 = an average touch). At Min the
+    /// exponent is small, so pressure reduces but does not remove the change,
+    /// as GoodNotes describes its Min. A missing force (0) counts as average.
+    static func pressureFactor(force: CGFloat, sensitivity: Double) -> CGFloat {
+        guard force > 0 else { return 1 }
+        let exponent = 0.35 + 1.15 * CGFloat(clamped(sensitivity))
+        let factor = pow(min(max(force, 0.05), 4), exponent)
+        // Bounded, so an unexpected force scale can neither make the line vanish nor make it swell.
+        let s = CGFloat(clamped(sensitivity))
+        return min(max(factor, 0.65 - 0.35 * s), 1.45 + 1.55 * s)
+    }
+
+    // MARK: Tips
+
+    /// How far from each end the taper reaches at 100% sharpness, in widths.
+    static let taperWidths: CGFloat = 9
+
+    /// At 100% sharpness the very tip keeps this share of the stroke's width.
+    static let sharpestTip: CGFloat = 0.25
+
+    /// A stroke shorter than this many widths keeps blunt ends, so dots,
+    /// decimal points and charges stay round.
+    static let shortStrokeWidths: CGFloat = 3
+
+    /// How far from each end the taper reaches, in points, for a stroke whose
+    /// width is `width`.
+    static func taperLength(width: CGFloat, sharpness: Double) -> CGFloat {
+        CGFloat(clamped(sharpness)) * taperWidths * width
+    }
+
+    /// The width multiplier at `distance` points from the nearer stroke end:
+    /// 1 everywhere at sharpness 0; at 100% it rises from `sharpestTip` at the
+    /// end, quickly at first and then gently, as GoodNotes' tips do.
+    /// `length` overrides the reach.
     static func taperFactor(distanceFromEnd distance: CGFloat, width: CGFloat, sharpness: Double,
                             length: CGFloat? = nil) -> CGFloat {
         let reach = length ?? taperLength(width: width, sharpness: sharpness)
         guard reach > 0 else { return 1 }
         let tip = 1 - (1 - sharpestTip) * CGFloat(clamped(sharpness))
         let t = min(max(distance / reach, 0), 1)
-        let ease = t * t * (3 - 2 * t)
+        let ease = 1 - (1 - t) * (1 - t)
         return tip + (1 - tip) * ease
     }
 
-    /// `size` scaled by `factor` above the visibility floor. A size already at
-    /// or under the floor is left as recorded, so the taper never thickens ink.
-    static func taperedSize(_ size: CGFloat, factor: CGFloat) -> CGFloat {
-        guard size > visibilityFloor else { return size }
-        return visibilityFloor + (size - visibilityFloor) * factor
-    }
+    // MARK: Geometry
 
     static func arcLengths(_ points: [CGPoint]) -> [CGFloat] {
         guard !points.isEmpty else { return [] }
@@ -76,36 +113,98 @@ enum PenFeel {
         return along
     }
 
-    static func median(_ values: [CGFloat]) -> CGFloat {
-        let sorted = values.sorted()
-        return sorted.isEmpty ? 0 : sorted[sorted.count / 2]
+    /// Each point's stroke axis, in radians: the doubled-angle average of the
+    /// segments within `window` points either side, so a sharp turn or a
+    /// hairpin keeps one axis instead of averaging to nothing. The result is
+    /// unwrapped so neighbouring axes never differ by more than 90°. Nil for a
+    /// stroke that never moves.
+    static func axes(_ points: [CGPoint], along: [CGFloat], window: CGFloat = 1.5) -> [CGFloat]? {
+        guard points.count > 1 else { return nil }
+        var result: [CGFloat] = []
+        result.reserveCapacity(points.count)
+        var previous: CGFloat?
+        for i in points.indices {
+            var x: CGFloat = 0, y: CGFloat = 0
+            var j = i
+            while j > 0, along[i] - along[j - 1] <= window || j == i { addSegment(points, j - 1, &x, &y); j -= 1 }
+            j = i
+            while j < points.count - 1, along[j + 1] - along[i] <= window || j == i { addSegment(points, j, &x, &y); j += 1 }
+            var axis: CGFloat
+            if x == 0, y == 0 {
+                guard let previous else { result.append(.nan); continue }
+                axis = previous
+            } else {
+                axis = atan2(y, x) / 2
+            }
+            if let previous {
+                while axis - previous > .pi / 2 { axis -= .pi }
+                while axis - previous < -.pi / 2 { axis += .pi }
+            }
+            previous = axis
+            result.append(axis)
+        }
+        guard let first = result.first(where: { !$0.isNaN }) else { return nil }
+        return result.map { $0.isNaN ? first : $0 }
     }
 
-    /// The committed stroke with tapered ends: same ink, transform, locations,
-    /// timing, force, azimuth, altitude, creation date and random seed; only
-    /// each point's size changes. Nil when nothing would change: round tips
-    /// (0%), a stroke the eraser has already cut, a single-point dot, or a
-    /// stroke shorter than `shortStrokeWidths` median widths.
-    static func reshaped(_ stroke: PKStroke, settings: PenFeelSettings) -> PKStroke? {
-        guard !settings.isIdentity, stroke.mask == nil else { return nil }
+    private static func addSegment(_ points: [CGPoint], _ i: Int, _ x: inout CGFloat, _ y: inout CGFloat) {
+        let dx = points[i + 1].x - points[i].x, dy = points[i + 1].y - points[i].y
+        let length = hypot(dx, dy)
+        guard length > 0 else { return }
+        let angle = atan2(dy, dx)
+        // Weighted by length, so a dense cluster of samples does not outvote the stroke.
+        x += length * cos(2 * angle)
+        y += length * sin(2 * angle)
+    }
+
+    /// A centred moving average over `radius` points either side.
+    static func smoothed(_ values: [CGFloat], radius: Int = 2) -> [CGFloat] {
+        guard values.count > 2, radius > 0 else { return values }
+        return values.indices.map { i in
+            let lo = max(0, i - radius), hi = min(values.count - 1, i + radius)
+            return values[lo...hi].reduce(0, +) / CGFloat(hi - lo + 1)
+        }
+    }
+
+    // MARK: Reshape
+
+    /// The committed stroke as GoodNotes' fountain pen would draw it: same
+    /// ink, transform, locations, timing, force, altitude, opacity, creation
+    /// date and random seed; each point's size and nib angle are rebuilt from
+    /// `toolWidth` (the pen width it was drawn with), its force, the stroke's
+    /// direction and the tip taper. Nil for a stroke the eraser has already
+    /// cut, or when nothing would change.
+    static func reshaped(_ stroke: PKStroke, settings: PenFeelSettings, toolWidth: CGFloat) -> PKStroke? {
+        guard stroke.mask == nil, toolWidth > 0 else { return nil }
         let path = Array(stroke.path)
-        guard path.count > 1 else { return nil }
-        let width = median(path.map { $0.size.width })
-        let along = arcLengths(path.map(\.location))
+        guard !path.isEmpty else { return nil }
+        let width = widthPerToolWidth * toolWidth
+        let locations = path.map(\.location)
+        let along = arcLengths(locations)
         let total = along.last ?? 0
-        guard width > 0, total >= shortStrokeWidths * width else { return nil }
-        // Each end tapers over at most a third of the stroke, so the middle keeps its full width.
-        let reach = min(taperLength(width: width, sharpness: settings.tipSharpness), total / 3)
+        let axes = axes(locations, along: along)
+        let forces = smoothed(path.map(\.force))
+        // Short strokes (dots, decimal points, charges) keep blunt ends. Longer
+        // ones taper over at most half their length from each end.
+        let tapers = total >= shortStrokeWidths * width
+        let reach = min(taperLength(width: width, sharpness: settings.tipSharpness), total / 2)
+        let averageNib = (1 + thinRatio) / 2
         var changed = false
         let points = path.indices.map { i -> PKStrokePoint in
             let p = path[i]
-            let factor = taperFactor(distanceFromEnd: min(along[i], total - along[i]), width: width,
+            var drawn = width * pressureFactor(force: forces[i], sensitivity: settings.pressureSensitivity)
+            drawn *= axes.map { nibFactor(direction: $0[i]) } ?? averageNib
+            if tapers {
+                drawn *= taperFactor(distanceFromEnd: min(along[i], total - along[i]), width: width,
                                      sharpness: settings.tipSharpness, length: reach)
-            let size = CGSize(width: taperedSize(p.size.width, factor: factor),
-                              height: taperedSize(p.size.height, factor: factor))
-            if size != p.size { changed = true }
+            }
+            let side = pencilKitSize(forWidth: drawn)
+            // The nib lies across the stroke, where PencilKit draws the full size.
+            let azimuth = axes.map { $0[i] + .pi / 2 } ?? p.azimuth
+            let size = CGSize(width: side, height: side)
+            if size != p.size || abs(azimuth - p.azimuth) > 1e-3 { changed = true }
             return PKStrokePoint(location: p.location, timeOffset: p.timeOffset, size: size, opacity: p.opacity,
-                                 force: p.force, azimuth: p.azimuth, altitude: p.altitude,
+                                 force: p.force, azimuth: azimuth, altitude: p.altitude,
                                  secondaryScale: p.secondaryScale)
         }
         guard changed else { return nil }

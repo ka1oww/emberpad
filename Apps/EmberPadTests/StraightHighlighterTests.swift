@@ -325,6 +325,12 @@ final class StraightHighlighterTests: XCTestCase {
         XCTAssertEqual(stroke.ink.inkType, .fountainPen, "the pen line keeps its ink")
         XCTAssertTrue(Array(stroke.path).allSatisfy { abs($0.location.y - 220) < 1e-6 }, "the held pen line lies flat")
         XCTAssertEqual(Array(try XCTUnwrap(session.drawing(on: 0).strokes.last).path).last?.location, CGPoint(x: 400, y: 220))
+        // The straight line takes the pen feel too: as fine as the handwriting, with pointed ends (EP51).
+        let points = Array(stroke.path)
+        let middle = points[points.count / 2], end = try XCTUnwrap(points.last)
+        XCTAssertLessThan(middle.size.width, 2.8, "drawn about 1 pt wide, not at the written size 3")
+        XCTAssertEqual(middle.azimuth.truncatingRemainder(dividingBy: .pi), .pi / 2, accuracy: 0.01, "the nib lies across the line")
+        XCTAssertLessThan(end.size.width, middle.size.width, "the end is pointed")
     }
 
     func testUnheldCurvedOrSwitchedOffPenStrokesStayAsWritten() async throws {
