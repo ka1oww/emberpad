@@ -6,7 +6,7 @@ import EmberSyncKit
 @testable import EmberPad
 
 /// EP54 proof: the real library and editor in the app's main scene, with a synthetic worksheet,
-/// showing the slate-blue header and the tool row in portrait and landscape, light and dark.
+/// showing the Ember-coloured header (EP57) and the tool row in portrait and landscape, light and dark.
 /// Screenshots are attached and written to the test host's temporary directory.
 ///
 /// Set `EP54_HOLD_SECONDS` in the test runner's environment (`TEST_RUNNER_EP54_HOLD_SECONDS`) to
@@ -42,7 +42,7 @@ final class WorksheetHeaderScreenshotTests: XCTestCase {
                              credential: { nil }, defaults: defaults),
             signingExpiryDate: Date().addingTimeInterval(30 * 86_400), thumbnailCache: nil,
             lastWorksheet: LastWorksheet(defaults: defaults))
-        let host = HeaderStatusBarHostingController(rootView: view, presentation: presentation)
+        let host = UIHostingController(rootView: view)
         let window = try makeWindow()
         window.rootViewController = host
 
@@ -51,9 +51,6 @@ final class WorksheetHeaderScreenshotTests: XCTestCase {
         let session = try XCTUnwrap(library.liveSession(for: record.id))
         session.update(PKDrawing(strokes: [Self.stroke(from: CGPoint(x: 90, y: 250), to: CGPoint(x: 470, y: 260))]), page: 0)
         await pause(1.0)
-        await wait { presentation.headerUnderStatusBar }
-        XCTAssertTrue(presentation.headerUnderStatusBar, "the open worksheet's header sits under a white status bar")
-        XCTAssertEqual(host.preferredStatusBarStyle, .lightContent)
 
         try await saveBothStyles(window, "portrait")
 

@@ -85,7 +85,6 @@ struct LibraryView: View {
         }
         .onAppear { columns.sizeClassChanged(to: horizontalSizeClass) }
         .onChange(of: horizontalSizeClass) { _, sizeClass in columns.sizeClassChanged(to: sizeClass) }
-        .onChange(of: columns.headerUnderStatusBar, initial: true) { _, under in presentation.headerUnderStatusBar = under }
         .onChange(of: library.sidebarSelection) { _, new in
             if case .subject(let name) = new { library.selectedSubject = name }
             else if new == .allSubjects { library.selectedSubject = nil }
@@ -433,10 +432,6 @@ struct LibraryColumnState: Equatable {
         guard isWorksheetOpen else { return }
         visibility = visibility == .detailOnly ? .all : .detailOnly
     }
-
-    /// The worksheet's slate-blue header reaches the status bar only while it has the
-    /// whole width; with the sidebar beside it the status bar keeps the system style.
-    var headerUnderStatusBar: Bool { isWorksheetOpen && visibility == .detailOnly }
 
     mutating func worksheetClosed() {
         guard isWorksheetOpen else { return }
