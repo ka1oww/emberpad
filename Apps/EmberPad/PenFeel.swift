@@ -7,8 +7,9 @@ import UIKit
 ///
 /// The target is GoodNotes' Fountain Pen at Tip Sharpness maximum and
 /// Pressure Sensitivity minimum, the captain's setting, measured from a
-/// screen recording (EP51): a fine, even line about 1 pt wide at the middle
-/// pen width, only slightly thinner on up-right diagonals, that barely swells
+/// screen recording (EP51) and re-measured on the iPad (EP60): a fine, even,
+/// pure-black line about 1.2 pt wide at the middle pen width, as wide in every
+/// direction at Pressure Min (slightly thinner up-right at Max), that barely swells
 /// with pressure and thins to sharp points over about 9 pt at each end. PencilKit's own
 /// fountain pen is much bolder and its nib follows the Pencil's azimuth (thin
 /// one way, about four times as thick across it), so every point's width is
@@ -76,8 +77,9 @@ enum PenFeel {
 
     /// Drawn width, in page points, of a stroke at average pressure moving in
     /// the nib's thickest direction, per point of pen width: the middle width
-    /// (2.5) draws about 1 pt, as GoodNotes does at the captain's setting.
-    static let widthPerToolWidth: CGFloat = 0.40
+    /// (2.5) draws about 1.22 pt, as GoodNotes' 0.3 mm does at the captain's
+    /// setting (measured on the iPad for EP60).
+    static let widthPerToolWidth: CGFloat = 0.51
 
     /// The thinnest line PencilKit is asked to draw, in points, so a pointed
     /// tip never disappears.
@@ -86,9 +88,19 @@ enum PenFeel {
     /// The nib's thinnest stroke direction, in page coordinates (y down): up
     /// and to the right, 65° above the horizontal.
     static let thinDirection: CGFloat = -65 * .pi / 180
-    /// Width along `thinDirection` relative to the width across it. GoodNotes'
-    /// fountain pen varies only mildly with direction.
+    /// Width along `thinDirection` relative to the width across it at
+    /// Pressure Sensitivity Max. GoodNotes' fountain pen varies only mildly
+    /// with direction.
     static let thinRatio: CGFloat = 0.85
+    /// The same ratio at Pressure Sensitivity Min, the captain's setting: there
+    /// GoodNotes' line is even in every direction (within 4%, measured for EP60).
+    static let minThinRatio: CGFloat = 0.96
+
+    /// The nib's `thinRatio` at `sensitivity`: `minThinRatio` at Min, rising
+    /// linearly to `thinRatio` at Max.
+    static func thinRatio(sensitivity: Double) -> CGFloat {
+        minThinRatio + (thinRatio - minThinRatio) * CGFloat(clamped(sensitivity))
+    }
 
     /// The PencilKit point size that draws a line `width` points wide when the
     /// fountain pen's nib lies across the stroke. The committed renderer draws
@@ -96,10 +108,12 @@ enum PenFeel {
     static func pencilKitSize(forWidth width: CGFloat) -> CGFloat { 2 + max(width, hairline) / 2 }
 
     /// The nib's width factor for a stroke moving at `direction` (radians,
-    /// page coordinates): `thinRatio` along `thinDirection`, 1 across it.
-    static func nibFactor(direction: CGFloat) -> CGFloat {
+    /// page coordinates): the nib's thin ratio at `sensitivity` along
+    /// `thinDirection`, 1 across it.
+    static func nibFactor(direction: CGFloat, sensitivity: Double) -> CGFloat {
+        let ratio = thinRatio(sensitivity: sensitivity)
         let a = direction - thinDirection
-        return sqrt(sin(a) * sin(a) + thinRatio * thinRatio * cos(a) * cos(a))
+        return sqrt(sin(a) * sin(a) + ratio * ratio * cos(a) * cos(a))
     }
 
     /// The width factor for Pencil `force` (1 = an average touch). At Min the
@@ -116,15 +130,18 @@ enum PenFeel {
 
     // MARK: Tips
 
-    /// How far from each end the taper reaches at 100% sharpness, in widths.
-    static let taperWidths: CGFloat = 9
+    /// How far from each end the taper reaches at 100% sharpness, in widths:
+    /// 9 pt at the middle pen width (3.6 pt per point of pen width), as before
+    /// EP60 widened the line, so the tips keep their length.
+    static let taperWidths: CGFloat = 3.6 / widthPerToolWidth
 
     /// At 100% sharpness the very tip keeps this share of the stroke's width.
     static let sharpestTip: CGFloat = 0.25
 
     /// A stroke shorter than this many widths keeps blunt ends, so dots,
-    /// decimal points and charges stay round.
-    static let shortStrokeWidths: CGFloat = 3
+    /// decimal points and charges stay round: 3 pt at the middle pen width
+    /// (1.2 pt per point of pen width), as before EP60.
+    static let shortStrokeWidths: CGFloat = 1.2 / widthPerToolWidth
 
     /// How far from each end the taper reaches, in points, for a stroke whose
     /// width is `width`.
@@ -240,11 +257,11 @@ enum PenFeel {
         // The start tip reaches its full length whatever the stroke's length; the end tip at most half the stroke.
         let reach = taperLength(width: width, sharpness: settings.tipSharpness)
         let endReach = min(reach, total / 2)
-        let averageNib = (1 + thinRatio) / 2
+        let averageNib = (1 + thinRatio(sensitivity: settings.pressureSensitivity)) / 2
         return path.indices.map { i -> PKStrokePoint in
             let p = path[i]
             var drawn = width * pressureFactor(force: forces[i], sensitivity: settings.pressureSensitivity)
-            drawn *= axes.map { nibFactor(direction: $0[i]) } ?? averageNib
+            drawn *= axes.map { nibFactor(direction: $0[i], sensitivity: settings.pressureSensitivity) } ?? averageNib
             if sharpness > 0 {
                 var tip = taperFactor(distanceFromEnd: along[i], width: width, sharpness: sharpness, length: reach)
                 if lifted {

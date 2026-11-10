@@ -93,8 +93,12 @@ struct ToolSettings: Codable, Equatable, Sendable {
     static let legacyDefaultTipSharpness = 0.5
 
     /// The design's ink hex values (section 3), which the `pen*` and
-    /// `highlighter*` colour sets approximate to three decimals.
-    static let defaultPenColors = ["1B1B1B", "1E3A8A", "B23A2E"]
+    /// `highlighter*` colour sets approximate to three decimals. Black is pure
+    /// black, as GoodNotes' black swatch is (EP60).
+    static let defaultPenColors = ["000000", "1E3A8A", "B23A2E"]
+    /// The default black before EP60. A stored pen preset of exactly this colour
+    /// decodes as today's black, so existing settings follow the new default.
+    static let legacyDefaultPenBlack = "1B1B1B"
     static let defaultHighlighterColors = ["FACC15", "4ADE80", "F472B6"]
 
     init() {}
@@ -104,7 +108,9 @@ struct ToolSettings: Codable, Equatable, Sendable {
         let d = ToolSettings()
         current = (try? c.decodeIfPresent(WorksheetTool.self, forKey: .current)) ?? d.current
         previous = (try? c.decodeIfPresent(WorksheetTool.self, forKey: .previous)) ?? d.previous
-        penColors = (try? c.decodeIfPresent([String].self, forKey: .penColors)) ?? d.penColors
+        penColors = ((try? c.decodeIfPresent([String].self, forKey: .penColors)) ?? d.penColors).map {
+            $0.caseInsensitiveCompare(Self.legacyDefaultPenBlack) == .orderedSame ? d.penColors[0] : $0
+        }
         penColorIndex = (try? c.decodeIfPresent(Int.self, forKey: .penColorIndex)) ?? d.penColorIndex
         penWidthIndex = (try? c.decodeIfPresent(Int.self, forKey: .penWidthIndex)) ?? d.penWidthIndex
         highlighterColors = (try? c.decodeIfPresent([String].self, forKey: .highlighterColors)) ?? d.highlighterColors
