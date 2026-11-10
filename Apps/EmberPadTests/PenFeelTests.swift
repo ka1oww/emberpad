@@ -240,7 +240,7 @@ final class PenFeelTests: XCTestCase {
                        "the line carries its full width of ink")
     }
 
-    func testThePenWritesAThinMonolineThatTakesTheFountainPenFeelOnLift() throws {
+    func testThePensMonolineInputIsReshapedInTheFountainPenInk() throws {
         var live = Self.line(length: 300, size: 2.5)
         live.ink = PKInk(PenFeel.liveInkType, color: .emberPenBlack)
         let reshaped = try XCTUnwrap(PenFeel.reshaped(live, settings: PenFeelSettings(tipSharpness: 1), toolWidth: 2.5))
@@ -254,7 +254,8 @@ final class PenFeelTests: XCTestCase {
                      "other pens are not the pen's")
     }
 
-    func testTheLiveLineIsAsWideAsTheLiftedStrokeAtEveryPenWidth() throws {
+    func testTheMonolineToolIsAsWideAsTheLiftedStrokeAtEveryPenWidth() throws {
+        // The student view's provisional line takes this width, as would a stroke left in the monoline ink (EP56).
         for penWidth in Theme.penWidths {
             let tool = PenFeel.liveTool(color: .emberPenBlack, penWidth: penWidth)
             XCTAssertEqual(tool.inkType, .monoline)

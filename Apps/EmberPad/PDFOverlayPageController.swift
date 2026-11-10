@@ -22,6 +22,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     let liveInk = LiveInkRecognizer()
     /// The page and style of the stroke `liveInk` is tracking, fixed at pen-down.
     private var liveStroke: (page: Int, style: LiveInkStyle)?
+    /// EP56: the pen's strokes drawn on this iPad as they will look after lift, from pen-down until the page has
+    /// drawn their committed ink. Internal for tests.
+    private(set) var livePen = LivePenStrokes()
+    /// The clock the live pen's timeouts run by. Internal so tests can move it.
+    var livePenClock: () -> TimeInterval = { CACurrentMediaTime() }
+    private var livePenExpiry: DispatchWorkItem?
     /// P6: the laser pointer's Pencil input, on while the laser is chosen. Internal for tests.
     let laser = LaserPointerRecognizer()
     /// The laser dot on this iPad, above the pages. Internal for tests.
@@ -169,6 +175,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         viewportThrottle.cancel()
         liveStroke = nil
         student.cancelLiveStroke()
+        livePen.cancel()
         hideLaser(animated: false)
         clearLaserTrail()
     }
@@ -222,6 +229,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let index = session.pdf.index(for: page)
         if highlighterErase?.canvas === canvas { finishHighlighterErase() }
         inkSelection.canvasWillLeave(canvas)
+        livePen.remove(page: index)
         if canvases[index] === canvas {
             canvases.removeValue(forKey: index)
             pageViews.removeValue(forKey: index)
@@ -241,29 +249,45 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let previousCount = session.drawing(on: page).strokes.count
         inkSelection.pageDidChange(page)
         session.update(canvasView.drawing, page: page)
-        if !straightenIfHeld(canvasView, page: page, previousCount: previousCount) {
-            applyPenFeel(canvasView, page: page, previousCount: previousCount)
-        }
+        let taken = straightenIfHeld(canvasView, page: page, previousCount: previousCount)
+        applyPenFeel(canvasView, page: page, previousCount: previousCount, taken: taken)
     }
 
-    /// After PencilKit commits a new pen stroke, swaps it for the same stroke
-    /// drawn with the GoodNotes-style pen feel (`PenFeel`: width, nib, tip
-    /// sharpness and a fresh fountain-pen ink), as one undo step named "Ink",
-    /// the same way the straight highlighter swaps its line. The live ink was
-    /// PencilKit's own thin monoline; the stroke takes its tips after lift.
-    private func applyPenFeel(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
+    /// After PencilKit commits a new pen stroke, swaps it, as one undo step named "Ink", for the stroke the live pen
+    /// drew from the same Pencil samples (`LivePen`), now with its end tip; the same way the straight highlighter swaps
+    /// its line. PencilKit's own ink for it was never seen. Without live samples for it, the committed points take the
+    /// pen feel instead (`PenFeel.reshaped`). A stroke already `taken` (snapped straight or turned into a lasso)
+    /// only leaves the live pen once the page has drawn it.
+    private func applyPenFeel(_ canvas: PKCanvasView, page: Int, previousCount: Int, taken: Bool) {
         guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
-              PenFeel.isPenInk(stroke.ink.inkType),
-              let reshaped = PenFeel.reshaped(stroke, settings: tools.settings.penFeel,
-                                              toolWidth: tools.settings.penWidth) else { return }
+              PenFeel.isPenInk(stroke.ink.inkType) else { return }
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         // Undo and redo bring strokes back exactly as they were, never tapered twice.
         guard undoManager?.isUndoing != true, undoManager?.isRedoing != true else { return }
         let count = canvas.drawing.strokes.count
+        let settings = tools.settings
+        // A turn of the run loop later, as the snaps: PencilKit closes its undo group first, and the live pen has
+        // seen the lift, which can reach it just after the commit.
         DispatchQueue.main.async { [weak self] in
-            self?.replaceNewestStroke(page: page, strokeCount: count, with: reshaped, undoManager: undoManager,
-                                      actionName: "Ink")
+            guard let self else { return }
+            let live = self.livePen.commit(page: page, now: self.livePenClock())
+            self.scheduleLivePenExpiry()
+            guard !taken else { return }
+            let replacement = live?.stroke(lifted: true, creationDate: stroke.path.creationDate)
+                ?? PenFeel.reshaped(stroke, settings: settings.penFeel, toolWidth: settings.penWidth,
+                                    color: settings.penColor)
+            guard let replacement else { return }
+            self.replaceNewestStroke(page: page, strokeCount: count, with: replacement, undoManager: undoManager,
+                                     actionName: "Ink")
         }
+    }
+
+    /// The page drew its ink: the live pen's committed strokes there are now on the page itself.
+    func canvasViewDidFinishRendering(_ canvasView: PKCanvasView) {
+        guard let page = canvases.first(where: { $0.value === canvasView })?.key,
+              livePen.strokes.contains(where: { $0.page == page && $0.committedAt != nil }) else { return }
+        livePen.rendered(page: page)
+        showLivePen(page: page)
     }
 
     func undo() { activeCanvas?.undoManager?.undo() }
@@ -372,9 +396,19 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// focused, or the tool is an eraser or the lasso. Touch type is already filtered by the recogniser, so fingers
     /// never get here.
     private func liveInkCanvas(for touch: UITouch) -> UIView? {
+        guard let canvas = activeCanvas else {
+            liveStroke = nil
+            return nil
+        }
+        return liveInkTarget(at: touch.location(in: canvas.pageSpace), on: canvas)
+    }
+
+    /// The page space a Pencil stroke starting at `point` (in `canvas`'s page space) inks, which fixes the stroke's
+    /// page and style; nil for anything that will not ink. Internal for tests, which have no touches.
+    func liveInkTarget(at point: CGPoint, on canvas: PKCanvasView) -> UIView? {
         liveStroke = nil
-        guard publishing, let canvas = activeCanvas, canvas.drawingGestureRecognizer.isEnabled,
-              canvas.pageSpace.bounds.contains(touch.location(in: canvas.pageSpace)),
+        guard publishing, canvas === activeCanvas, canvas.drawingGestureRecognizer.isEnabled,
+              canvas.pageSpace.bounds.contains(point),
               let page = canvases.first(where: { $0.value === canvas })?.key,
               let style = LiveInkStyle(tool: canvas.tool) else { return nil }
         liveStroke = (page, style)
@@ -384,20 +418,61 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// Samples arrive in the canvas's page space, which is the page's ink space.
     private func liveInkEvent(_ event: LiveInkRecognizer.Event) {
         switch event {
-        case .began(let points):
+        case .began(let samples):
             guard let liveStroke else { return }
-            student.beginLiveStroke(session: session, pageIndex: liveStroke.page, style: liveStroke.style, points: points)
-        case .moved(let points, let predicted):
-            guard liveStroke != nil else { return }
-            student.extendLiveStroke(points: points, predicted: predicted)
-        case .ended(let points):
-            guard liveStroke != nil else { return }
-            liveStroke = nil
-            student.endLiveStroke(session: session, points: points)
+            student.beginLiveStroke(session: session, pageIndex: liveStroke.page, style: liveStroke.style,
+                                    points: samples.map(\.location))
+            if tools.current == .pen {
+                let settings = tools.settings
+                livePen.begin(page: liveStroke.page, color: settings.penColor, toolWidth: settings.penWidth,
+                              settings: settings.penFeel, samples: samples, now: livePenClock())
+                showLivePen(page: liveStroke.page)
+            }
+        case .moved(let samples, let predicted):
+            guard let liveStroke else { return }
+            student.extendLiveStroke(points: samples.map(\.location), predicted: predicted.map(\.location))
+            if livePen.writing != nil {
+                livePen.extend(samples: samples, predicted: predicted)
+                showLivePen(page: liveStroke.page)
+            }
+        case .ended(let samples):
+            guard let liveStroke else { return }
+            self.liveStroke = nil
+            student.endLiveStroke(session: session, points: samples.map(\.location))
+            if livePen.writing != nil {
+                livePen.lift(samples: samples, now: livePenClock())
+                showLivePen(page: liveStroke.page)
+                scheduleLivePenExpiry()
+            }
         case .cancelled:
+            let page = liveStroke?.page
             liveStroke = nil
             student.cancelLiveStroke()
+            if livePen.writing != nil {
+                livePen.cancel()
+                if let page { showLivePen(page: page) }
+            }
         }
+    }
+
+    /// Draws the live pen's strokes on `page` above its committed ink.
+    private func showLivePen(page: Int) {
+        (canvases[page]?.superview as? PageInkView)?.showLivePen(livePen.drawing(page: page))
+    }
+
+    /// Clears live strokes whose commit or page drawing never came, once they are due.
+    private func scheduleLivePenExpiry() {
+        livePenExpiry?.cancel()
+        guard !livePen.isEmpty else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let pages = self.livePen.pages
+            self.livePen.expire(now: self.livePenClock())
+            pages.forEach { self.showLivePen(page: $0) }
+            self.scheduleLivePenExpiry()
+        }
+        livePenExpiry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + LivePenStrokes.timeout / 2, execute: work)
     }
 
     // MARK: Laser pointer (P6)
@@ -642,6 +717,9 @@ extension PDFOverlayPageController {
         }
         liveStroke = nil
         student.cancelLiveStroke()
+        // The press's stroke is never committed, so it leaves the live pen too.
+        livePen.cancel()
+        showLivePen(page: page)
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         return inkSelection.lassoNewestStroke(page: page, strokeCount: count, undoManager: undoManager)
     }
@@ -685,7 +763,8 @@ extension PDFOverlayPageController {
               snapsStraight(stroke, held: held, lineLike: lineLike), var straight = StrokeSnap.straightened(stroke) else { return false }
         if PenFeel.isPenInk(straight.ink.inkType) {
             // A held pen line takes the same pen feel as the handwriting around it, in the same one swap.
-            straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth) ?? straight
+            straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth,
+                                        color: tools.settings.penColor) ?? straight
         }
         let count = canvas.drawing.strokes.count
         let undoManager = canvas.undoManager
@@ -894,3 +973,4 @@ private final class LaserTrailTicker: NSObject {
         controller.tickLaserTrail()
     }
 }
+

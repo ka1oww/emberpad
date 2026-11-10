@@ -113,10 +113,11 @@ final class ThemeTokenTests: XCTestCase {
 
     func testDefaultPencilToolsUseInkTokens() throws {
         let defaults = ToolSettings()
-        // The pen writes live as a thin monoline and takes the fountain-pen feel on lift (EP53).
+        // PencilKit takes the pen's input in a clear monoline; the live pen draws the ink in the pen colour (EP56).
         let pen = try XCTUnwrap(defaults.pencilTool(for: .pen) as? PKInkingTool)
         XCTAssertEqual(pen.inkType, PenFeel.liveInkType)
-        assertEqual(rgba(pen.color, style: .light), hex("#1B1B1B"), "penBlack", "light")
+        assertEqual(rgba(pen.color.withAlphaComponent(1), style: .light), hex("#1B1B1B"), "penBlack", "light")
+        XCTAssertEqual(rgba(pen.color, style: .light)[3], 0, "PencilKit's own pen ink is never seen")
         XCTAssertEqual(pen.width, PenFeel.liveToolWidth(forPenWidth: Theme.penWidths[Theme.penDefaultWidthIndex]))
         XCTAssertEqual(defaults.penWidth, Theme.penWidths[Theme.penDefaultWidthIndex])
 
