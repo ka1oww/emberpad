@@ -200,8 +200,8 @@ final class TeacherCopyCardTests: XCTestCase {
 
     func testHiddenReasonsUseTheDesignCopy() {
         XCTAssertEqual(TeacherCopyCardContent.HiddenReason.capture.text,
-                       "Something is copying the whole iPad screen (not AirPlay to EmberPad's student view).")
-        XCTAssertEqual(TeacherCopyCardContent.HiddenReason.inactive.text, "Hidden while EmberPad isn't the active app.")
+                       "Something is copying the whole iPad screen (not AirPlay to Ember Slate's student view).")
+        XCTAssertEqual(TeacherCopyCardContent.HiddenReason.inactive.text, "Hidden while Ember Slate isn't the active app.")
     }
 
     /// The card lives in the main scene only. The student display model has no answer location, and a Teacher

@@ -168,9 +168,9 @@ enum DeviceChecksTestPDF {
         let renderer = UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: pageSize), format: format)
         return renderer.pdfData { context in
             context.beginPage()
-            drawPage(context, title: "EmberPad device check - synthetic test page 1 of 2 (1x writing trial)")
+            drawPage(context, title: "Ember Slate device check - synthetic test page 1 of 2 (1x writing trial)")
             context.beginPage()
-            drawPage(context, title: "EmberPad device check - synthetic test page 2 of 2 (2x writing trial)")
+            drawPage(context, title: "Ember Slate device check - synthetic test page 2 of 2 (2x writing trial)")
         }
     }
 

@@ -98,9 +98,7 @@ struct LibraryView: View {
         let archivedCount = library.archivedCount
         let totalCount = rows.reduce(0) { $0 + $1.count }
         return List(selection: sidebarSelectionBinding) {
-            Text("EmberPad")
-                .font(.system(size: 28, design: .serif).weight(.semibold))
-                .foregroundStyle(Theme.text)
+            EmberAppMark()
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
             Section {
@@ -206,7 +204,7 @@ struct LibraryView: View {
                 } else if presentation.externalSceneCount > 0 {
                     HStack(spacing: 8) {
                         Image(systemName: "display")
-                        Text("Student display connected. Stay in EmberPad while sharing.")
+                        Text("Student display connected. Stay in Ember Slate while sharing.")
                         Spacer()
                     }
                     .font(Theme.meta)
@@ -681,10 +679,10 @@ private struct SigningDetailBanner: View {
                     Image(systemName: "exclamationmark.triangle")
                     VStack(alignment: .leading, spacing: 4) {
                         if status == .warning {
-                            Text("EmberPad stops opening in 2 days.")
+                            Text("Ember Slate stops opening in 2 days.")
                                 .font(.system(.body, weight: .semibold))
                         } else {
-                            Text("EmberPad stops opening tonight at \(expiry?.formatted(date: .omitted, time: .shortened) ?? "expiry").")
+                            Text("Ember Slate stops opening tonight at \(expiry?.formatted(date: .omitted, time: .shortened) ?? "expiry").")
                                 .font(.system(.body, weight: .semibold))
                         }
                         Text("Keep the iPad on home Wi-Fi near the Mac tonight so it can renew. Your ink is safe either way.")
