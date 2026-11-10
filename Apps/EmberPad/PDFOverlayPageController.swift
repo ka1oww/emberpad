@@ -246,14 +246,14 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         }
     }
 
-    /// After PencilKit commits a new fountain-pen stroke, swaps it for the
-    /// same stroke drawn with the GoodNotes-style pen feel (`PenFeel`: width,
-    /// nib and tip sharpness), as one undo step named "Ink", the same way the
-    /// straight highlighter swaps its line. The live ink was PencilKit's own;
-    /// the stroke takes its final shape after lift.
+    /// After PencilKit commits a new pen stroke, swaps it for the same stroke
+    /// drawn with the GoodNotes-style pen feel (`PenFeel`: width, nib, tip
+    /// sharpness and a fresh fountain-pen ink), as one undo step named "Ink",
+    /// the same way the straight highlighter swaps its line. The live ink was
+    /// PencilKit's own thin monoline; the stroke takes its tips after lift.
     private func applyPenFeel(_ canvas: PKCanvasView, page: Int, previousCount: Int) {
         guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
-              stroke.ink.inkType == .fountainPen,
+              PenFeel.isPenInk(stroke.ink.inkType),
               let reshaped = PenFeel.reshaped(stroke, settings: tools.settings.penFeel,
                                               toolWidth: tools.settings.penWidth) else { return }
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
@@ -683,7 +683,7 @@ extension PDFOverlayPageController {
         }
         guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
               snapsStraight(stroke, held: held, lineLike: lineLike), var straight = StrokeSnap.straightened(stroke) else { return false }
-        if straight.ink.inkType == .fountainPen {
+        if PenFeel.isPenInk(straight.ink.inkType) {
             // A held pen line takes the same pen feel as the handwriting around it, in the same one swap.
             straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth) ?? straight
         }
@@ -702,7 +702,7 @@ extension PDFOverlayPageController {
         switch stroke.ink.inkType {
         case .marker:
             return tools.current == .highlighter && (settings.highlighterAlwaysStraight || (held && settings.straightHighlighter))
-        case .fountainPen:
+        case .fountainPen, PenFeel.liveInkType:
             // Only a stroke already close to a line when held snaps; a held letter,
             // curve or closed loop stays as written (shapes come later).
             return tools.current == .pen && held && lineLike && settings.penDrawAndHold

@@ -82,7 +82,7 @@ final class EraserPhase4Tests: XCTestCase {
         controller.canvasViewDidEndUsingTool(canvas)
         await settle()
         XCTAssertEqual(controller.tools.current, .pen)
-        XCTAssertEqual((canvas.tool as? PKInkingTool)?.inkType, .fountainPen)
+        XCTAssertEqual((canvas.tool as? PKInkingTool)?.inkType, PenFeel.liveInkType)
     }
 
     // MARK: - Erase highlighter only: the merge

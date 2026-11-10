@@ -342,6 +342,26 @@ final class CircleLassoTests: XCTestCase {
         XCTAssertFalse(controller.circleLassoPress(on: canvas, at: CGPoint(x: 376, y: 300)), "a loop selects once")
     }
 
+    func testALoopWrittenWithTheLiveMonolineStillSelectsAfterThePenFeelSwap() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let undo = Self.undoManager(controller)
+        var now: TimeInterval = 1_000
+        controller.inkSelection.clock = { now }
+        let word = Self.penStroke(Self.row(from: 270, to: 330, y: 300))
+        var loop = Self.penStroke(Self.circle(center: CGPoint(x: 300, y: 300), radius: 70, degrees: 350))
+        loop.ink = PKInk(PenFeel.liveInkType, color: .emberPenBlack)
+        Self.commit(PKDrawing(strokes: [word]), on: canvas, controller, undo: undo)
+        Self.commit(PKDrawing(strokes: [word, loop]), on: canvas, controller, undo: undo)
+        await Self.settle()
+        XCTAssertEqual(canvas.drawing.strokes.last?.ink.inkType, .fountainPen, "the lifted loop took the pen feel")
+
+        now += 2
+        XCTAssertTrue(controller.circleLassoPress(on: canvas, at: CGPoint(x: 376, y: 300)))
+        XCTAssertEqual(canvas.drawing.strokes.count, 1, "the loop is not kept as ink")
+        XCTAssertEqual(controller.inkSelection.selection?.indices, [0])
+    }
+
     func testLongPressesThatAreNotOnAFreshLoopLeaveTheInk() async throws {
         let (controller, session) = try await Self.makeController(pages: 1)
         let canvas = try Self.canvas(controller, session, page: 0)

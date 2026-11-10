@@ -6,14 +6,15 @@ import PencilKit
 struct LiveInkStyle: Equatable {
     /// The tool colour as the light-styled page canvas draws it.
     let color: UIColor
-    /// The tool's nominal width in page points. The provisional stroke is uniform; PencilKit's own pressure and tilt
-    /// shaping arrives with the committed drawing on lift.
+    /// The tool's width in page points as the iPad draws it live. The provisional stroke is uniform; PencilKit's own
+    /// pressure and tilt shaping, and the pen's tips, arrive with the committed drawing on lift.
     let width: CGFloat
 
     init?(tool: any PKTool) {
         guard let ink = tool as? PKInkingTool else { return nil }
         color = ink.color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
-        width = ink.width
+        // PencilKit draws a monoline tool (the pen, EP53) twice its width across.
+        width = ink.inkType == .monoline ? 2 * ink.width : ink.width
     }
 }
 
