@@ -147,8 +147,8 @@ enum TeacherCopyCardContent: Equatable {
 
         var text: String {
             switch self {
-            case .capture: "Something is copying the whole iPad screen (not AirPlay to EmberPad's student view)."
-            case .inactive: "Hidden while EmberPad isn't the active app."
+            case .capture: "Something is copying the whole iPad screen (not AirPlay to Ember Slate's student view)."
+            case .inactive: "Hidden while Ember Slate isn't the active app."
             }
         }
     }

@@ -1,5 +1,7 @@
 # EmberPad
 
+The iPad app shows itself to users as **Ember Slate** (home-screen name and in-app text); the library header shows the Ember star mark alone; the project, targets, bundle IDs and paths keep the EmberPad name.
+
 Base code for a personal offline iPad teaching app. The Ember House colour tokens, reusable type styles, original app and Companion artwork, and branded launch background, the phase-1 library screen, the initial worksheet chrome and the toolbar strip are in place; the teacher's on-device decisions are still pending. This is a development scaffold, not yet a classroom-ready release.
 
 ## Layout

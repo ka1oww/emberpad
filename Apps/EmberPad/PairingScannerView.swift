@@ -49,7 +49,7 @@ struct PairingScannerSheet: View {
             case .notDetermined:
                 placeholder("camera", "Waiting for camera access…")
             case .denied:
-                placeholder("camera.badge.ellipsis", "Allow camera access for EmberPad in Settings to scan the pairing code.")
+                placeholder("camera.badge.ellipsis", "Allow camera access for Ember Slate in Settings to scan the pairing code.")
             case .unavailable:
                 placeholder("camera", "No camera is available on this device.")
             }

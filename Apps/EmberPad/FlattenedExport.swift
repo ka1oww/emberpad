@@ -58,7 +58,7 @@ enum FlattenedExport {
         }
 
         let format = UIGraphicsPDFRendererFormat()
-        format.documentInfo = [kCGPDFContextTitle as String: title, kCGPDFContextCreator as String: "EmberPad"]
+        format.documentInfo = [kCGPDFContextTitle as String: title, kCGPDFContextCreator as String: "Ember Slate"]
         // The renderer needs a default bounds; each page below supplies its own.
         let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792), format: format)
         return renderer.pdfData { context in
