@@ -4,9 +4,10 @@ import UIKit
 
 /// The selectable tools on the worksheet toolbar strip (design 5.4).
 /// The eraser's partial or whole-stroke behaviour is a setting, not a tool.
-/// The laser pointer (P6) only points: it never makes ink.
+/// The laser pointer (P6) only points: it never makes ink. The Shape tool (EP64) draws with the pen's width and
+/// colours and turns each stroke into a clean shape when the Pencil lifts (`ShapeRecognizer`).
 enum WorksheetTool: String, CaseIterable, Codable, Sendable {
-    case lasso, pen, highlighter, eraser, laser
+    case lasso, pen, highlighter, eraser, laser, shape
 
     var title: String {
         switch self {
@@ -15,6 +16,7 @@ enum WorksheetTool: String, CaseIterable, Codable, Sendable {
         case .highlighter: "Highlighter"
         case .eraser: "Eraser"
         case .laser: "Laser pointer"
+        case .shape: "Shapes"
         }
     }
 
@@ -25,6 +27,7 @@ enum WorksheetTool: String, CaseIterable, Codable, Sendable {
         case .highlighter: "highlighter"
         case .eraser: "eraser"
         case .laser: "circle.circle"
+        case .shape: "square.on.circle"
         }
     }
 }
@@ -88,6 +91,12 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// The laser pointer's Dot or Trail mode (P6). Dot by default, so the pointer is unchanged until the teacher
     /// picks Trail.
     var laserMode: LaserMode = .dot
+    /// The Shape tool's Snap to Other Shapes (EP64): a new shape's corners and endpoints near another shape's corner
+    /// or endpoint join it. On by default, as in GoodNotes.
+    var shapeSnap = true
+    /// The Shape tool's Fill Color (EP64): closed shapes are filled with a light tint of their colour. Off by default,
+    /// as in GoodNotes.
+    var shapeFill = false
 
     /// Tip sharpness's default before EP51 (`penTipSharpnessChosen`).
     static let legacyDefaultTipSharpness = 0.5
@@ -135,6 +144,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
         }
         penPressureSensitivity = (try? c.decodeIfPresent(Double.self, forKey: .penPressureSensitivity)) ?? d.penPressureSensitivity
         laserMode = (try? c.decodeIfPresent(LaserMode.self, forKey: .laserMode)) ?? d.laserMode
+        shapeSnap = (try? c.decodeIfPresent(Bool.self, forKey: .shapeSnap)) ?? d.shapeSnap
+        shapeFill = (try? c.decodeIfPresent(Bool.self, forKey: .shapeFill)) ?? d.shapeFill
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
@@ -178,6 +189,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
         switch tool {
         // PencilKit takes the Pencil in a clear monoline; the page draws the fountain-pen stroke live (LivePen, EP56).
         case .pen: PenFeel.liveTool(color: penColor, penWidth: penWidth)
+        // Shapes share the pen's width and colours, in their own plain pen ink (`ShapeInk`).
+        case .shape: ShapeInk.tool(color: penColor, penWidth: penWidth)
         case .highlighter:
             PKInkingTool(.marker, color: highlighterColor.withAlphaComponent(Theme.highlighterDefaultOpacity), width: highlighterWidth)
         case .eraser:
@@ -348,6 +361,8 @@ final class ToolState {
     }
     func setPenPressureSensitivity(_ value: Double) { update { $0.penPressureSensitivity = value } }
     func setLaserMode(_ mode: LaserMode) { update { $0.laserMode = mode } }
+    func setShapeSnap(_ on: Bool) { update { $0.shapeSnap = on } }
+    func setShapeFill(_ on: Bool) { update { $0.shapeFill = on } }
 
     func canAddColor(for tool: WorksheetTool) -> Bool {
         presets(for: tool).count < ToolSettings.maxPresets
@@ -452,6 +467,7 @@ private extension ToolSettings {
         case .eraser: "eraser \(eraserMode.rawValue) \(eraserSizeIndex)"
         case .lasso: "lasso"
         case .laser: "laser"
+        case .shape: "shape \(penColors[penColorIndex]) \(penWidthIndex)"
         }
     }
 }

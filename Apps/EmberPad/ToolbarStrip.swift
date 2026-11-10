@@ -7,15 +7,15 @@ extension WorksheetTool: Identifiable {
 
 /// A greyed placeholder on the strip. Positions are fixed now so nothing moves
 /// when the real tools ship (design 5.4). The laser pointer shipped (P6) and
-/// sits in its old place, after these.
+/// sits in its old place, after these; the Shape tool shipped (EP64) in the
+/// shapes placeholder's place.
 enum ToolbarExtra: String, CaseIterable, Identifiable {
-    case shapes, text, image
+    case text, image
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .shapes: "Shapes"
         case .text: "Text"
         case .image: "Image"
         }
@@ -23,7 +23,6 @@ enum ToolbarExtra: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
-        case .shapes: "square.on.circle"
         case .text: "textformat"
         case .image: "photo"
         }
@@ -32,14 +31,14 @@ enum ToolbarExtra: String, CaseIterable, Identifiable {
 
 /// The worksheet tool row under the header bar, centred and in GoodNotes' order
 /// (EP54): pen, eraser, highlighter, shapes, lasso, image, text, laser pointer | the
-/// active tool's widths and colours. Shapes, image and text are greyed placeholders
+/// active tool's widths and colours. Image and text are greyed placeholders
 /// (design 5.4). Tapping the selected tool again opens its settings popover.
 struct ToolbarStrip: View {
     let tools: ToolState
     static let height: CGFloat = 48
     /// GoodNotes' left-to-right order of the tools Ember Slate has.
     static let order: [ToolbarSlot] = [
-        .tool(.pen), .tool(.eraser), .tool(.highlighter), .extra(.shapes),
+        .tool(.pen), .tool(.eraser), .tool(.highlighter), .tool(.shape),
         .tool(.lasso), .extra(.image), .extra(.text), .tool(.laser),
     ]
 
@@ -178,6 +177,10 @@ private struct ActiveToolMenu: View {
                 widthDots(Theme.eraserSizes, selected: tools.settings.eraserSizeIndex, diameters: [6, 10, 16], select: tools.selectEraserSize)
                     .disabled(tools.settings.eraserMode != .partial)
                     .opacity(tools.settings.eraserMode == .partial ? 1 : 0.4)
+            case .shape:
+                // Shapes draw with the pen's widths and colours (EP64).
+                widthLines(Theme.penWidths, selected: tools.settings.penWidthIndex, thicknesses: [2, 3.5, 5.5], select: tools.selectPenWidth)
+                colorDots(.pen)
             case .lasso:
                 Text("Circle ink to select · tap it for Cut, Copy, Delete, Duplicate, Resize, Color")
                     .font(Theme.meta)
@@ -354,6 +357,16 @@ struct ToolSettingsPopover: View {
                 } footer: {
                     Text("After each erase, the Pencil returns to the tool you used before.")
                 }
+            case .shape:
+                Section {
+                    Toggle("Snap to other shapes",
+                           isOn: Binding(get: { tools.settings.shapeSnap }, set: tools.setShapeSnap))
+                    Toggle("Fill colour", isOn: Binding(get: { tools.settings.shapeFill }, set: tools.setShapeFill))
+                } header: {
+                    Text("Settings")
+                } footer: {
+                    Text("Draw a line, arrow, triangle, rectangle, polygon or ellipse and it becomes a clean shape when the Pencil lifts; anything else stays as drawn. Snap joins corners and line ends that land near another shape's. Fill tints closed shapes with their colour. Shapes use the pen's widths and colours.")
+                }
             case .lasso:
                 Section {
                     CheckRow(title: "Freehand", checked: true) {}
@@ -421,6 +434,7 @@ struct ToolSettingsPopover: View {
         case .highlighter: 580
         case .eraser: 480
         case .lasso: 230
+        case .shape: 330
         case .laser: 250
         }
     }
