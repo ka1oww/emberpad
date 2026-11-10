@@ -77,7 +77,7 @@ final class WorksheetChromeTests: XCTestCase {
         XCTAssertEqual(session.pdf.pageCount, 4)
         for index in 0..<4 {
             let page = try XCTUnwrap(session.pdf.page(at: index))
-            let canvas = try XCTUnwrap(controller.pdfView(PDFView(), overlayViewFor: page) as? PKCanvasView)
+            let canvas = try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: page) as? PageInkView)?.canvas)
             XCTAssertEqual(canvas.overrideUserInterfaceStyle, .light, "page \(index) canvas must stay light in dark mode")
             XCTAssertEqual(canvas.backgroundColor, .clear, "page \(index) canvas must be transparent over the white page")
         }

@@ -10,6 +10,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// Internal, not private, so the EP-15 external-display screenshot test can scroll and zoom it.
     let pdfView = PageHitTestPDFView()
     private(set) var canvases: [Int: PKCanvasView] = [:]
+    /// Each live canvas's page view (EP-49), held here as well as by PDFKit so a canvas always keeps its page space.
+    private var pageViews: [Int: PageInkView] = [:]
     private weak var activeCanvas: PKCanvasView?
     private var pageObserver: NSObjectProtocol?
     private var viewportObservers: [NSObjectProtocol] = []
@@ -35,6 +37,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// student view after the editor has cleared it.
     private var publishing = true
     private var studentPage = 0
+    /// EP-49: brings the ink's own zoom to the PDF scale once a zoom settles.
+    private var inkScaleWork: DispatchWorkItem?
     /// True while EmberPad itself swaps a canvas drawing, so the change is not read as new ink.
     var isReplacingStroke = false
     /// The thin guide shown while a held highlighter stroke is about to snap straight.
@@ -92,6 +96,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 MainActor.assumeIsolated { self?.viewportThrottle.signal() }
             }
         }
+        viewportObservers.append(NotificationCenter.default.addObserver(forName: .PDFViewScaleChanged, object: pdfView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.scheduleInkScale() }
+        })
         let undoTap = UITapGestureRecognizer(target: self, action: #selector(undoGesture))
         undoTap.numberOfTapsRequired = 2; undoTap.numberOfTouchesRequired = 2
         let redoTap = UITapGestureRecognizer(target: self, action: #selector(redoGesture))
@@ -157,6 +164,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         publishing = false
+        inkScaleWork?.cancel()
         finishHighlighterErase()
         viewportThrottle.cancel()
         liveStroke = nil
@@ -179,11 +187,15 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.isOpaque = false
     }
 
+    /// The overlay is a `PageInkView` holding the page's canvas, so PDFKit can size it freely while the canvas inside
+    /// keeps its own zoom (EP-49). Returning the canvas itself would let PDFKit reset that zoom on layout.
     func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> UIView? {
         let index = session.pdf.index(for: page)
         guard index != NSNotFound else { return nil }
-        if let existing = canvases[index] { return existing }
-        let canvas = PKCanvasView(frame: CGRect(origin: .zero, size: page.displayedSize))
+        if let existing = pageViews[index] { return existing }
+        let pageView = PageInkView(pageSize: page.displayedSize)
+        pageView.setPDFScale(pdfView.scaleFactor)
+        let canvas = pageView.canvas
         Self.styleCanvas(canvas)
         canvas.isScrollEnabled = false
         canvas.drawingPolicy = .pencilOnly
@@ -194,22 +206,26 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.addGestureRecognizer(makeHoldRecognizer())
         inkSelection.prepare(canvas)
         canvases[index] = canvas
+        pageViews[index] = pageView
         pdfView.visibleCanvases = Array(canvases.values)
         updateCanvasInput()
-        return canvas
+        return pageView
     }
 
     func pdfView(_ pdfView: PDFView, willDisplayOverlayView overlayView: UIView, for page: PDFPage) {
-        if let canvas = overlayView as? PKCanvasView, session.pdf.index(for: page) == currentPage { focus(canvas) }
+        if let canvas = (overlayView as? PageInkView)?.canvas, session.pdf.index(for: page) == currentPage { focus(canvas) }
     }
 
     func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
-        guard let canvas = overlayView as? PKCanvasView else { return }
+        guard let canvas = (overlayView as? PageInkView)?.canvas else { return }
         // Saving already happened through the model delegate; this callback only releases views.
         let index = session.pdf.index(for: page)
         if highlighterErase?.canvas === canvas { finishHighlighterErase() }
         inkSelection.canvasWillLeave(canvas)
-        if canvases[index] === canvas { canvases.removeValue(forKey: index) }
+        if canvases[index] === canvas {
+            canvases.removeValue(forKey: index)
+            pageViews.removeValue(forKey: index)
+        }
         self.pdfView.visibleCanvases = Array(canvases.values)
     }
 
@@ -336,7 +352,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     private func publishPage() {
         guard publishing, let page = session.pdf.page(at: studentPage) else { return }
-        let size = canvases[studentPage]?.bounds.size ?? page.displayedSize
+        let size = canvases[studentPage]?.pageSpace.bounds.size ?? page.displayedSize
         // A Teacher copy publishes only the private placeholder; the snapshot type refuses its pages in both framings.
         student.publish(session: session, pageIndex: studentPage, canvasSize: size, viewport: presenterViewport())
     }
@@ -350,19 +366,20 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         gestureRecognizer === liveInk || otherGestureRecognizer === liveInk
     }
 
-    /// The canvas a Pencil touch will ink, or nil when it will not: the hit-tested page is not focused, or the tool is
-    /// an eraser or the lasso. Touch type is already filtered by the recogniser, so fingers never get here.
+    /// The page space of the canvas a Pencil touch will ink, or nil when it will not: the hit-tested page is not
+    /// focused, or the tool is an eraser or the lasso. Touch type is already filtered by the recogniser, so fingers
+    /// never get here.
     private func liveInkCanvas(for touch: UITouch) -> UIView? {
         liveStroke = nil
         guard publishing, let canvas = activeCanvas, canvas.drawingGestureRecognizer.isEnabled,
-              canvas.bounds.contains(touch.location(in: canvas)),
+              canvas.pageSpace.bounds.contains(touch.location(in: canvas.pageSpace)),
               let page = canvases.first(where: { $0.value === canvas })?.key,
               let style = LiveInkStyle(tool: canvas.tool) else { return nil }
         liveStroke = (page, style)
-        return canvas
+        return canvas.pageSpace
     }
 
-    /// Samples arrive in the canvas's coordinates, which are the page's ink space.
+    /// Samples arrive in the canvas's page space, which is the page's ink space.
     private func liveInkEvent(_ event: LiveInkRecognizer.Event) {
         switch event {
         case .began(let points):
@@ -448,13 +465,39 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     var laserTrailVisible: Bool { !laserTrailLayer.isEmpty }
 
     /// The page under `location` (PDF view coordinates) and the point in that page's ink space, which is its canvas's
-    /// coordinates: the same space as the committed drawing and live ink.
+    /// page space: the same space as the committed drawing and live ink.
     func pageLocation(of location: CGPoint) -> (page: Int, point: CGPoint)? {
         for (index, canvas) in canvases where canvas.window != nil {
-            let point = pdfView.convert(location, to: canvas)
-            if canvas.bounds.contains(point) { return (index, point) }
+            let space = canvas.pageSpace
+            let point = pdfView.convert(location, to: space)
+            if space.bounds.contains(point) { return (index, point) }
         }
         return nil
+    }
+
+    // MARK: Ink zoom (EP-49)
+
+    /// A zoom changed the PDF scale. The ink is redrawn for it once the zoom settles, not on every pinch frame.
+    private func scheduleInkScale() {
+        inkScaleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.updateInkScale() }
+        inkScaleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.inkScaleDelay, execute: work)
+    }
+
+    /// How long the PDF scale must stay still before the ink is redrawn for it, in seconds.
+    static let inkScaleDelay: TimeInterval = 0.15
+
+    /// Draws every page's ink for the current PDF scale, or waits again while two fingers are still pinching.
+    /// Internal so tests can apply a zoom without waiting.
+    func updateInkScale() {
+        inkScaleWork = nil
+        if let scrollView = Self.firstScrollView(in: pdfView),
+           scrollView.isZooming || [.began, .changed].contains(scrollView.pinchGestureRecognizer?.state) {
+            scheduleInkScale()
+            return
+        }
+        for pageView in pageViews.values { pageView.setPDFScale(pdfView.scaleFactor) }
     }
 
     private func showLaserDot(at point: CGPoint) {
@@ -557,9 +600,11 @@ extension PDFOverlayPageController {
         path.addLine(to: StrokeSnap.snappedEnd(from: start, to: current))
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if holdGuide.superlayer !== canvas.layer {
-            holdGuide.frame = canvas.bounds
-            canvas.layer.addSublayer(holdGuide)
+        // In page space, so the guide is drawn and measured in page points like the hold itself.
+        let space = (canvas as? PKCanvasView)?.pageSpace ?? canvas
+        if holdGuide.superlayer !== space.layer {
+            holdGuide.frame = space.bounds
+            space.layer.addSublayer(holdGuide)
         }
         holdGuide.path = path.cgPath
         CATransaction.commit()
@@ -754,9 +799,14 @@ extension PDFOverlayPageController {
         layer.isUserInteractionEnabled = false
         layer.isScrollEnabled = false
         layer.drawingGestureRecognizer.isEnabled = false
-        layer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         layer.drawing = ink
-        canvas.addSubview(layer)
+        if let pageView = canvas.superview as? PageInkView {
+            // Drawn at the canvas's zoom, so the set-aside ink stays as sharp as the ink it stands in for.
+            pageView.addSetAsideInk(layer)
+        } else {
+            layer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            canvas.addSubview(layer)
+        }
         undoManager?.disableUndoRegistration()
         highlighterErase = HighlighterEraseStroke(canvas: canvas, page: page, before: before, inkLayer: layer, undoManager: undoManager)
         isReplacingStroke = true
@@ -806,7 +856,7 @@ final class PageHitTestPDFView: PDFView {
 
     @discardableResult
     func focusCanvas(at point: CGPoint) -> PKCanvasView? {
-        guard let canvas = visibleCanvases.first(where: { $0.bounds.contains($0.convert(point, from: self)) }) else {
+        guard let canvas = visibleCanvases.first(where: { $0.pageSpace.bounds.contains($0.pageSpace.convert(point, from: self)) }) else {
             return nil
         }
         onCanvasFocus?(canvas)

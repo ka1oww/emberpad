@@ -96,7 +96,7 @@ final class LaserPointerTests: XCTestCase {
         let revision = session.inkRevision(on: 0)
 
         let target = CGPoint(x: 300, y: 200)
-        let inPDFView = controller.pdfView.convert(target, from: canvas)
+        let inPDFView = controller.pdfView.convert(target, from: canvas.pageSpace)
         controller.laserEvent(.moved(inPDFView))
         XCTAssertTrue(controller.laserDotVisible)
         XCTAssertEqual(controller.laserDot.position.x, controller.view.convert(inPDFView, from: controller.pdfView).x, accuracy: 0.01)
@@ -133,7 +133,7 @@ final class LaserPointerTests: XCTestCase {
         let controller = try host(teacher, model: model, tools: tools)
         tools.select(.laser)
         let canvas = try XCTUnwrap(controller.canvases[0])
-        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 200, y: 200), from: canvas)))
+        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 200, y: 200), from: canvas.pageSpace)))
         XCTAssertTrue(controller.laserDotVisible, "The teacher still sees the dot on the iPad")
         XCTAssertNil(model.laser, "Nothing of a Teacher copy reaches the student view")
         guard case .teacherCopyPrivate = model.content else { return XCTFail("Teacher copy reached the student view") }

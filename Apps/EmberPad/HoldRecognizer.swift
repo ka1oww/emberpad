@@ -1,3 +1,4 @@
+import PencilKit
 import UIKit
 
 /// Whether a touch has stayed still long enough to count as a hold: still
@@ -65,7 +66,8 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     /// Called when the tracked touch lifts or is cancelled.
     var onEnd: ((HoldRecognizer) -> Void)?
 
-    /// Where the tracked touch began and is now, in the view's coordinates.
+    /// Where the tracked touch began and is now, in the view's coordinates, or a page canvas's page space (page
+    /// points, EP-49), so holds measure the same at every zoom.
     private(set) var startLocation: CGPoint?
     private(set) var currentLocation: CGPoint?
     /// The last stroke was held still for `HoldTracker.duration`. Set by
@@ -116,11 +118,14 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
 
     // MARK: - Touches
 
+    /// The coordinates touches are measured in: a page canvas's page space, or the view's own.
+    private var space: UIView? { (view as? PKCanvasView)?.pageSpace ?? view }
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesBegan(touches, with: event)
         // One Pencil, one stroke: a second touch is ignored, not tracked.
         guard touch == nil, let first = touches.first else { return }
-        let point = first.location(in: view)
+        let point = first.location(in: space)
         touch = first
         tracker = HoldTracker(at: point, time: first.timestamp)
         startLocation = point
@@ -136,7 +141,7 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesMoved(touches, with: event)
         guard let touch, touches.contains(touch), var tracker else { return }
-        let point = touch.location(in: view)
+        let point = touch.location(in: space)
         let latched = tracker.move(to: point, at: touch.timestamp)
         self.tracker = tracker
         if let previous = currentLocation { travelled += hypot(point.x - previous.x, point.y - previous.y) }

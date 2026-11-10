@@ -283,7 +283,7 @@ final class ToolStateTests: XCTestCase {
         let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel(), tools: tools)
         controller.loadViewIfNeeded()
         let canvases = try (0..<3).map { index in
-            try XCTUnwrap(controller.pdfView(PDFView(), overlayViewFor: XCTUnwrap(session.pdf.page(at: index))) as? PKCanvasView)
+            try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: XCTUnwrap(session.pdf.page(at: index))) as? PageInkView)?.canvas)
         }
         for canvas in canvases {
             XCTAssertEqual(try XCTUnwrap(canvas.tool as? PKInkingTool).inkType, .fountainPen)
@@ -298,8 +298,8 @@ final class ToolStateTests: XCTestCase {
         tools.handlePencil(.switchEraser, gesture: .doubleTap)
         for canvas in canvases { XCTAssertTrue(canvas.tool is PKEraserTool) }
         // A canvas created after the change starts with the current tool too.
-        controller.pdfView(PDFView(), willEndDisplayingOverlayView: canvases[2], for: try XCTUnwrap(session.pdf.page(at: 2)))
-        let recreated = try XCTUnwrap(controller.pdfView(PDFView(), overlayViewFor: XCTUnwrap(session.pdf.page(at: 2))) as? PKCanvasView)
+        controller.pdfView(PDFView(), willEndDisplayingOverlayView: canvases[2].pageSpace, for: try XCTUnwrap(session.pdf.page(at: 2)))
+        let recreated = try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: XCTUnwrap(session.pdf.page(at: 2))) as? PageInkView)?.canvas)
         XCTAssertTrue(recreated.tool is PKEraserTool)
     }
 

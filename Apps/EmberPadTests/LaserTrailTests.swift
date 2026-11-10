@@ -117,7 +117,7 @@ final class LaserTrailTests: XCTestCase {
 
         let path = (0...10).map { CGPoint(x: 100 + CGFloat($0) * 20, y: 200 + CGFloat($0) * 4) }
         for point in path {
-            controller.laserEvent(.moved(controller.pdfView.convert(point, from: canvas)))
+            controller.laserEvent(.moved(controller.pdfView.convert(point, from: canvas.pageSpace)))
             clock += 0.016
         }
         XCTAssertTrue(controller.laserDotVisible, "The dot leads the trail")
@@ -168,7 +168,7 @@ final class LaserTrailTests: XCTestCase {
         tools.select(.laser)
         let canvas = try XCTUnwrap(controller.canvases[0])
         for x in stride(from: 100, through: 300, by: 20) {
-            controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: x, y: 200), from: canvas)))
+            controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: x, y: 200), from: canvas.pageSpace)))
         }
         XCTAssertTrue(controller.laserDotVisible)
         XCTAssertNotNil(model.laser)
@@ -184,8 +184,8 @@ final class LaserTrailTests: XCTestCase {
         let controller = try host(session, model: model, tools: tools)
         tools.select(.laser)
         let canvas = try XCTUnwrap(controller.canvases[0])
-        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 100, y: 100), from: canvas)))
-        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 140, y: 100), from: canvas)))
+        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 100, y: 100), from: canvas.pageSpace)))
+        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 140, y: 100), from: canvas.pageSpace)))
         controller.laserEvent(.lifted)
         XCTAssertTrue(controller.laserTrailVisible)
         tools.select(.pen)
@@ -201,12 +201,12 @@ final class LaserTrailTests: XCTestCase {
         let controller = try host(session, model: model, tools: tools)
         tools.select(.laser)
         let canvas = try XCTUnwrap(controller.canvases[0])
-        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 100, y: 100), from: canvas)))
-        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 140, y: 100), from: canvas)))
+        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 100, y: 100), from: canvas.pageSpace)))
+        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 140, y: 100), from: canvas.pageSpace)))
         controller.laserEvent(.moved(CGPoint(x: 2, y: 2)))
         XCTAssertEqual(controller.laserTrailLayer.drawnPieceCount, 2, "On the iPad the trail follows the Pencil off the page")
         XCTAssertNil(model.laser)
-        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 300, y: 300), from: canvas)))
+        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 300, y: 300), from: canvas.pageSpace)))
         XCTAssertEqual(model.laserTrail?.trail.segments.map(\.points.count), [2, 1],
                        "Back on the page the student trail starts a new line, never one across the gap")
     }
@@ -220,8 +220,8 @@ final class LaserTrailTests: XCTestCase {
         let controller = try host(teacher, model: model, tools: tools)
         tools.select(.laser)
         let canvas = try XCTUnwrap(controller.canvases[0])
-        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 200, y: 200), from: canvas)))
-        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 260, y: 220), from: canvas)))
+        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 200, y: 200), from: canvas.pageSpace)))
+        controller.laserEvent(.moved(controller.pdfView.convert(CGPoint(x: 260, y: 220), from: canvas.pageSpace)))
         XCTAssertTrue(controller.laserTrailVisible, "The teacher still sees the trail on the iPad")
         XCTAssertNil(model.laserTrail, "Nothing of a Teacher copy reaches the student view")
         XCTAssertThrowsError(try StudentLaserTrail(session: teacher, time: 0)) { error in

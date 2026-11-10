@@ -275,7 +275,7 @@ final class InkSelectionController {
     }
 
     private func updateLassoPath(_ lasso: LassoCaptureRecognizer) {
-        guard let canvas = lasso.view, let first = lasso.points.first else { return }
+        guard let canvas = (lasso.view as? PKCanvasView)?.pageSpace ?? lasso.view, let first = lasso.points.first else { return }
         let path = UIBezierPath()
         path.move(to: first)
         for point in lasso.points.dropFirst() { path.addLine(to: point) }
@@ -436,7 +436,7 @@ final class InkSelectionController {
               let data = pasteboard.data(forPasteboardType: Self.pasteboardType),
               let clip = try? PKDrawing(data: data), !clip.strokes.isEmpty else { return false }
         let before = canvas.drawing
-        let (after, indices) = SelectionEdit.pasted(clip, into: before, at: point, page: canvas.bounds)
+        let (after, indices) = SelectionEdit.pasted(clip, into: before, at: point, page: canvas.pageSpace.bounds)
         dismiss()
         host.commitDrawing(after, page: page, replacing: before, actionName: "Paste", undoManager: undoManager)
         show(indices, page: page)
@@ -449,8 +449,9 @@ final class InkSelectionController {
     private func pasteTarget(at point: CGPoint, in pages: UIView) -> (page: Int, point: CGPoint)? {
         guard canPaste, let host else { return nil }
         for (page, canvas) in host.canvases {
-            let local = canvas.convert(point, from: pages)
-            if canvas.bounds.contains(local) {
+            let space = canvas.pageSpace
+            let local = space.convert(point, from: pages)
+            if space.bounds.contains(local) {
                 dismiss()
                 return (page, local)
             }
@@ -663,8 +664,9 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
 
     // MARK: Geometry on screen
 
-    private func onScreen(_ point: CGPoint) -> CGPoint { canvas?.convert(point, to: self) ?? point }
-    private func onCanvas(_ point: CGPoint) -> CGPoint { canvas.map { convert(point, to: $0) } ?? point }
+    /// Drawing space is the canvas's page space (page points), not the zoomed canvas's own coordinates (EP-49).
+    private func onScreen(_ point: CGPoint) -> CGPoint { canvas?.pageSpace.convert(point, to: self) ?? point }
+    private func onCanvas(_ point: CGPoint) -> CGPoint { canvas.map { convert(point, to: $0.pageSpace) } ?? point }
 
     private var shownBox: SelectionBox? { box?.applying(liveDelta) }
 
@@ -1014,8 +1016,9 @@ final class PasteMenu: NSObject, @preconcurrency UIEditMenuInteractionDelegate, 
 final class LassoCaptureRecognizer: UIGestureRecognizer {
     var onUpdate: ((LassoCaptureRecognizer) -> Void)?
     var onEnd: ((LassoCaptureRecognizer) -> Void)?
-    /// The path so far, in the canvas's coordinates.
+    /// The path so far, in the canvas's page space (page points, EP-49).
     private(set) var points: [CGPoint] = []
+    private var space: UIView? { (view as? PKCanvasView)?.pageSpace ?? view }
     private(set) var wasCancelled = false
     private weak var touch: UITouch?
 
@@ -1031,7 +1034,7 @@ final class LassoCaptureRecognizer: UIGestureRecognizer {
         super.touchesBegan(touches, with: event)
         guard touch == nil, let first = touches.first else { return }
         touch = first
-        points = [first.location(in: view)]
+        points = [first.location(in: space)]
         wasCancelled = false
         state = .began
     }
@@ -1064,7 +1067,7 @@ final class LassoCaptureRecognizer: UIGestureRecognizer {
 
     private func append(_ touch: UITouch, _ event: UIEvent) {
         let samples = event.coalescedTouches(for: touch) ?? [touch]
-        points.append(contentsOf: samples.map { $0.location(in: view) })
+        points.append(contentsOf: samples.map { $0.location(in: space) })
     }
 
     @objc private func changed() {
