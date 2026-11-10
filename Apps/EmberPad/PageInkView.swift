@@ -62,6 +62,34 @@ final class PageInkView: UIView {
         fitSetAsideInk()
     }
 
+    /// The pen's strokes while they are written (EP56), drawn by PencilKit at the canvas's zoom above its own ink, so
+    /// they look exactly as the committed ink will. Created on first use; never takes touches.
+    private(set) var livePenLayer: PKCanvasView?
+
+    /// Shows `drawing` as the pen's live ink, or hides the layer when it is empty.
+    func showLivePen(_ drawing: PKDrawing) {
+        if drawing.strokes.isEmpty, livePenLayer == nil { return }
+        let layer = livePenLayer ?? makeLivePenLayer()
+        layer.drawing = drawing
+        layer.isHidden = drawing.strokes.isEmpty
+    }
+
+    private func makeLivePenLayer() -> PKCanvasView {
+        let layer = PKCanvasView(frame: canvas.bounds)
+        layer.overrideUserInterfaceStyle = .light
+        layer.backgroundColor = .clear
+        layer.isOpaque = false
+        layer.isUserInteractionEnabled = false
+        // Only a picture of ink the page itself will hold; assistive technologies read the page's canvas.
+        layer.accessibilityElementsHidden = true
+        layer.isScrollEnabled = false
+        layer.drawingGestureRecognizer.isEnabled = false
+        layer.maximumSupportedContentVersion = .latest
+        livePenLayer = layer
+        addSetAsideInk(layer)
+        return layer
+    }
+
     /// A set-aside layer lives inside the canvas, whose coordinates are already `inkScale` times the page.
     private func fitSetAsideInk() {
         let page = bounds.size

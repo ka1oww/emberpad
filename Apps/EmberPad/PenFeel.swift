@@ -3,10 +3,7 @@ import Foundation
 import PencilKit
 import UIKit
 
-/// GoodNotes-style pen feel for the fountain pen. PencilKit draws the live
-/// stroke itself and has no public hook into it, so the feel is applied to the
-/// committed stroke after the Pencil lifts, the way `StrokeSnap` replaces a
-/// held highlighter stroke.
+/// GoodNotes-style pen feel for the fountain pen.
 ///
 /// The target is GoodNotes' Fountain Pen at Tip Sharpness maximum and
 /// Pressure Sensitivity minimum, the captain's setting, measured from a
@@ -14,16 +11,19 @@ import UIKit
 /// pen width, only slightly thinner on up-right diagonals, that barely swells
 /// with pressure and thins to sharp points over about 9 pt at each end. PencilKit's own
 /// fountain pen is much bolder and its nib follows the Pencil's azimuth (thin
-/// one way, about four times as thick across it), so after lift every point's
-/// width is rebuilt from the pen width, pressure and stroke direction, and its
-/// nib is turned across the stroke so PencilKit draws exactly that width.
+/// one way, about four times as thick across it), so every point's width is
+/// rebuilt from the pen width, pressure and stroke direction, and its nib is
+/// turned across the stroke so PencilKit draws exactly that width, in a new
+/// fountain-pen ink: the ink PencilKit commits live strokes with (content
+/// version 2) draws a seeded grain that, at these widths, breaks into a beaded
+/// grey fringe and about half the ink.
 ///
-/// While the Pencil is down the pen is PencilKit's monoline ink at the same
-/// width (EP53), so the line is as thin while it is written as after lift;
-/// PencilKit's live fountain pen is at least about 2.7 pt across. The reshape
-/// gives the committed stroke a new fountain-pen ink: the ink PencilKit
-/// commits live strokes with (content version 2) draws a seeded grain that,
-/// at these widths, breaks into a beaded grey fringe and about half the ink.
+/// PencilKit has no public hook into its own live stroke, so the pen does not
+/// let PencilKit show it (EP56). PencilKit still takes the Pencil, rejects the
+/// palm and commits the stroke, in an ink nobody sees (`liveTool`), while the
+/// page draws the stroke from the same Pencil samples with this shape as it is
+/// written (`LivePen`); on lift the committed stroke is swapped for that same
+/// stroke with its end tip, so what was written does not change.
 struct PenFeelSettings: Codable, Equatable, Sendable {
     /// 0 = blunt ends, 1 = sharp, pointed ends (GoodNotes' maximum).
     var tipSharpness: Double = 1
@@ -37,23 +37,39 @@ enum PenFeel {
 
     // MARK: Live stroke
 
-    /// The ink the pen writes with while the Pencil is down: a fixed-width line, as GoodNotes' fountain pen at
-    /// Pressure Min nearly is, drawn by PencilKit's own live renderer, so latency is PencilKit's.
+    /// The ink PencilKit takes the pen's Pencil input in. It is never seen: `liveTool` makes it clear, and the
+    /// committed stroke is swapped for the fountain-pen stroke drawn live.
     static let liveInkType: PKInk.InkType = .monoline
 
     /// Whether a stroke is the pen's: written live (`liveInkType`) or already given the pen feel (fountain pen).
     static func isPenInk(_ type: PKInk.InkType) -> Bool { type == .fountainPen || type == liveInkType }
 
-    /// The monoline tool width whose live line is as wide as the reshaped stroke's middle for `penWidth`. PencilKit
-    /// draws a monoline tool `w` as a line 2 × `w` points across (measured in the Simulator for EP53). Widths below
-    /// monoline's published 0.5 minimum are drawn as asked, so every pen width matches.
+    /// The monoline tool width whose line would be as wide as the shaped stroke's middle for `penWidth`. PencilKit
+    /// draws a monoline tool `w` as a line 2 × `w` points across (measured in the Simulator for EP53), so a stroke
+    /// left in this ink by mistake keeps the pen's width once its colour is restored.
     static func liveToolWidth(forPenWidth penWidth: CGFloat) -> CGFloat {
         max(widthPerToolWidth * penWidth / 2, hairline / 2)
     }
 
-    /// The PencilKit tool the pen writes with.
+    /// The PencilKit tool the pen writes with: the pen's colour made fully clear, so PencilKit's own live line is
+    /// never seen; `LivePen` draws the stroke instead.
     static func liveTool(color: UIColor, penWidth: CGFloat) -> PKInkingTool {
-        PKInkingTool(liveInkType, color: color, width: liveToolWidth(forPenWidth: penWidth))
+        PKInkingTool(liveInkType, color: color.withAlphaComponent(0), width: liveToolWidth(forPenWidth: penWidth))
+    }
+
+    /// `drawing` with every clear pen-ink stroke (PencilKit's own copy of a live stroke the swap never replaced) given
+    /// back its colour at full alpha, same path, width, ink type, creation date and seed. Nil when none is clear.
+    static func restoringClearInk(in drawing: PKDrawing) -> PKDrawing? {
+        var changed = false
+        let strokes = drawing.strokes.map { stroke -> PKStroke in
+            var alpha: CGFloat = 1
+            stroke.ink.color.getRed(nil, green: nil, blue: nil, alpha: &alpha)
+            guard stroke.ink.inkType == liveInkType, alpha == 0 else { return stroke }
+            changed = true
+            return PKStroke(ink: PKInk(liveInkType, color: stroke.ink.color.withAlphaComponent(1)), path: stroke.path,
+                            transform: stroke.transform, mask: stroke.mask, randomSeed: stroke.randomSeed)
+        }
+        return changed ? PKDrawing(strokes: strokes) : nil
     }
 
     // MARK: Width
@@ -195,51 +211,88 @@ enum PenFeel {
         }
     }
 
-    // MARK: Reshape
+    // MARK: Shape
 
-    /// The committed stroke as GoodNotes' fountain pen would draw it: same
-    /// colour, transform, locations, timing, force, altitude, opacity,
-    /// creation date and random seed, in a new fountain-pen ink; each point's
-    /// size and nib angle are rebuilt from `toolWidth` (the pen width it was
-    /// drawn with), its force, the stroke's direction and the tip taper. Nil
-    /// for a stroke that is not the pen's, a stroke the eraser has already
-    /// cut, or when nothing would change.
-    static func reshaped(_ stroke: PKStroke, settings: PenFeelSettings, toolWidth: CGFloat) -> PKStroke? {
-        guard isPenInk(stroke.ink.inkType), stroke.mask == nil, toolWidth > 0 else { return nil }
-        let path = Array(stroke.path)
-        guard !path.isEmpty else { return nil }
+    /// How strongly a stroke `length` points long tapers, 0…1: not at all below `shortStrokeWidths` widths, so dots,
+    /// decimal points and charges stay round, then rising to full over the next `shortStrokeWidths` widths. It only
+    /// grows as the stroke is written, so the start tip sharpens while the Pencil is still beside it, never at lift.
+    static func taperStrength(length: CGFloat, width: CGFloat) -> CGFloat {
+        let short = shortStrokeWidths * width
+        guard short > 0 else { return 1 }
+        return min(max((length - short) / short, 0), 1)
+    }
+
+    /// Each point of a pen stroke through `path` as GoodNotes' fountain pen would draw it: location, timing, force,
+    /// altitude, opacity and secondary scale as given; size and nib angle rebuilt from `toolWidth` (the pen width it
+    /// is drawn with), its force, the stroke's direction and the tips. The start tip depends only on the distance from
+    /// the start, so a stroke drawn live (`lifted` false) is already the lifted stroke without its end tip; `lifted`
+    /// adds the end tip.
+    static func shapedPoints(_ path: [PKStrokePoint], settings: PenFeelSettings, toolWidth: CGFloat,
+                             lifted: Bool) -> [PKStrokePoint] {
+        guard !path.isEmpty, toolWidth > 0 else { return path }
         let width = widthPerToolWidth * toolWidth
         let locations = path.map(\.location)
         let along = arcLengths(locations)
         let total = along.last ?? 0
         let axes = axes(locations, along: along)
         let forces = smoothed(path.map(\.force))
-        // Short strokes (dots, decimal points, charges) keep blunt ends. Longer
-        // ones taper over at most half their length from each end.
-        let tapers = total >= shortStrokeWidths * width
-        let reach = min(taperLength(width: width, sharpness: settings.tipSharpness), total / 2)
+        let sharpness = Double(taperStrength(length: total, width: width)) * clamped(settings.tipSharpness)
+        // The start tip reaches its full length whatever the stroke's length; the end tip at most half the stroke.
+        let reach = taperLength(width: width, sharpness: settings.tipSharpness)
+        let endReach = min(reach, total / 2)
         let averageNib = (1 + thinRatio) / 2
-        // A new ink, never the committed one: PencilKit's live strokes carry an older fountain-pen ink whose seeded
-        // grain beads at these widths. The new ink draws a clean line whatever the seed.
-        let ink = PKInk(.fountainPen, color: stroke.ink.color)
-        var changed = stroke.ink.inkType != ink.inkType || stroke.ink.requiredContentVersion != ink.requiredContentVersion
-        let points = path.indices.map { i -> PKStrokePoint in
+        return path.indices.map { i -> PKStrokePoint in
             let p = path[i]
             var drawn = width * pressureFactor(force: forces[i], sensitivity: settings.pressureSensitivity)
             drawn *= axes.map { nibFactor(direction: $0[i]) } ?? averageNib
-            if tapers {
-                drawn *= taperFactor(distanceFromEnd: min(along[i], total - along[i]), width: width,
-                                     sharpness: settings.tipSharpness, length: reach)
+            if sharpness > 0 {
+                var tip = taperFactor(distanceFromEnd: along[i], width: width, sharpness: sharpness, length: reach)
+                if lifted {
+                    tip = min(tip, taperFactor(distanceFromEnd: total - along[i], width: width, sharpness: sharpness,
+                                               length: endReach))
+                }
+                drawn *= tip
             }
             let side = pencilKitSize(forWidth: drawn)
             // The nib lies across the stroke, where PencilKit draws the full size.
             let azimuth = axes.map { $0[i] + .pi / 2 } ?? p.azimuth
-            let size = CGSize(width: side, height: side)
-            if size != p.size || abs(azimuth - p.azimuth) > 1e-3 { changed = true }
-            return PKStrokePoint(location: p.location, timeOffset: p.timeOffset, size: size, opacity: p.opacity,
-                                 force: p.force, azimuth: azimuth, altitude: p.altitude,
+            return PKStrokePoint(location: p.location, timeOffset: p.timeOffset, size: CGSize(width: side, height: side),
+                                 opacity: p.opacity, force: p.force, azimuth: azimuth, altitude: p.altitude,
                                  secondaryScale: p.secondaryScale)
         }
+    }
+
+    /// A pen stroke through `path` in the fountain-pen ink of `color` (EP56: the live pen and its lifted stroke).
+    static func stroke(_ path: [PKStrokePoint], color: UIColor, settings: PenFeelSettings, toolWidth: CGFloat,
+                       lifted: Bool, creationDate: Date, randomSeed: UInt32 = 0) -> PKStroke {
+        let points = shapedPoints(path, settings: settings, toolWidth: toolWidth, lifted: lifted)
+        return PKStroke(ink: PKInk(.fountainPen, color: color),
+                        path: PKStrokePath(controlPoints: points, creationDate: creationDate),
+                        transform: .identity, mask: nil, randomSeed: randomSeed)
+    }
+
+    // MARK: Reshape
+
+    /// The committed stroke as GoodNotes' fountain pen would draw it: same
+    /// colour (or `color`), transform, locations, timing, force, altitude, opacity,
+    /// creation date and random seed, in a new fountain-pen ink; each point's
+    /// size and nib angle are rebuilt from `toolWidth` (the pen width it was
+    /// drawn with), its force, the stroke's direction and the tip taper. Nil
+    /// for a stroke that is not the pen's, a stroke the eraser has already
+    /// cut, or when nothing would change. Used when the live pen has no samples
+    /// of its own for a stroke, and for a pen line snapped straight.
+    static func reshaped(_ stroke: PKStroke, settings: PenFeelSettings, toolWidth: CGFloat,
+                         color: UIColor? = nil) -> PKStroke? {
+        guard isPenInk(stroke.ink.inkType), stroke.mask == nil, toolWidth > 0 else { return nil }
+        let path = Array(stroke.path)
+        guard !path.isEmpty else { return nil }
+        // A new ink, never the committed one: PencilKit's live strokes carry an older fountain-pen ink whose seeded
+        // grain beads at these widths. The new ink draws a clean line whatever the seed.
+        let ink = PKInk(.fountainPen, color: color ?? stroke.ink.color)
+        let points = shapedPoints(path, settings: settings, toolWidth: toolWidth, lifted: true)
+        let changed = stroke.ink.inkType != ink.inkType || stroke.ink.requiredContentVersion != ink.requiredContentVersion
+            || stroke.ink.color != ink.color
+            || zip(points, path).contains { $0.size != $1.size || abs($0.azimuth - $1.azimuth) > 1e-3 }
         guard changed else { return nil }
         let newPath = PKStrokePath(controlPoints: points, creationDate: stroke.path.creationDate)
         return PKStroke(ink: ink, path: newPath, transform: stroke.transform, mask: nil, randomSeed: stroke.randomSeed)

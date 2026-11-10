@@ -102,11 +102,11 @@ final class InkSelectionController {
         let stroke: PKStroke
 
         func isStill(_ other: PKStroke) -> Bool {
-            // The pen feel swaps the lifted monoline for a fountain-pen stroke with the same points, so both count.
-            other.path.creationDate == stroke.path.creationDate && other.path.count == stroke.path.count
-                && other.transform == stroke.transform
-                && (other.ink.inkType == stroke.ink.inkType
-                    || PenFeel.isPenInk(other.ink.inkType) && PenFeel.isPenInk(stroke.ink.inkType))
+            // The pen swaps PencilKit's committed stroke for the one it drew live from the same Pencil samples
+            // (EP56), keeping its creation date; the swap may hold a different number of points.
+            let pen = PenFeel.isPenInk(other.ink.inkType) && PenFeel.isPenInk(stroke.ink.inkType)
+            return other.path.creationDate == stroke.path.creationDate && other.transform == stroke.transform
+                && (pen || other.ink.inkType == stroke.ink.inkType && other.path.count == stroke.path.count)
         }
     }
 

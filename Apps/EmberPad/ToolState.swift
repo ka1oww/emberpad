@@ -170,7 +170,7 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// The PencilKit tool every page canvas uses for `tool`.
     func pencilTool(for tool: WorksheetTool) -> any PKTool {
         switch tool {
-        // Written as a thin monoline and given the fountain-pen feel when the Pencil lifts (PenFeel, EP53).
+        // PencilKit takes the Pencil in a clear monoline; the page draws the fountain-pen stroke live (LivePen, EP56).
         case .pen: PenFeel.liveTool(color: penColor, penWidth: penWidth)
         case .highlighter:
             PKInkingTool(.marker, color: highlighterColor.withAlphaComponent(Theme.highlighterDefaultOpacity), width: highlighterWidth)

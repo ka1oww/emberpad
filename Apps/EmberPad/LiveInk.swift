@@ -12,9 +12,11 @@ struct LiveInkStyle: Equatable {
 
     init?(tool: any PKTool) {
         guard let ink = tool as? PKInkingTool else { return nil }
-        color = ink.color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
-        // PencilKit draws a monoline tool (the pen, EP53) twice its width across.
-        width = ink.inkType == .monoline ? 2 * ink.width : ink.width
+        let resolved = ink.color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
+        // The pen takes its input in a clear monoline (EP56) and its ink is opaque; PencilKit draws a monoline tool
+        // twice its width across (EP53).
+        color = ink.inkType == PenFeel.liveInkType ? resolved.withAlphaComponent(1) : resolved
+        width = ink.inkType == PenFeel.liveInkType ? 2 * ink.width : ink.width
     }
 }
 
@@ -128,15 +130,29 @@ enum LiveInkGeometry {
     }
 }
 
+/// One Pencil sample, in the stroke's page space: what the live pen needs to draw the stroke as it will look after
+/// lift (EP56). Time is the touch timestamp, in seconds.
+struct LiveInkSample: Equatable {
+    var location: CGPoint
+    var time: TimeInterval
+    var force: CGFloat = 0
+    var azimuth: CGFloat = 0
+    var altitude: CGFloat = .pi / 2
+
+    init(location: CGPoint, time: TimeInterval = 0, force: CGFloat = 0, azimuth: CGFloat = 0, altitude: CGFloat = .pi / 2) {
+        self.location = location; self.time = time; self.force = force; self.azimuth = azimuth; self.altitude = altitude
+    }
+}
+
 /// Watches Apple Pencil touches beside PencilKit's drawing recogniser and reports their coalesced and predicted
 /// samples. It never leaves `.possible` while a stroke is drawn and fails on pen-up, so it never claims, delays or
 /// cancels a touch: PencilKit's ink and first-stroke latency are unchanged. Finger touches never reach it, and
 /// `strokeTarget` returns nil for anything that will not ink (an eraser, the lasso, a touch outside the page).
 final class LiveInkRecognizer: UIGestureRecognizer {
     enum Event: Equatable {
-        case began([CGPoint])
-        case moved([CGPoint], predicted: [CGPoint])
-        case ended([CGPoint])
+        case began([LiveInkSample])
+        case moved([LiveInkSample], predicted: [LiveInkSample])
+        case ended([LiveInkSample])
         case cancelled
     }
 
@@ -156,7 +172,8 @@ final class LiveInkRecognizer: UIGestureRecognizer {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         guard tracked == nil else { return }
-        guard let touch = touches.first(where: { $0.type == .pencil }), let view = strokeTarget?(touch) else {
+        guard let touch = touches.first(where: { allowedTouchTypes.contains($0.type.rawValue as NSNumber) }),
+              let view = strokeTarget?(touch) else {
             state = .failed
             return
         }
@@ -167,7 +184,7 @@ final class LiveInkRecognizer: UIGestureRecognizer {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         guard let tracked, touches.contains(tracked), let space else { return }
-        let predicted = (event.predictedTouches(for: tracked) ?? []).map { $0.preciseLocation(in: space) }
+        let predicted = (event.predictedTouches(for: tracked) ?? []).map { Self.sample($0, in: space) }
         onStroke?(.moved(Self.samples(of: tracked, in: event, view: space), predicted: predicted))
     }
 
@@ -203,7 +220,12 @@ final class LiveInkRecognizer: UIGestureRecognizer {
         state = .failed
     }
 
-    private static func samples(of touch: UITouch, in event: UIEvent, view: UIView) -> [CGPoint] {
-        (event.coalescedTouches(for: touch) ?? [touch]).map { $0.preciseLocation(in: view) }
+    private static func samples(of touch: UITouch, in event: UIEvent, view: UIView) -> [LiveInkSample] {
+        (event.coalescedTouches(for: touch) ?? [touch]).map { sample($0, in: view) }
+    }
+
+    private static func sample(_ touch: UITouch, in view: UIView) -> LiveInkSample {
+        LiveInkSample(location: touch.preciseLocation(in: view), time: touch.timestamp, force: touch.force,
+                      azimuth: touch.azimuthAngle(in: view), altitude: touch.altitudeAngle)
     }
 }

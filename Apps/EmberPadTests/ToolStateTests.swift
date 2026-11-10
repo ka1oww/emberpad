@@ -48,7 +48,7 @@ final class ToolStateTests: XCTestCase {
         s.penColorIndex = 2
         s.penWidthIndex = 2
         let pen = try XCTUnwrap(s.pencilTool(for: .pen) as? PKInkingTool)
-        // The pen writes as a thin monoline and takes the fountain-pen feel on lift (EP53).
+        // PencilKit takes the pen's input in a clear monoline in the pen colour; the live pen draws the ink (EP56).
         XCTAssertEqual(pen.inkType, .monoline)
         XCTAssertEqual(pen.color.emberHex, "B23A2E")
         XCTAssertEqual(pen.width, PenFeel.liveToolWidth(forPenWidth: 4))
