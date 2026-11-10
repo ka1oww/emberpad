@@ -81,6 +81,9 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// stored for a later package and not applied yet.
     var penTipSharpness = PenFeelSettings().tipSharpness
     var penPressureSensitivity = PenFeelSettings().pressureSensitivity
+    /// The laser pointer's Dot or Trail mode (P6). Dot by default, so the pointer is unchanged until the teacher
+    /// picks Trail.
+    var laserMode: LaserMode = .dot
 
     /// The design's ink hex values (section 3), which the `pen*` and
     /// `highlighter*` colour sets approximate to three decimals.
@@ -111,6 +114,7 @@ struct ToolSettings: Codable, Equatable, Sendable {
         eraserBackToLastTool = (try? c.decodeIfPresent(Bool.self, forKey: .eraserBackToLastTool)) ?? d.eraserBackToLastTool
         penTipSharpness = (try? c.decodeIfPresent(Double.self, forKey: .penTipSharpness)) ?? d.penTipSharpness
         penPressureSensitivity = (try? c.decodeIfPresent(Double.self, forKey: .penPressureSensitivity)) ?? d.penPressureSensitivity
+        laserMode = (try? c.decodeIfPresent(LaserMode.self, forKey: .laserMode)) ?? d.laserMode
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
@@ -317,6 +321,7 @@ final class ToolState {
     func setEraserBackToLastTool(_ on: Bool) { update { $0.eraserBackToLastTool = on } }
     func setPenTipSharpness(_ value: Double) { update { $0.penTipSharpness = value } }
     func setPenPressureSensitivity(_ value: Double) { update { $0.penPressureSensitivity = value } }
+    func setLaserMode(_ mode: LaserMode) { update { $0.laserMode = mode } }
 
     func canAddColor(for tool: WorksheetTool) -> Bool {
         presets(for: tool).count < ToolSettings.maxPresets

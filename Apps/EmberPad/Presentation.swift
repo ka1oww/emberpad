@@ -117,6 +117,9 @@ final class StudentDisplayModel: ObservableObject {
     @Published private(set) var liveInk: StudentLiveInk?
     /// The laser pointer's dot (P6), while the Pencil points. Never part of any drawing, and gated like live ink.
     @Published private(set) var laser: StudentLaserPointer?
+    /// The laser's fading trail in Trail mode, gated like the dot. It keeps fading after lift until it is empty.
+    @Published private(set) var laserTrail: StudentLaserTrail?
+    private var laserTrailTickPending = false
     var snapshot: StudentPageSnapshot? { content.snapshot }
     private let now: () -> TimeInterval
     private let schedule: MirrorThrottle.Scheduler
@@ -137,9 +140,12 @@ final class StudentDisplayModel: ObservableObject {
             content = .page(next)
             settleLiveInk(session)
             if let laser, !laser.belongs(to: next) { self.laser = nil }
+            if let laserTrail, !laserTrail.belongs(to: next) { clearLaserTrail() }
         }
-        catch StudentViewError.teacherCopyIsPrivate { content = .teacherCopyPrivate; setLiveInk(nil); hideLaser() }
-        catch { content = .none; setLiveInk(nil); hideLaser() } // Never leave a stale page from another document or page.
+        catch StudentViewError.teacherCopyIsPrivate {
+            content = .teacherCopyPrivate; setLiveInk(nil); hideLaser(); clearLaserTrail()
+        }
+        catch { content = .none; setLiveInk(nil); hideLaser(); clearLaserTrail() } // Never leave a stale page.
     }
 
     /// Called as soon as a document becomes the main page, before any renderer publishes a page.
@@ -147,12 +153,14 @@ final class StudentDisplayModel: ObservableObject {
         content = StudentSafeDocument(record) == nil ? .teacherCopyPrivate : .none
         setLiveInk(nil)
         hideLaser()
+        clearLaserTrail()
     }
 
     func clear() {
         content = .none
         setLiveInk(nil)
         hideLaser()
+        clearLaserTrail()
     }
 
     // MARK: Laser pointer (P6)
@@ -171,6 +179,44 @@ final class StudentDisplayModel: ObservableObject {
     /// The Pencil lifted or left the pages: the dot goes at once.
     func hideLaser() {
         if laser != nil { laser = nil }
+    }
+
+    /// Trail mode: adds a point at `location` on `pageIndex`, in that page's ink space. Refused, and any trail dropped,
+    /// unless the student view is showing this same Student session's page.
+    func extendLaserTrail(session: DocumentSession, pageIndex: Int, location: CGPoint) {
+        guard let snapshot = content.snapshot, snapshot.sessionID == session.instanceID,
+              snapshot.documentID == session.record.id else { return clearLaserTrail() }
+        var trail: StudentLaserTrail
+        if let current = laserTrail, current.belongs(to: snapshot) { trail = current }
+        else if let made = try? StudentLaserTrail(session: session, time: now()) { trail = made }
+        else { return clearLaserTrail() }
+        trail.add(session: session, pageIndex: pageIndex, location: location, at: now())
+        setLaserTrail(trail)
+    }
+
+    /// The Pencil lifted or left the pages: the trail stops growing and keeps fading until it is gone.
+    func breakLaserTrail() {
+        guard var trail = laserTrail else { return }
+        trail.breakLine()
+        setLaserTrail(trail)
+    }
+
+    /// Drops the trail at once: the laser was put away or the shown page changed hands.
+    func clearLaserTrail() { setLaserTrail(nil) }
+
+    private func tickLaserTrail() {
+        laserTrailTickPending = false
+        guard var trail = laserTrail else { return }
+        trail.prune(now: now())
+        setLaserTrail(trail)
+    }
+
+    private func setLaserTrail(_ value: StudentLaserTrail?) {
+        let next = value?.trail.isEmpty == false ? value : nil
+        if next != laserTrail { laserTrail = next }
+        guard next != nil, !laserTrailTickPending else { return }
+        laserTrailTickPending = true
+        schedule(LaserTrailStyle.studentFrameInterval) { [weak self] in self?.tickLaserTrail() }
     }
 
     // MARK: Live ink (EP-30)
@@ -280,7 +326,8 @@ struct StudentDisplayView: View {
             else {
                 switch model.content {
                 case .page(let snapshot):
-                    StudentPageSurface(snapshot: snapshot, framing: model.framing, liveInk: model.liveInk, laser: model.laser)
+                    StudentPageSurface(snapshot: snapshot, framing: model.framing, liveInk: model.liveInk, laser: model.laser,
+                                       laserTrail: model.laserTrail)
                 case .teacherCopyPrivate: Text("Teacher copy · private").font(.largeTitle).foregroundStyle(.white)
                 case .none: Text("No worksheet selected").foregroundStyle(.white)
                 }
@@ -294,9 +341,10 @@ private struct StudentPageSurface: UIViewRepresentable {
     let framing: StudentFraming
     let liveInk: StudentLiveInk?
     let laser: StudentLaserPointer?
+    let laserTrail: StudentLaserTrail?
     func makeUIView(context: Context) -> StudentPageDrawingView { StudentPageDrawingView() }
     func updateUIView(_ uiView: StudentPageDrawingView, context: Context) {
-        uiView.update(snapshot, framing: framing, liveInk: liveInk, laser: laser)
+        uiView.update(snapshot, framing: framing, liveInk: liveInk, laser: laser, laserTrail: laserTrail)
     }
 }
 
@@ -324,12 +372,15 @@ final class StudentPageDrawingView: UIView {
     private var liveStrokeLayers: [CAShapeLayer] = []
     /// The laser pointer's dot, above live ink. Placed like a live stroke, so a Pencil move never re-rasterises.
     private let laserLayer = CALayer()
+    /// Trail mode's fading line, under the dot and above live ink. Only its paths change as it moves and fades.
+    private let laserTrailLayer = LaserTrailLayer()
     /// Where each laid-out page sits in the viewport layer, for placing live strokes between full layouts.
     private var placedPages: [Int: (frame: CGRect, pageSize: CGSize)] = [:]
     private var snapshot: StudentPageSnapshot?
     private var framing: StudentFraming = .presenterPage
     private var liveInk: StudentLiveInk?
     private var laser: StudentLaserPointer?
+    private var laserTrail: StudentLaserTrail?
     let cache = StudentPageImageCache()
 
     override init(frame: CGRect) {
@@ -340,6 +391,8 @@ final class StudentPageDrawingView: UIView {
         viewport.backgroundColor = UIColor.emberCanvas.resolvedColor(with: Self.light).cgColor
         liveLayer.zPosition = 1 // Above every page and ink bitmap, however many are added later.
         viewport.addSublayer(liveLayer)
+        laserTrailLayer.zPosition = 0.5
+        liveLayer.addSublayer(laserTrailLayer)
         laserLayer.zPosition = 1
         laserLayer.isHidden = true
         liveLayer.addSublayer(laserLayer)
@@ -348,13 +401,14 @@ final class StudentPageDrawingView: UIView {
     required init?(coder: NSCoder) { nil }
 
     func update(_ value: StudentPageSnapshot, framing: StudentFraming, liveInk: StudentLiveInk? = nil,
-                laser: StudentLaserPointer? = nil) {
+                laser: StudentLaserPointer? = nil, laserTrail: StudentLaserTrail? = nil) {
         if snapshot?.documentID != value.documentID || snapshot?.sessionID != value.sessionID { cache.removeAll() }
         let sameFrame = snapshot.map { $0.showsSameFrame(as: value) } == true && self.framing == framing
         snapshot = value
         self.framing = framing
         self.liveInk = liveInk
         self.laser = laser
+        self.laserTrail = laserTrail
         // A Pencil move changes only the live paths. A new page frame lays everything out in one pass, so a stroke's
         // committed bitmap and the removal of its provisional copy land in the same frame.
         if sameFrame { layoutLiveInk() } else { setNeedsLayout() }
@@ -368,6 +422,9 @@ final class StudentPageDrawingView: UIView {
         guard !laserLayer.isHidden, !viewport.isHidden else { return nil }
         return (viewport.convert(laserLayer.position, to: layer), laserLayer.bounds.width)
     }
+
+    /// How many pieces of the laser trail are drawn, for tests.
+    var visibleLaserTrailPieces: Int { viewport.isHidden ? 0 : laserTrailLayer.drawnPieceCount }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -448,6 +505,19 @@ final class StudentPageDrawingView: UIView {
             shape.path = LiveInkGeometry.path(LiveInkGeometry.map(stroke.displayPoints, pageSize: placed.pageSize, onto: placed.frame))
         }
         layoutLaser()
+        layoutLaserTrail()
+    }
+
+    /// Draws the trail over its pages at the trail's own time; pieces on pages not in view are skipped.
+    private func layoutLaserTrail() {
+        guard let snapshot, let laserTrail, laserTrail.belongs(to: snapshot) else { return laserTrailLayer.clear() }
+        let pieces = laserTrail.trail.pieces(now: laserTrail.time).compactMap { piece -> (from: CGPoint, to: CGPoint, opacity: Double)? in
+            guard let placed = placedPages[piece.place] else { return nil }
+            let ends = LiveInkGeometry.map([piece.from, piece.to], pageSize: placed.pageSize, onto: placed.frame)
+            return (ends[0], ends[1], piece.opacity)
+        }
+        laserTrailLayer.frame = liveLayer.bounds
+        laserTrailLayer.render(pieces, width: LaserTrailStyle.studentWidth(for: liveLayer.bounds.size))
     }
 
     /// Places the laser dot over its page; a dot on a page not in view is not drawn.

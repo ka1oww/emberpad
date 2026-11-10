@@ -102,6 +102,109 @@ final class LaserPointerScreenshotTests: XCTestCase {
         try capture(external, "laser-student-teacher-copy")
     }
 
+    /// Trail mode: a swoosh under the written line on the iPad and on the student view in both framings, the same
+    /// trail half faded after lift, and the laser settings with Trail chosen. Both clocks are held, then stepped, so
+    /// the captures show a set fade instead of whatever the run loop reached.
+    func testLaserTrailOnTheIPadAndTheStudentView() throws {
+        let main = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.session.role == .windowApplication })
+        let tools = ToolState(defaults: UserDefaults(suiteName: suiteName)!)
+        tools.setLaserMode(.trail)
+        var clock: TimeInterval = 1000
+        let ticks = TickQueue()
+        let model = StudentDisplayModel(now: { clock }, schedule: { _, work in ticks.pending.append(work) })
+
+        let student = try StudentMirrorFixture.session(.student, pages: 2, root: root.appendingPathComponent("trail"))
+        student.update(PKDrawing(strokes: [Self.stroke([CGPoint(x: 70, y: 160), CGPoint(x: 200, y: 175), CGPoint(x: 330, y: 158)])]), page: 0)
+        model.opened(student.record)
+        let controller = PDFOverlayPageController(session: student, student: model, tools: tools)
+        controller.laserClock = { clock }
+        let window = UIWindow(windowScene: main)
+        window.frame = CGRect(x: 0, y: 0, width: 1180, height: 820)
+        window.rootViewController = UIHostingController(rootView: VStack(spacing: 0) {
+            ToolbarStrip(tools: tools)
+            PageRendererHost(renderer: controller)
+        })
+        window.isHidden = false
+        windows.append(window)
+        spin(1.0)
+        tools.select(.laser)
+        spin(0.3)
+        let canvas = try XCTUnwrap(controller.canvases[0])
+        let inkBefore = student.inkRevision(on: 0)
+
+        // A swoosh under the written line, drawn over 0.7 s, so its tail has started to fade.
+        for step in 0...70 {
+            let t = CGFloat(step) / 70
+            let point = CGPoint(x: 70 + 300 * t, y: 215 + 26 * sin(t * .pi * 2.2))
+            controller.laserEvent(.moved(controller.pdfView.convert(point, from: canvas)))
+            clock += 0.01
+        }
+        spin(0.3)
+        XCTAssertTrue(controller.laserTrailVisible)
+        XCTAssertTrue(controller.laserDotVisible)
+        try capture(window, "laser-trail-ipad-worksheet")
+
+        model.paused = false
+        let external = UIWindow(windowScene: main)
+        external.frame = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        external.rootViewController = UIHostingController(rootView: StudentDisplayView(model: model))
+        external.isHidden = false
+        windows.append(external)
+        model.framing = .presenterPage
+        spin(0.6)
+        XCTAssertGreaterThan(drawingView(in: external)?.visibleLaserTrailPieces ?? 0, 0)
+        try capture(external, "laser-trail-student-presenter-page")
+        model.framing = .fullPage
+        spin(0.6)
+        XCTAssertGreaterThan(drawingView(in: external)?.visibleLaserTrailPieces ?? 0, 0)
+        try capture(external, "laser-trail-student-full-page")
+
+        // Lift, then half a second: the dot has gone and the trail is fading on both screens.
+        controller.laserEvent(.lifted)
+        clock += 0.5
+        controller.tickLaserTrail()
+        ticks.runDue()
+        spin(0.4)
+        XCTAssertTrue(controller.laserTrailVisible)
+        XCTAssertNil(model.laser)
+        XCTAssertNotNil(model.laserTrail)
+        try capture(window, "laser-trail-ipad-fading")
+        try capture(external, "laser-trail-student-fading")
+
+        // A second after lift: nothing is left on either screen, and no ink was added.
+        clock += LaserTrailStyle.lifetime
+        controller.tickLaserTrail()
+        ticks.runDue()
+        spin(0.4)
+        XCTAssertFalse(controller.laserTrailVisible)
+        XCTAssertNil(model.laserTrail)
+        XCTAssertEqual(drawingView(in: external)?.visibleLaserTrailPieces, 0)
+        XCTAssertEqual(student.inkRevision(on: 0), inkBefore, "The trail never commits ink")
+        XCTAssertEqual(student.drawing(on: 0).strokes.count, 1)
+        try capture(external, "laser-trail-student-after-fade")
+
+        // The laser's settings with Trail chosen.
+        let settings = UIWindow(windowScene: main)
+        settings.frame = CGRect(x: 0, y: 0, width: 320, height: 300)
+        settings.overrideUserInterfaceStyle = .light
+        settings.rootViewController = UIHostingController(rootView: ToolSettingsPopover(tool: .laser, tools: tools, heightOverride: 300))
+        settings.isHidden = false
+        windows.append(settings)
+        spin(0.6)
+        try capture(settings, "tool-settings-laser-trail-light")
+    }
+
+    /// The student model's scheduled fade ticks, run by hand.
+    private final class TickQueue {
+        var pending: [@MainActor () -> Void] = []
+        @MainActor func runDue() {
+            let due = pending
+            pending = []
+            due.forEach { $0() }
+        }
+    }
+
     private func drawingView(in view: UIView) -> StudentPageDrawingView? {
         if let found = view as? StudentPageDrawingView { return found }
         for child in view.subviews { if let found = drawingView(in: child) { return found } }
