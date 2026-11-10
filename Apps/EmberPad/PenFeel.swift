@@ -57,6 +57,21 @@ enum PenFeel {
         PKInkingTool(liveInkType, color: color.withAlphaComponent(0), width: liveToolWidth(forPenWidth: penWidth))
     }
 
+    /// `drawing` with every clear pen-ink stroke (PencilKit's own copy of a live stroke the swap never replaced) given
+    /// back its colour at full alpha, same path, width, ink type, creation date and seed. Nil when none is clear.
+    static func restoringClearInk(in drawing: PKDrawing) -> PKDrawing? {
+        var changed = false
+        let strokes = drawing.strokes.map { stroke -> PKStroke in
+            var alpha: CGFloat = 1
+            stroke.ink.color.getRed(nil, green: nil, blue: nil, alpha: &alpha)
+            guard stroke.ink.inkType == liveInkType, alpha == 0 else { return stroke }
+            changed = true
+            return PKStroke(ink: PKInk(liveInkType, color: stroke.ink.color.withAlphaComponent(1)), path: stroke.path,
+                            transform: stroke.transform, mask: stroke.mask, randomSeed: stroke.randomSeed)
+        }
+        return changed ? PKDrawing(strokes: strokes) : nil
+    }
+
     // MARK: Width
 
     /// Drawn width, in page points, of a stroke at average pressure moving in

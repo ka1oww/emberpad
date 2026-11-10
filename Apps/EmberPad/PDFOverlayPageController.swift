@@ -208,6 +208,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.drawingPolicy = .pencilOnly
         canvas.maximumSupportedContentVersion = .latest
         canvas.drawing = session.drawing(on: index)
+        restoreClearInk(on: canvas, page: index)
         canvas.tool = tools.pencilTool
         canvas.delegate = self
         canvas.addGestureRecognizer(makeHoldRecognizer())
@@ -272,14 +273,27 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             guard let self else { return }
             let live = self.livePen.commit(page: page, now: self.livePenClock())
             self.scheduleLivePenExpiry()
-            guard !taken else { return }
-            let replacement = live?.stroke(lifted: true, creationDate: stroke.path.creationDate)
-                ?? PenFeel.reshaped(stroke, settings: settings.penFeel, toolWidth: settings.penWidth,
-                                    color: settings.penColor)
-            guard let replacement else { return }
-            self.replaceNewestStroke(page: page, strokeCount: count, with: replacement, undoManager: undoManager,
-                                     actionName: "Ink")
+            if !taken {
+                let replacement = live?.stroke(lifted: true, creationDate: stroke.path.creationDate)
+                    ?? PenFeel.reshaped(stroke, settings: settings.penFeel, toolWidth: settings.penWidth,
+                                        color: settings.penColor)
+                if let replacement {
+                    self.replaceNewestStroke(page: page, strokeCount: count, with: replacement,
+                                             undoManager: undoManager, actionName: "Ink")
+                }
+            }
+            if let canvas = self.canvases[page] { self.restoreClearInk(on: canvas, page: page) }
         }
+    }
+
+    /// Whatever the swap left behind, PencilKit's clear copy of a pen stroke, takes the pen colour back, so written
+    /// ink is never invisible. Not an undo step: the stroke is the one the page already has.
+    private func restoreClearInk(on canvas: PKCanvasView, page: Int) {
+        guard let restored = PenFeel.restoringClearInk(in: canvas.drawing) else { return }
+        isReplacingStroke = true
+        canvas.drawing = restored
+        isReplacingStroke = false
+        session.update(restored, page: page)
     }
 
     /// The page drew its ink: the live pen's committed strokes there are now on the page itself.
