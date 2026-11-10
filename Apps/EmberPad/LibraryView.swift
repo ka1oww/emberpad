@@ -64,7 +64,8 @@ struct LibraryView: View {
             NavigationStack {
                 detail
                     .navigationDestination(item: $reopenedWorksheet) { id in
-                        EditorScreen(documentID: id, library: library, presentation: presentation)
+                        EditorScreen(documentID: id, library: library, presentation: presentation,
+                                     toggleSidebar: { columns.toggleSidebar() })
                             .onAppear { columns.worksheetOpened() }
                             .onDisappear { columns.worksheetClosed() }
                     }
@@ -84,6 +85,7 @@ struct LibraryView: View {
         }
         .onAppear { columns.sizeClassChanged(to: horizontalSizeClass) }
         .onChange(of: horizontalSizeClass) { _, sizeClass in columns.sizeClassChanged(to: sizeClass) }
+        .onChange(of: columns.headerUnderStatusBar, initial: true) { _, under in presentation.headerUnderStatusBar = under }
         .onChange(of: library.sidebarSelection) { _, new in
             if case .subject(let name) = new { library.selectedSubject = name }
             else if new == .allSubjects { library.selectedSubject = nil }
@@ -190,10 +192,10 @@ struct LibraryView: View {
                 .padding(.horizontal, 24)
                 .padding(.top, 8)
 
-                if presentation.captureActive && presentation.externalSceneCount == 0 {
+                if presentation.otherDisplayAttached && presentation.externalSceneCount == 0 {
                     HStack(spacing: 8) {
                         Image(systemName: "rectangle.on.rectangle.slash")
-                        Text("Main screen capture detected. Private answers are hidden.")
+                        Text("Another screen is showing this iPad. Private answers are hidden.")
                         Spacer()
                     }
                     .font(Theme.meta)
@@ -253,7 +255,8 @@ struct LibraryView: View {
                             LibraryCardCell(record: record, library: library, presentation: presentation,
                                             thumbnails: thumbnails,
                                             onWorksheetOpen: { columns.worksheetOpened() },
-                                            onWorksheetClose: { columns.worksheetClosed() })
+                                            onWorksheetClose: { columns.worksheetClosed() },
+                                            onToggleSidebar: { columns.toggleSidebar() })
                         }
                     }
                     .padding(.horizontal, 24)
@@ -424,6 +427,17 @@ struct LibraryColumnState: Equatable {
         visibility = .detailOnly
     }
 
+    /// The worksheet header's sidebar button: shows the library sidebar beside the
+    /// worksheet, or hides it again. Back still restores what the library showed before.
+    mutating func toggleSidebar() {
+        guard isWorksheetOpen else { return }
+        visibility = visibility == .detailOnly ? .all : .detailOnly
+    }
+
+    /// The worksheet's slate-blue header reaches the status bar only while it has the
+    /// whole width; with the sidebar beside it the status bar keeps the system style.
+    var headerUnderStatusBar: Bool { isWorksheetOpen && visibility == .detailOnly }
+
     mutating func worksheetClosed() {
         guard isWorksheetOpen else { return }
         isWorksheetOpen = false
@@ -567,13 +581,15 @@ private struct LibraryCardCell: View {
     @ObservedObject var thumbnails: ThumbnailCache
     var onWorksheetOpen: () -> Void = {}
     var onWorksheetClose: () -> Void = {}
+    var onToggleSidebar: () -> Void = {}
     @StateObject private var flattenedExport = FlattenedExportModel()
 
     var body: some View {
         // Subscribes the card to thumbnail arrivals for this document version.
         let _ = thumbnails.revision(for: record.id)
         NavigationLink {
-            EditorScreen(documentID: record.id, library: library, presentation: presentation)
+            EditorScreen(documentID: record.id, library: library, presentation: presentation,
+                         toggleSidebar: onToggleSidebar)
                 .onAppear(perform: onWorksheetOpen)
                 .onDisappear(perform: onWorksheetClose)
         } label: {

@@ -4,14 +4,18 @@ public struct PresentationPolicy: Equatable, Sendable {
     public let hidePrivateContent: Bool
     public let pauseStudentView: Bool
 
-    public init(captureActive: Bool, externalSceneCount: Int, mainSceneActive: Bool) {
-        hidePrivateContent = !mainSceneActive || (captureActive && externalSceneCount == 0)
+    /// `otherDisplayAttached` is true while the iPad has a second screen (AirPlay or HDMI mirroring, or an
+    /// extended display). With no student view on it, that screen can show the whole iPad screen to the class,
+    /// so private content is hidden. Screen Recording alone attaches no screen and hides nothing (EP54): the
+    /// teacher records their own lesson, and only what the class sees must stay free of answers.
+    public init(otherDisplayAttached: Bool, externalSceneCount: Int, mainSceneActive: Bool) {
+        hidePrivateContent = !mainSceneActive || (otherDisplayAttached && externalSceneCount == 0)
         pauseStudentView = !mainSceneActive
     }
 
     /// Whether `document`'s pages may be drawn on the main screen now. A Teacher copy draws nothing, rather than a
-    /// blur or overlay over its pages, while private content is hidden (main-screen capture without an external
-    /// scene, or an inactive scene).
+    /// blur or overlay over its pages, while private content is hidden (another screen attached without the
+    /// student view, or an inactive scene).
     public func rendersOnMainScreen(_ document: DocumentRecord) -> Bool {
         StudentSafeDocument(document) != nil || !hidePrivateContent
     }

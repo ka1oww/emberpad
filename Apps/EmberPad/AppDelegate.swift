@@ -1,3 +1,4 @@
+import Combine
 import UIKit
 import SwiftUI
 import EmberSyncKit
@@ -73,23 +74,76 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 }
 
-private final class CaptureGuardHostingController: UIHostingController<LibraryView> {
+/// Hosts a main-scene root and draws the status bar in white while the worksheet's
+/// slate-blue header sits under it (EP54); otherwise the system default.
+class HeaderStatusBarHostingController<Content: View>: UIHostingController<Content> {
+    private let presentation: PresentationState
+    private var headerObserver: AnyCancellable?
+
+    init(rootView: Content, presentation: PresentationState) {
+        self.presentation = presentation
+        super.init(rootView: rootView)
+    }
+    @MainActor required dynamic init?(coder aDecoder: NSCoder) { nil }
+
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        presentation.headerUnderStatusBar ? .lightContent : .default
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        // `@Published` fires before the value changes, so read it on the next main-queue turn.
+        headerObserver = presentation.$headerUnderStatusBar.removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.setNeedsStatusBarAppearanceUpdate() }
+    }
+}
+
+private final class CaptureGuardHostingController: HeaderStatusBarHostingController<LibraryView> {
     private let environment: AppEnvironment
     init(environment: AppEnvironment) {
         self.environment = environment
         super.init(rootView: LibraryView(library: environment.library, presentation: environment.presentation,
-                                         pairing: environment.pairing, sync: environment.sync))
+                                         pairing: environment.pairing, sync: environment.sync),
+                   presentation: environment.presentation)
     }
     @MainActor required dynamic init?(coder aDecoder: NSCoder) { nil }
     override func viewDidLoad() {
         super.viewDidLoad()
         registerForTraitChanges([UITraitSceneCaptureState.self]) { (controller: CaptureGuardHostingController, _: UITraitCollection) in
-            controller.updateCapture()
+            controller.updateCaptureNowAndAfterSettling()
         }
         updateCapture()
     }
     override func viewDidAppear(_ animated: Bool) { super.viewDidAppear(animated); updateCapture() }
-    private func updateCapture() { environment.presentation.captureActive = traitCollection.sceneCaptureState == .active }
+    /// Re-reads capture and attached screens. Mirroring flips the capture trait, and a screen or
+    /// scene coming or going posts a notification; the screen list can settle a moment after
+    /// either, so each signal reads it again after a short delay (EP54).
+    func updateCapture() {
+        environment.presentation.captureActive = traitCollection.sceneCaptureState == .active
+        environment.presentation.otherDisplayAttached = UIScreen.screens.count > 1
+    }
+    private func updateCaptureNowAndAfterSettling() {
+        updateCapture()
+        Task { @MainActor [weak self] in
+            for delay in [300, 1000] {
+                try? await Task.sleep(for: .milliseconds(delay))
+                self?.updateCapture()
+            }
+        }
+    }
+    private var screenObservers: [NSObjectProtocol] = []
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        guard screenObservers.isEmpty else { return }
+        let names = [UIScene.willConnectNotification, UIScene.didDisconnectNotification,
+                     UIScreen.didConnectNotification, UIScreen.didDisconnectNotification]
+        screenObservers = names.map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.updateCaptureNowAndAfterSettling() }
+            }
+        }
+    }
 }
 
 final class StudentSceneDelegate: UIResponder, UIWindowSceneDelegate {

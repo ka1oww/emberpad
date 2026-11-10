@@ -35,21 +35,34 @@ struct PageRendererHost: UIViewControllerRepresentable {
 enum SharePillState: Equatable {
     case notSharing
     case sharing
-    case captured
+    /// Another screen shows the whole iPad screen (mirroring), so the answers are hidden.
+    case mirrored
     case paused
 
-    static func current(captureActive: Bool, externalSceneCount: Int, mainSceneActive: Bool) -> SharePillState {
+    /// Screen Recording alone attaches no screen and reads as not sharing (EP54).
+    static func current(otherDisplayAttached: Bool, externalSceneCount: Int, mainSceneActive: Bool) -> SharePillState {
         if !mainSceneActive { return .paused }
-        if captureActive, externalSceneCount == 0 { return .captured }
         if externalSceneCount > 0 { return .sharing }
+        if otherDisplayAttached { return .mirrored }
         return .notSharing
+    }
+
+    /// Whether the header shows a pill beside the student-view icon. Only sharing and
+    /// paused do: not sharing is the bare icon, and capture says nothing in the app
+    /// because iPadOS shows its own indicator (EP54). While mirrored the answers stay
+    /// hidden all the same (`PresentationPolicy`).
+    var showsHeaderPill: Bool {
+        switch self {
+        case .sharing, .paused: true
+        case .notSharing, .mirrored: false
+        }
     }
 
     var accessibilityText: String {
         switch self {
         case .notSharing: "Not sharing"
         case .sharing: "Sharing. Students see: worksheet only"
-        case .captured: "Screen captured. Answers hidden"
+        case .mirrored: "Screen mirrored. Answers hidden"
         case .paused: "Students see: Paused"
         }
     }
@@ -73,7 +86,7 @@ struct SharePillLabel: View {
         switch state {
         case .notSharing: "Not sharing"
         case .sharing: short ? "Sharing" : "● Students see: worksheet only"
-        case .captured: "● Screen captured · answers hidden"
+        case .mirrored: "● Screen mirrored · answers hidden"
         case .paused: "Students see: Paused"
         }
     }
@@ -82,7 +95,7 @@ struct SharePillLabel: View {
         switch state {
         case .notSharing, .paused: Theme.surface2
         case .sharing: Theme.okSoft
-        case .captured: Theme.danger
+        case .mirrored: Theme.danger
         }
     }
 
@@ -90,7 +103,7 @@ struct SharePillLabel: View {
         switch state {
         case .notSharing, .paused: Theme.text2
         case .sharing: Theme.ok
-        case .captured: .white
+        case .mirrored: .white
         }
     }
 }
@@ -198,14 +211,17 @@ struct EditorScreen: View {
     let documentID: UUID
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
+    /// Shows or hides the library sidebar beside the worksheet; nil where there is no sidebar.
+    let toggleSidebar: (() -> Void)?
 
     /// `chrome` is injectable so a test can open the Pages popover the way a tap does.
     @MainActor
     init(documentID: UUID, library: LibraryController, presentation: PresentationState,
-         chrome: PageChromeState? = nil) {
+         chrome: PageChromeState? = nil, toggleSidebar: (() -> Void)? = nil) {
         self.documentID = documentID
         self.library = library
         self.presentation = presentation
+        self.toggleSidebar = toggleSidebar
         _chrome = StateObject(wrappedValue: chrome ?? PageChromeState())
     }
     @State private var session: DocumentSession?
@@ -221,9 +237,10 @@ struct EditorScreen: View {
     @StateObject private var flattenedExport = FlattenedExportModel()
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dismiss) private var dismiss
 
     private var pillState: SharePillState {
-        SharePillState.current(captureActive: presentation.captureActive,
+        SharePillState.current(otherDisplayAttached: presentation.otherDisplayAttached,
                                externalSceneCount: presentation.externalSceneCount,
                                mainSceneActive: presentation.mainSceneActive)
     }
@@ -245,17 +262,15 @@ struct EditorScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            header
             ToolbarStrip(tools: tools)
-            if presentation.captureActive && presentation.externalSceneCount == 0 {
-                CaptureLeakBanner()
-            }
             if let session { InkSaveBanner(session: session) }
             ZStack(alignment: .topLeading) {
                 if let renderer, let session {
                     if presentation.policy.rendersOnMainScreen(session.record) { PageRendererHost(renderer: renderer) }
                     else {
                         // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
-                        PrivatePlaceholder(text: "Teacher copy · private. Hidden during capture or while inactive.")
+                        PrivatePlaceholder(text: "Teacher copy · private. Hidden while another screen shows this iPad, or while inactive.")
                     }
                 } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
                 else { ProgressView("Opening worksheet") }
@@ -278,66 +293,9 @@ struct EditorScreen: View {
             }
             .overlay(alignment: .top) { ToolToastOverlay(toast: tools.toast) }
         }
-        .navigationBarTitleDisplayMode(.inline)
+        // The slate-blue header replaces the system nav bar (EP54, laid out like GoodNotes).
+        .toolbar(.hidden, for: .navigationBar)
         .flattenedExportSheet(flattenedExport)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Pages", systemImage: "square.grid.2x2") { chrome.openPages(from: .toolbar) }
-                    .disabled(!pagesAvailable)
-                    .popover(isPresented: chrome.isShowingPages(from: .toolbar), arrowEdge: .top) {
-                        if let session { pageNavigator(session) }
-                    }
-            }
-            ToolbarItem(placement: .principal) {
-                if let session { EditorTitleBlock(session: session, currentPage: chrome.currentPage) }
-                else { Text("Worksheet").font(Theme.documentTitle).foregroundStyle(Theme.text) }
-            }
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                Menu {
-                    WorksheetSharingRows(framing: $presentation.studentFraming)
-                } label: {
-                    SharePillLabel(state: pillState, short: shortPill)
-                }
-                .accessibilityLabel("Sharing: \(pillState.accessibilityText)")
-                Button {
-                    withAnimation { teacherCard.toggle() }
-                } label: {
-                    Image(systemName: "book")
-                        .imageScale(.medium)
-                        .padding(6)
-                        .background(teacherCard.isOpen ? Theme.accentSoft : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                .accessibilityLabel(teacherCard.toggleAccessibilityLabel)
-                Button("Undo", systemImage: "arrow.uturn.backward") { renderer?.undo() }
-                Button("Redo", systemImage: "arrow.uturn.forward") { renderer?.redo() }
-                Menu {
-                    WorksheetSharingRows(framing: $presentation.studentFraming)
-                    Button {} label: {
-                        HStack { Text("Record lesson"); Spacer(); PhaseTag(text: "Phase 3") }
-                    }.disabled(true)
-                    Button {
-                        flattenedExport.export(documentID, library: library)
-                    } label: {
-                        HStack {
-                            Text("Export flattened PDF")
-                            Spacer()
-                            if flattenedExport.isExporting { ProgressView() }
-                        }
-                    }
-                    .disabled(session?.record.role != .student || flattenedExport.isExporting)
-                    Button {
-                        flattenedExport.export(documentID, page: chrome.currentPage, library: library)
-                    } label: {
-                        Text("Export This Page")
-                    }
-                    .disabled(session?.record.role != .student || flattenedExport.isExporting)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .accessibilityLabel("More options")
-            }
-        }
         .task {
             do {
                 let opened = try await library.open(documentID)
@@ -368,32 +326,140 @@ struct EditorScreen: View {
     }
 }
 
-private struct EditorTitleBlock: View {
-    @ObservedObject var session: DocumentSession
-    let currentPage: Int
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Text(session.record.title)
-                .font(Theme.documentTitle)
-                .foregroundStyle(Theme.text)
-                .lineLimit(1)
-            Text("Page \(currentPage + 1) of \(session.pdf.pageCount) · \(session.saveError == nil && !session.hasUnsavedInk ? "saved" : "not saved")")
-                .font(Theme.pageMeta)
-                .foregroundStyle(Theme.text2)
-                .lineLimit(1)
+extension EditorScreen {
+    /// The slate-blue title bar (EP54): back, library sidebar, pages and export on the
+    /// left; the title with its menu in the centre; undo, redo, Teacher copy, the
+    /// student view and More on the right.
+    private var header: some View {
+        HeaderBarLayout {
+            HStack(spacing: WorksheetHeaderMetrics.iconSpacing) { leadingActions }
+            titleMenu
+            HStack(spacing: WorksheetHeaderMetrics.iconSpacing) { trailingActions }
         }
+        .padding(.horizontal, WorksheetHeaderMetrics.edgeInset)
+        .frame(maxWidth: .infinity)
+        .frame(height: WorksheetHeaderMetrics.barHeight)
+        .background(Theme.headerBar.ignoresSafeArea(edges: .top))
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+    }
+
+    @ViewBuilder
+    private var leadingActions: some View {
+        Button { dismiss() } label: { HeaderIcon(symbol: "chevron.left") }
+            .accessibilityLabel("Back")
+        if let toggleSidebar {
+            Button { withAnimation { toggleSidebar() } } label: { HeaderIcon(symbol: "sidebar.left") }
+                .accessibilityLabel("Library sidebar")
+        }
+        Button { chrome.openPages(from: .toolbar) } label: { HeaderIcon(symbol: "square.grid.2x2") }
+            .accessibilityLabel("Pages")
+            .disabled(!pagesAvailable)
+            .popover(isPresented: chrome.isShowingPages(from: .toolbar), arrowEdge: .top) {
+                if let session { pageNavigator(session) }
+            }
+        Menu {
+            exportRows
+        } label: {
+            HeaderIcon(symbol: "square.and.arrow.up")
+        }
+        .accessibilityLabel("Export")
+        .disabled(session?.record.role != .student)
+    }
+
+    @ViewBuilder
+    private var titleMenu: some View {
+        if let session {
+            HeaderTitleMenu(session: session, currentPage: chrome.currentPage, pagesAvailable: pagesAvailable) {
+                chrome.openPages(from: .toolbar)
+            }
+        } else {
+            HeaderTitleLabel(title: "Worksheet")
+        }
+    }
+
+    @ViewBuilder
+    private var trailingActions: some View {
+        Button { renderer?.undo() } label: { HeaderIcon(symbol: "arrow.uturn.backward") }
+            .accessibilityLabel("Undo")
+        Button { renderer?.redo() } label: { HeaderIcon(symbol: "arrow.uturn.forward") }
+            .accessibilityLabel("Redo")
+        Button {
+            withAnimation { teacherCard.toggle() }
+        } label: {
+            HeaderIcon(symbol: "book", isOn: teacherCard.isOpen)
+        }
+        .accessibilityLabel(teacherCard.toggleAccessibilityLabel)
+        Menu {
+            WorksheetSharingRows(framing: $presentation.studentFraming)
+        } label: {
+            HStack(spacing: 2) {
+                if pillState.showsHeaderPill { SharePillLabel(state: pillState, short: shortPill) }
+                HeaderIcon(symbol: "airplayvideo")
+            }
+        }
+        .accessibilityLabel("Sharing: \(pillState.accessibilityText)")
+        Menu {
+            WorksheetSharingRows(framing: $presentation.studentFraming)
+            Button {} label: {
+                HStack { Text("Record lesson"); Spacer(); PhaseTag(text: "Phase 3") }
+            }.disabled(true)
+            exportRows
+        } label: {
+            HeaderIcon(symbol: "ellipsis")
+        }
+        .accessibilityLabel("More options")
+    }
+
+    @ViewBuilder
+    private var exportRows: some View {
+        Button {
+            flattenedExport.export(documentID, library: library)
+        } label: {
+            HStack {
+                Text("Export flattened PDF")
+                Spacer()
+                if flattenedExport.isExporting { ProgressView() }
+            }
+        }
+        .disabled(session?.record.role != .student || flattenedExport.isExporting)
+        Button {
+            flattenedExport.export(documentID, page: chrome.currentPage, library: library)
+        } label: {
+            Text("Export This Page")
+        }
+        .disabled(session?.record.role != .student || flattenedExport.isExporting)
     }
 }
 
-private struct CaptureLeakBanner: View {
+/// The centred title and its menu, which holds the page count and save state that
+/// used to sit under the title, and a way to every page.
+private struct HeaderTitleMenu: View {
+    @ObservedObject var session: DocumentSession
+    let currentPage: Int
+    let pagesAvailable: Bool
+    let showPages: () -> Void
+
+    private var saved: Bool { session.saveError == nil && !session.hasUnsavedInk }
+
     var body: some View {
-        Text("The whole iPad screen is being captured. Answers are hidden. Share with AirPlay Screen Mirroring or an HDMI adapter instead.")
-            .font(Theme.meta)
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.danger)
+        let page = WorksheetStatusText.page(currentPage, of: session.pdf.pageCount)
+        let save = WorksheetStatusText.save(saved: saved)
+        Menu {
+            Section(session.record.title) {
+                Label(page, systemImage: "doc")
+                Label(save, systemImage: saved ? "checkmark.circle" : "clock")
+            }
+            Button("Show All Pages", systemImage: "square.grid.2x2") {
+                // Let the menu finish closing before the popover presents.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: showPages)
+            }
+            .disabled(!pagesAvailable)
+        } label: {
+            HeaderTitleLabel(title: session.record.title)
+        }
+        .accessibilityLabel(session.record.title)
+        .accessibilityValue("\(page), \(saved ? "saved" : "not saved")")
     }
 }
 

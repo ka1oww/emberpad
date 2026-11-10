@@ -152,7 +152,7 @@ final class TeacherCopyCardTests: XCTestCase {
         let answers = try XCTUnwrap(resolved)
         let teacherOriginal = try await store.originalURL(documentID: teacher.id)
         XCTAssertEqual(answers, teacherOriginal)
-        let shown = PresentationPolicy(captureActive: false, externalSceneCount: 1, mainSceneActive: true)
+        let shown = PresentationPolicy(otherDisplayAttached: false, externalSceneCount: 1, mainSceneActive: true)
         XCTAssertEqual(TeacherCopyCardContent.resolve(policy: shown, mainSceneActive: true, privateAnswerURL: answers), .pdf(teacherOriginal))
 
         let unpairedAnswers = await library.teacherCopyURL(for: try await store.document(unpaired.id))
@@ -166,14 +166,18 @@ final class TeacherCopyCardTests: XCTestCase {
 
     func testContentStates() {
         let url = URL(fileURLWithPath: "/tmp/synthetic-teacher.pdf")
-        let shown = PresentationPolicy(captureActive: false, externalSceneCount: 1, mainSceneActive: true)
+        let shown = PresentationPolicy(otherDisplayAttached: false, externalSceneCount: 1, mainSceneActive: true)
         XCTAssertEqual(TeacherCopyCardContent.resolve(policy: shown, mainSceneActive: true, privateAnswerURL: url), .pdf(url))
         XCTAssertEqual(TeacherCopyCardContent.resolve(policy: shown, mainSceneActive: true, privateAnswerURL: nil), .noTeacherCopy)
 
-        let captured = PresentationPolicy(captureActive: true, externalSceneCount: 0, mainSceneActive: true)
-        XCTAssertEqual(TeacherCopyCardContent.resolve(policy: captured, mainSceneActive: true, privateAnswerURL: url), .hidden(.capture))
+        let mirrored = PresentationPolicy(otherDisplayAttached: true, externalSceneCount: 0, mainSceneActive: true)
+        XCTAssertEqual(TeacherCopyCardContent.resolve(policy: mirrored, mainSceneActive: true, privateAnswerURL: url), .hidden(.capture))
 
-        let inactive = PresentationPolicy(captureActive: false, externalSceneCount: 1, mainSceneActive: false)
+        // The iPad's own Screen Recording attaches no screen: the answers show (EP54).
+        let recording = PresentationPolicy(otherDisplayAttached: false, externalSceneCount: 0, mainSceneActive: true)
+        XCTAssertEqual(TeacherCopyCardContent.resolve(policy: recording, mainSceneActive: true, privateAnswerURL: url), .pdf(url))
+
+        let inactive = PresentationPolicy(otherDisplayAttached: false, externalSceneCount: 1, mainSceneActive: false)
         XCTAssertEqual(TeacherCopyCardContent.resolve(policy: inactive, mainSceneActive: false, privateAnswerURL: url), .hidden(.inactive))
     }
 
@@ -181,10 +185,10 @@ final class TeacherCopyCardTests: XCTestCase {
     /// body never builds a PDF view and no answer pixels are produced.
     func testHiddenPolicyNeverYieldsAPDFForAnyInput() {
         let url = URL(fileURLWithPath: "/tmp/synthetic-teacher.pdf")
-        for capture in [false, true] {
+        for display in [false, true] {
             for external in [0, 1, 2] {
                 for active in [false, true] {
-                    let policy = PresentationPolicy(captureActive: capture, externalSceneCount: external, mainSceneActive: active)
+                    let policy = PresentationPolicy(otherDisplayAttached: display, externalSceneCount: external, mainSceneActive: active)
                     for answers in [url, nil] {
                         let content = TeacherCopyCardContent.resolve(policy: policy, mainSceneActive: active, privateAnswerURL: answers)
                         if policy.hidePrivateContent {

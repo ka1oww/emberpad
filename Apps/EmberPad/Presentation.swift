@@ -285,8 +285,15 @@ final class StudentDisplayModel: ObservableObject {
 @MainActor
 final class PresentationState: ObservableObject {
     let student = StudentDisplayModel()
+    /// The main scene's screen is being captured: Screen Recording, or mirroring to another screen.
+    /// Only the pairing camera preview acts on it; answers follow `otherDisplayAttached` (EP54).
     @Published var captureActive = false
+    /// The iPad has a second screen attached (AirPlay or HDMI mirroring, or an extended display).
+    @Published var otherDisplayAttached = false
     @Published var externalSceneCount = 0
+    /// True while the worksheet's slate-blue header fills the top of the screen, so the
+    /// main scene draws the status bar in white over it (EP54).
+    @Published var headerUnderStatusBar = false
     @Published var mainSceneActive = false {
         didSet { student.paused = policy.pauseStudentView }
     }
@@ -313,7 +320,8 @@ final class PresentationState: ObservableObject {
     }
 
     var policy: PresentationPolicy {
-        PresentationPolicy(captureActive: captureActive, externalSceneCount: externalSceneCount, mainSceneActive: mainSceneActive)
+        PresentationPolicy(otherDisplayAttached: otherDisplayAttached, externalSceneCount: externalSceneCount,
+                           mainSceneActive: mainSceneActive)
     }
 }
 

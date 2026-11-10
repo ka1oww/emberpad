@@ -12,19 +12,19 @@ import EmberSyncKit
 final class WorksheetChromeTests: XCTestCase {
     func testSharePillCoversEveryPresentationState() {
         XCTAssertEqual(
-            SharePillState.current(captureActive: false, externalSceneCount: 0, mainSceneActive: true),
+            SharePillState.current(otherDisplayAttached: false, externalSceneCount: 0, mainSceneActive: true),
             .notSharing
         )
         XCTAssertEqual(
-            SharePillState.current(captureActive: false, externalSceneCount: 1, mainSceneActive: true),
+            SharePillState.current(otherDisplayAttached: true, externalSceneCount: 1, mainSceneActive: true),
             .sharing
         )
         XCTAssertEqual(
-            SharePillState.current(captureActive: true, externalSceneCount: 0, mainSceneActive: true),
-            .captured
+            SharePillState.current(otherDisplayAttached: true, externalSceneCount: 0, mainSceneActive: true),
+            .mirrored
         )
         XCTAssertEqual(
-            SharePillState.current(captureActive: false, externalSceneCount: 0, mainSceneActive: false),
+            SharePillState.current(otherDisplayAttached: false, externalSceneCount: 0, mainSceneActive: false),
             .paused
         )
     }
@@ -32,13 +32,52 @@ final class WorksheetChromeTests: XCTestCase {
     func testInactiveAlwaysReadsPaused() {
         // Inactive beats every other signal: the student view is paused, never sharing.
         XCTAssertEqual(
-            SharePillState.current(captureActive: true, externalSceneCount: 1, mainSceneActive: false),
+            SharePillState.current(otherDisplayAttached: true, externalSceneCount: 1, mainSceneActive: false),
             .paused
         )
         XCTAssertEqual(
-            SharePillState.current(captureActive: true, externalSceneCount: 0, mainSceneActive: false),
+            SharePillState.current(otherDisplayAttached: true, externalSceneCount: 0, mainSceneActive: false),
             .paused
         )
+    }
+
+    /// EP54: the header says nothing about capture or mirroring; only sharing and paused get a pill.
+    func testHeaderShowsNoCaptureOrMirrorPill() {
+        XCTAssertFalse(SharePillState.notSharing.showsHeaderPill)
+        XCTAssertFalse(SharePillState.mirrored.showsHeaderPill)
+        XCTAssertTrue(SharePillState.sharing.showsHeaderPill)
+        XCTAssertTrue(SharePillState.paused.showsHeaderPill)
+    }
+
+    /// EP54: the title is centred on the bar when it fits, otherwise centred in the gap.
+    func testHeaderTitleCentresOnTheBarOrInTheGap() {
+        let centred = HeaderBarLayout.titleFrame(width: 1180, leading: 190, trailing: 240, spacing: 12, titleWidth: 400)
+        XCTAssertEqual(centred.midX, 590)
+        XCTAssertEqual(centred.width, 400)
+
+        let long = HeaderBarLayout.titleFrame(width: 820, leading: 190, trailing: 240, spacing: 12, titleWidth: 600)
+        XCTAssertEqual(long.midX, (202 + 568) / 2)
+        XCTAssertEqual(long.width, 366, "a long title shortens to the gap and never runs under a button")
+    }
+
+    /// EP54: the page count and save state moved into the title's menu.
+    func testTitleMenuStatusText() {
+        XCTAssertEqual(WorksheetStatusText.page(1, of: 18), "Page 2 of 18")
+        XCTAssertEqual(WorksheetStatusText.save(saved: true), "All ink saved")
+        XCTAssertEqual(WorksheetStatusText.save(saved: false), "Ink not saved yet")
+    }
+
+    /// EP54: the tool row runs in GoodNotes' order, with every working tool on it once.
+    func testToolRowFollowsGoodNotesOrder() {
+        XCTAssertEqual(ToolbarStrip.order, [
+            .tool(.pen), .tool(.eraser), .tool(.highlighter), .extra(.shapes),
+            .tool(.lasso), .extra(.image), .extra(.text), .tool(.laser),
+        ])
+        let tools = ToolbarStrip.order.compactMap { slot -> WorksheetTool? in
+            if case .tool(let tool) = slot { tool } else { nil }
+        }
+        XCTAssertEqual(Set(tools), Set(WorksheetTool.allCases))
+        XCTAssertEqual(tools.count, WorksheetTool.allCases.count)
     }
 
     func testPageChromeShowsPillOnPageChangeThenHidesIt() async {

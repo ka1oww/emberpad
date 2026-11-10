@@ -79,10 +79,16 @@ final class TeacherCopyPrivacyTests: XCTestCase {
         state.externalSceneCount = 1
         XCTAssertTrue(state.policy.rendersOnMainScreen(teacher))
 
+        // Mirrored: a second screen with no student view on it.
         state.externalSceneCount = 0
         state.captureActive = true
+        state.otherDisplayAttached = true
         XCTAssertFalse(state.policy.rendersOnMainScreen(teacher))
         XCTAssertTrue(state.policy.rendersOnMainScreen(student))
+
+        // Screen Recording only: captured, but no other screen. The teacher may record the answers (EP54).
+        state.otherDisplayAttached = false
+        XCTAssertTrue(state.policy.rendersOnMainScreen(teacher))
 
         state.captureActive = false
         state.mainSceneActive = false
