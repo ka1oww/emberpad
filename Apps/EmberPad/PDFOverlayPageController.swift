@@ -263,7 +263,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let previousCount = session.drawing(on: page).strokes.count
         inkSelection.pageDidChange(page)
         session.update(canvasView.drawing, page: page)
-        let taken = straightenIfHeld(canvasView, page: page, previousCount: previousCount)
+        // The Shape tool's strokes become shapes (EP64); they are never lines to straighten or loops to lasso.
+        let taken = tools.current == .shape
+            ? makeShapeIfDrawn(canvasView, page: page, previousCount: previousCount)
+            : straightenIfHeld(canvasView, page: page, previousCount: previousCount)
         applyPenFeel(canvasView, page: page, previousCount: previousCount, taken: taken)
     }
 
@@ -787,7 +790,7 @@ extension PDFOverlayPageController {
         let snaps = switch tools.current {
         case .highlighter: settings.highlighterAlwaysStraight || (hold.isHeld && settings.straightHighlighter)
         case .pen: hold.isHeld && settings.penDrawAndHold && hold.lineLikeAtHold
-        case .lasso, .eraser, .laser: false
+        case .lasso, .eraser, .laser, .shape: false
         }
         guard snaps else {
             holdGuide.removeFromSuperlayer()
@@ -845,7 +848,7 @@ extension PDFOverlayPageController {
         return inkSelection.lassoNewestStroke(page: page, strokeCount: count, undoManager: undoManager)
     }
 
-    private static func holdRecognizer(on canvas: PKCanvasView) -> HoldRecognizer? {
+    static func holdRecognizer(on canvas: PKCanvasView) -> HoldRecognizer? {
         canvas.gestureRecognizers?.lazy.compactMap { $0 as? HoldRecognizer }.first
     }
 
@@ -920,7 +923,14 @@ extension PDFOverlayPageController {
     /// page's drawing has moved on since the stroke was committed.
     func replaceNewestStroke(page: Int, strokeCount: Int, with replacement: PKStroke, undoManager: UndoManager?,
                              actionName: String = "Straight Line") {
-        guard let canvas = canvases[page], canvas.drawing.strokes.count == strokeCount, strokeCount > 0,
+        replaceNewestStroke(page: page, strokeCount: strokeCount, with: [replacement], undoManager: undoManager,
+                            actionName: actionName)
+    }
+
+    /// The same swap with any number of strokes in the newest stroke's place, as a shape and its fill (EP64).
+    func replaceNewestStroke(page: Int, strokeCount: Int, with replacements: [PKStroke], undoManager: UndoManager?,
+                             actionName: String) {
+        guard let canvas = canvases[page], canvas.drawing.strokes.count == strokeCount, strokeCount > 0, !replacements.isEmpty,
               undoManager?.isUndoing != true, undoManager?.isRedoing != true else { return }
         isReplacingStroke = true
         defer {
@@ -938,7 +948,7 @@ extension PDFOverlayPageController {
             canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes.dropLast())
         }
         let before = canvas.drawing
-        let after = PKDrawing(strokes: before.strokes + [replacement])
+        let after = PKDrawing(strokes: before.strokes + replacements)
         canvas.drawing = after
         if let undoManager {
             undoManager.beginUndoGrouping()
@@ -969,6 +979,40 @@ extension PDFOverlayPageController {
             isReplacingStroke = false
         }
         session.update(drawing, page: page)
+    }
+}
+
+// MARK: - Shape tool (EP64)
+
+extension PDFOverlayPageController {
+    /// After PencilKit commits a Shape tool stroke, swaps it, as one undo step named for the shape, for the clean
+    /// shape it was drawn as (`ShapeRecognizer`): snapped to the page's other shapes when Snap to Other Shapes is on,
+    /// with its fill under it when Fill Color is on and the shape is closed. The swap waits a turn of the run loop,
+    /// as the straight-line snap does, so PencilKit closes its undo group first. A stroke that is no shape stays as
+    /// drawn. Returns whether the stroke is taken (a shape, or an undo or redo), which it always is once seen here.
+    @discardableResult
+    func makeShapeIfDrawn(_ canvas: PKCanvasView, page: Int, previousCount: Int) -> Bool {
+        guard let hold = Self.holdRecognizer(on: canvas) else { return false }
+        let drawn = hold.pencilStroke
+        // A stroke applies to the one drawing change it ended, whatever that change was.
+        hold.consumeHold()
+        guard drawn, !readOnly else { return false }
+        // Undo and redo bring strokes back exactly as they were.
+        if let undoManager = canvas.undoManager, undoManager.isUndoing || undoManager.isRedoing { return true }
+        guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
+              stroke.ink.inkType == ShapeInk.inkType, stroke.mask == nil,
+              var shape = ShapeRecognizer.recognize(stroke.path.map { $0.location.applying(stroke.transform) }) else { return false }
+        let settings = tools.settings
+        if settings.shapeSnap { shape = shape.snapped(to: ShapeInk.snapTargets(in: canvas.drawing.strokes.dropLast())) }
+        let strokes = ShapeInk.strokes(for: shape, color: stroke.ink.color, penWidth: settings.penWidth, fill: settings.shapeFill,
+                                       creationDate: stroke.path.creationDate, randomSeed: stroke.randomSeed)
+        let count = canvas.drawing.strokes.count
+        let undoManager = canvas.undoManager
+        DispatchQueue.main.async { [weak self] in
+            self?.replaceNewestStroke(page: page, strokeCount: count, with: strokes, undoManager: undoManager,
+                                      actionName: shape.kind.title)
+        }
+        return true
     }
 }
 

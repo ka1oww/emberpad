@@ -67,10 +67,11 @@ final class WorksheetChromeTests: XCTestCase {
         XCTAssertEqual(WorksheetStatusText.save(saved: false), "Ink not saved yet")
     }
 
-    /// EP54: the tool row runs in GoodNotes' order, with every working tool on it once.
+    /// EP54: the tool row runs in GoodNotes' order, with every working tool on it once; the Shape tool (EP64) took the
+    /// shapes placeholder's place.
     func testToolRowFollowsGoodNotesOrder() {
         XCTAssertEqual(ToolbarStrip.order, [
-            .tool(.pen), .tool(.eraser), .tool(.highlighter), .extra(.shapes),
+            .tool(.pen), .tool(.eraser), .tool(.highlighter), .tool(.shape),
             .tool(.lasso), .extra(.image), .extra(.text), .tool(.laser),
         ])
         let tools = ToolbarStrip.order.compactMap { slot -> WorksheetTool? in
