@@ -288,7 +288,7 @@ final class EraserPhase4Tests: XCTestCase {
 
     private func canvas(_ controller: PDFOverlayPageController, _ session: DocumentSession, page: Int = 0) throws -> PKCanvasView {
         let pdfPage = try XCTUnwrap(session.pdf.page(at: page))
-        return try XCTUnwrap(controller.pdfView(PDFView(), overlayViewFor: pdfPage) as? PKCanvasView)
+        return try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: pdfPage) as? PageInkView)?.canvas)
     }
 
     private func makeController(pages: Int = 1) async throws -> (PDFOverlayPageController, DocumentSession) {
@@ -360,7 +360,7 @@ final class EraserPhase4ScreenshotTests: XCTestCase {
         let tools = ToolState(defaults: UserDefaults(suiteName: suiteName)!)
         let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel(), tools: tools)
         controller.loadViewIfNeeded()
-        let canvas = try XCTUnwrap(controller.pdfView(PDFView(), overlayViewFor: try XCTUnwrap(pdf.page(at: 0))) as? PKCanvasView)
+        let canvas = try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: try XCTUnwrap(pdf.page(at: 0))) as? PageInkView)?.canvas)
 
         // Synthetic worksheet: printed lines, a fountain-pen answer and two highlights over it.
         let page = UIView(frame: CGRect(x: 0, y: 0, width: 595, height: 360))
