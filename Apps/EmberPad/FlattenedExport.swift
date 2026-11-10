@@ -164,9 +164,12 @@ extension LibraryController {
         let title = record.title
         let name = FlattenedExport.fileName(for: record, page: only)
         let ink = inkData
+        let stored = live == nil
         let data = try await Task.detached(priority: .userInitiated) { () -> Data in
             let pdf = try WorksheetPages.document(url: sourceURL, manifest: manifest)
-            return try FlattenedExport.render(source: pdf, drawings: ink, title: title, page: only)
+            // An open worksheet's ink is already as shown; saved ink is turned with its page here (EP62).
+            let shown = stored ? try PageInkRotation.displayed(ink, manifest: manifest, pdf: pdf) : ink
+            return try FlattenedExport.render(source: pdf, drawings: shown, title: title, page: only)
         }.value
         return try FlattenedExport.writeTemporary(data, fileName: name)
     }
@@ -181,7 +184,9 @@ extension FlattenedExport {
             let title = record.title
             return try await Task.detached(priority: .utility) { () -> Data in
                 let pdf = try WorksheetPages.document(url: sourceURL, manifest: manifest)
-                return try FlattenedExport.render(source: pdf, drawings: drawings, title: title)
+                // Saved ink is unturned; a turned page's ink turns with it (EP62).
+                let shown = try PageInkRotation.displayed(drawings, manifest: manifest, pdf: pdf)
+                return try FlattenedExport.render(source: pdf, drawings: shown, title: title)
             }.value
         }
     }

@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import PDFKit
 import PencilKit
+import EmberSyncKit
 
 /// Renders one page thumbnail with its ink on top, the way the page looks on screen.
 ///
@@ -72,7 +73,8 @@ final class PageThumbnailStore: ObservableObject {
     }
 }
 
-/// What a thumbnail's long-press menu, or the "+" tile, asks for (EP61). Pages are zero-based.
+/// What a thumbnail's long-press menu, its bookmark ribbon, or the "+" tile asks for (EP61, EP62). Pages are
+/// zero-based.
 enum PageNavigatorAction: Equatable {
     case addBefore(Int)
     case addAfter(Int)
@@ -80,11 +82,44 @@ enum PageNavigatorAction: Equatable {
     case delete(Int)
     /// The "+" tile: a page at the end.
     case addLast
+    /// The ribbon or the menu: bookmark the page, or remove its bookmark (EP62).
+    case toggleBookmark(Int)
+    /// Move To: the page moves to zero-based `to` (EP62).
+    case move(Int, to: Int)
+}
+
+/// The thumbnails popover's two lists, as GoodNotes' Thumbnails and Favorites (EP62).
+enum PageNavigatorFilter: String, CaseIterable {
+    case thumbnails, favorites
+
+    var title: String { self == .thumbnails ? "Thumbnails" : "Favorites" }
+
+    /// The pages this list shows, in reading order.
+    func pages(_ manifest: PageManifest) -> [Int] {
+        switch self {
+        case .thumbnails: Array(manifest.pages.indices)
+        case .favorites: manifest.pages.indices.filter { manifest.pages[$0].isBookmarked }
+        }
+    }
+}
+
+/// The page number typed into Go to Page or Move To, as a zero-based page, or nil when it is not a page of a
+/// worksheet of `pageCount` pages (EP62).
+enum PageNumberField {
+    static func index(from text: String, pageCount: Int) -> Int? {
+        guard let number = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)), (1...max(pageCount, 1)).contains(number),
+              pageCount > 0 else { return nil }
+        return number - 1
+    }
+
+    /// "1–12": the pages a field accepts.
+    static func range(pageCount: Int) -> String { pageCount <= 1 ? "1" : "1–\(pageCount)" }
 }
 
 /// The page-thumbnail popover: every page of the worksheet with its ink, the current page
 /// outlined. Tapping a page jumps to it and closes the popover. On a Student copy, a "+" tile adds a page at the
-/// end, and a long press on a page adds a page before or after it, duplicates it, or deletes a page Ember added.
+/// end, and a long press on a page adds a page before or after it, duplicates it, bookmarks it, moves it, or deletes
+/// a page Ember added. A bookmark ribbon on each page toggles its bookmark, and Favorites lists only bookmarked pages.
 struct PageNavigatorView: View {
     @ObservedObject var session: DocumentSession
     @ObservedObject var thumbnails: PageThumbnailStore
@@ -92,13 +127,27 @@ struct PageNavigatorView: View {
     let onSelect: (Int) -> Void
     /// Nil where pages cannot be changed (a Teacher copy).
     var onAction: ((PageNavigatorAction) -> Void)? = nil
+    @State private var filter: PageNavigatorFilter
     @State private var pendingDelete: Int?
+    @State private var pendingMove: Int?
+    @State private var moveText = ""
+
+    init(session: DocumentSession, thumbnails: PageThumbnailStore, currentPage: Int, filter: PageNavigatorFilter = .thumbnails,
+         onSelect: @escaping (Int) -> Void, onAction: ((PageNavigatorAction) -> Void)? = nil) {
+        self.session = session
+        self.thumbnails = thumbnails
+        self.currentPage = currentPage
+        self.onSelect = onSelect
+        self.onAction = onAction
+        _filter = State(initialValue: filter)
+    }
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: thumbnails.width, maximum: thumbnails.width + 16), spacing: 16)]
     }
 
     var body: some View {
+        let shown = filter.pages(session.pages)
         VStack(spacing: 0) {
             HStack {
                 Text("Pages")
@@ -109,27 +158,40 @@ struct PageNavigatorView: View {
                     .font(Theme.meta)
                     .foregroundStyle(Theme.text2)
             }
-            .padding(.horizontal, 16).padding(.vertical, 12)
+            .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 8)
+            Picker("Show", selection: $filter) {
+                ForEach(PageNavigatorFilter.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16).padding(.bottom, 10)
             Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 18) {
-                        ForEach(0..<session.pdf.pageCount, id: \.self) { index in
-                            PageNavigatorCell(index: index, isCurrent: index == currentPage,
-                                              image: thumbnails.image(for: index, in: session),
-                                              width: thumbnails.width) {
-                                onSelect(index)
+            if shown.isEmpty {
+                ContentUnavailableView("No Favorites", systemImage: "bookmark",
+                                       description: Text("Tap the bookmark on a page to find it here."))
+                    .frame(maxHeight: .infinity)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 18) {
+                            ForEach(shown, id: \.self) { index in
+                                let isBookmarked = session.page(at: index)?.isBookmarked == true
+                                PageNavigatorCell(index: index, isCurrent: index == currentPage,
+                                                  image: thumbnails.image(for: index, in: session),
+                                                  width: thumbnails.width, isBookmarked: isBookmarked,
+                                                  toggleBookmark: onAction.map { act in { act(.toggleBookmark(index)) } }) {
+                                    onSelect(index)
+                                }
+                                .contextMenu { if let onAction { menu(for: index, onAction) } }
+                                .id(index)
                             }
-                            .contextMenu { if let onAction { menu(for: index, onAction) } }
-                            .id(index)
+                            if let onAction, filter == .thumbnails {
+                                AddPageTile(width: thumbnails.width) { onAction(.addLast) }
+                            }
                         }
-                        if let onAction {
-                            AddPageTile(width: thumbnails.width) { onAction(.addLast) }
-                        }
+                        .padding(16)
                     }
-                    .padding(16)
+                    .onAppear { proxy.scrollTo(currentPage, anchor: .center) }
                 }
-                .onAppear { proxy.scrollTo(currentPage, anchor: .center) }
             }
         }
         .frame(minWidth: 340, idealWidth: 360, minHeight: 300, idealHeight: 520)
@@ -145,6 +207,21 @@ struct PageNavigatorView: View {
         } message: {
             Text("The page and its ink are deleted.")
         }
+        .alert(pendingMove.map { "Move Page \($0 + 1)" } ?? "",
+               isPresented: Binding(get: { pendingMove != nil }, set: { if !$0 { pendingMove = nil } })) {
+            TextField(PageNumberField.range(pageCount: session.pdf.pageCount), text: $moveText)
+                .keyboardType(.numberPad)
+            Button("Move") {
+                if let page = pendingMove, let target = PageNumberField.index(from: moveText, pageCount: session.pdf.pageCount),
+                   target != page {
+                    onAction?(.move(page, to: target))
+                }
+                pendingMove = nil
+            }
+            Button("Cancel", role: .cancel) { pendingMove = nil }
+        } message: {
+            Text("The page number it becomes, \(PageNumberField.range(pageCount: session.pdf.pageCount)). Its ink moves with it.")
+        }
     }
 
     @ViewBuilder
@@ -152,6 +229,17 @@ struct PageNavigatorView: View {
         Button("Add Page Before", systemImage: "arrow.up.doc") { onAction(.addBefore(index)) }
         Button("Add Page After", systemImage: "arrow.down.doc") { onAction(.addAfter(index)) }
         Button("Duplicate", systemImage: "plus.square.on.square") { onAction(.duplicate(index)) }
+        if session.page(at: index)?.isBookmarked == true {
+            Button("Remove Bookmark", systemImage: "bookmark.slash") { onAction(.toggleBookmark(index)) }
+        } else {
+            Button("Bookmark Page", systemImage: "bookmark") { onAction(.toggleBookmark(index)) }
+        }
+        if session.pdf.pageCount > 1 {
+            Button("Move To…", systemImage: "arrow.up.and.down.text.horizontal") {
+                moveText = ""
+                pendingMove = index
+            }
+        }
         // Only pages added in Ember Slate can go; the worksheet's own pages always stay.
         if session.page(at: index)?.isOriginal == false {
             Divider()
@@ -186,6 +274,9 @@ private struct PageNavigatorCell: View {
     let isCurrent: Bool
     let image: UIImage?
     let width: CGFloat
+    var isBookmarked = false
+    /// Nil where the bookmark cannot change; the ribbon then shows only on a bookmarked page.
+    var toggleBookmark: (() -> Void)?
     let action: () -> Void
 
     var body: some View {
@@ -213,7 +304,33 @@ private struct PageNavigatorCell: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Page \(index + 1)")
+        .accessibilityLabel("Page \(index + 1)\(isBookmarked ? ", bookmarked" : "")")
         .accessibilityAddTraits(isCurrent ? .isSelected : [])
+        .overlay(alignment: .topTrailing) { ribbon }
+    }
+
+    /// GoodNotes' ribbon in the page's top corner: an outline to tap, filled in Ember red once bookmarked (EP62).
+    @ViewBuilder
+    private var ribbon: some View {
+        if let toggleBookmark {
+            Button(action: toggleBookmark) { PageBookmarkRibbon(isBookmarked: isBookmarked) }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isBookmarked ? "Remove bookmark from page \(index + 1)" : "Bookmark page \(index + 1)")
+        } else if isBookmarked {
+            PageBookmarkRibbon(isBookmarked: true).accessibilityHidden(true)
+        }
+    }
+}
+
+/// The bookmark ribbon on a thumbnail.
+struct PageBookmarkRibbon: View {
+    let isBookmarked: Bool
+
+    var body: some View {
+        Image(systemName: isBookmarked ? "bookmark.fill" : "bookmark")
+            .font(.system(size: 17, weight: .light))
+            .foregroundStyle(isBookmarked ? Theme.accent : Theme.text3)
+            .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 10)
+            .contentShape(Rectangle())
     }
 }

@@ -90,8 +90,9 @@ public struct InkPackage: Codable, Equatable, Sendable {
     /// The SHA-256 of the PDF version this ink was drawn on: restore the ink onto that version only.
     public let pdfSHA256: ContentHash
     public let pages: [Page]
-    /// EP61: the worksheet's pages in order, present only when pages were added to it, so a restore knows which
-    /// index is which PDF page or paper. A worksheet with only its PDF's pages encodes exactly as before.
+    /// EP61: the worksheet's pages in order, present only when pages were added, moved or turned (EP62), so a
+    /// restore knows which index is which PDF page or paper and how it is turned. A worksheet laid out as its PDF
+    /// encodes exactly as before. Ink is always stored unturned, so it fits its page with or without this.
     public let layout: [PageEntry]?
 
     public init(record: DocumentRecord, drawings: [Int: Data]) {
@@ -107,7 +108,7 @@ public struct InkPackage: Codable, Equatable, Sendable {
         pdfSHA256 = record.source.sha256
         pages = drawings.filter { (0..<manifest.count).contains($0.key) }.sorted { $0.key < $1.key }
             .map { Page(page: $0.key, drawing: $0.value) }
-        layout = manifest.hasAddedPages ? manifest.pages : nil
+        layout = manifest.hasCustomLayout ? manifest.pages : nil
     }
 
     public func encoded() throws -> Data {

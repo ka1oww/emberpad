@@ -237,8 +237,8 @@ final class LibraryController: ObservableObject {
         var drawings: [Int: PKDrawing] = [:]
         for (index, page) in pages.pages.enumerated() {
             if let data = try await store.drawing(documentID: id, pageID: page.id) {
-                // Never substitute an empty drawing for corrupt saved ink.
-                drawings[index] = try PKDrawing(data: data)
+                // Never substitute an empty drawing for corrupt saved ink. A turned page's ink turns with it (EP62).
+                drawings[index] = PageInkRotation.displayed(try PKDrawing(data: data), entry: page, page: pdf.page(at: index))
             }
         }
         let session = DocumentSession(record: record, pdf: pdf, originalURL: url, pages: pages, drawings: drawings, store: store)
@@ -265,6 +265,12 @@ final class LibraryController: ObservableObject {
         case duplicate(String)
         /// Removes added page `id` and its ink.
         case remove(String)
+        /// Turns page `id` a quarter turn clockwise, or counterclockwise (EP62).
+        case rotate(String, clockwise: Bool)
+        /// Moves page `id` to zero-based `index` (EP62).
+        case move(String, to: Int)
+        /// Draws added paper page `id` on other paper (EP62).
+        case changeTemplate(String, PaperTemplate)
     }
 
     /// Applies `edit` to the open worksheet `id` and returns the session that replaces its current one. The current
@@ -278,6 +284,10 @@ final class LibraryController: ObservableObject {
             case .insert(let template, let index): try await store.insertPage(template, at: index, documentID: id)
             case .duplicate(let pageID): try await store.duplicatePage(pageID, documentID: id)
             case .remove(let pageID): try await store.removePage(pageID, documentID: id)
+            case .rotate(let pageID, let clockwise):
+                try await store.rotatePage(pageID, quarterTurns: clockwise ? 1 : -1, documentID: id)
+            case .move(let pageID, let index): try await store.movePage(pageID, to: index, documentID: id)
+            case .changeTemplate(let pageID, let template): try await store.changeTemplate(pageID, to: template, documentID: id)
             }
         } catch {
             showError(error.localizedDescription)
@@ -290,6 +300,15 @@ final class LibraryController: ObservableObject {
             showError(error.localizedDescription)
             throw error
         }
+    }
+
+    /// Bookmarks page `pageID` of the open worksheet `id`, or removes its bookmark (EP62). The worksheet stays open
+    /// as it is: nothing about its pages moves.
+    func setBookmark(_ isBookmarked: Bool, pageID: String, in id: UUID) async {
+        do {
+            let stored = try await store.setBookmark(isBookmarked, pageID: pageID, documentID: id)
+            sessions[id]?.takeBookmarks(from: stored)
+        } catch { showError(error.localizedDescription) }
     }
 
     func close(_ id: UUID) async throws {

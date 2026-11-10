@@ -190,12 +190,14 @@ struct AddPagePopover: View {
     }
 }
 
-/// More Templates: size, orientation, colour and paper, then Apply.
+/// More Templates: size, orientation, colour and paper, then Apply. More › Change Template uses it too (EP62).
 struct PaperTemplatePicker: View {
+    let title: String
     let apply: (PaperTemplate) -> Void
     @State private var template: PaperTemplate
 
-    init(initial: PaperTemplate, apply: @escaping (PaperTemplate) -> Void) {
+    init(initial: PaperTemplate, title: String = "Templates", apply: @escaping (PaperTemplate) -> Void) {
+        self.title = title
         self.apply = apply
         _template = State(initialValue: initial)
     }
@@ -248,7 +250,7 @@ struct PaperTemplatePicker: View {
             }
             .padding(16)
         }
-        .navigationTitle("Templates")
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
