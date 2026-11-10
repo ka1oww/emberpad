@@ -1,4 +1,3 @@
-import Combine
 import UIKit
 import SwiftUI
 import EmberSyncKit
@@ -74,38 +73,12 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 }
 
-/// Hosts a main-scene root and draws the status bar in white while the worksheet's
-/// slate-blue header sits under it (EP54); otherwise the system default.
-class HeaderStatusBarHostingController<Content: View>: UIHostingController<Content> {
-    private let presentation: PresentationState
-    private var headerObserver: AnyCancellable?
-
-    init(rootView: Content, presentation: PresentationState) {
-        self.presentation = presentation
-        super.init(rootView: rootView)
-    }
-    @MainActor required dynamic init?(coder aDecoder: NSCoder) { nil }
-
-    override var preferredStatusBarStyle: UIStatusBarStyle {
-        presentation.headerUnderStatusBar ? .lightContent : .default
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        // `@Published` fires before the value changes, so read it on the next main-queue turn.
-        headerObserver = presentation.$headerUnderStatusBar.removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.setNeedsStatusBarAppearanceUpdate() }
-    }
-}
-
-private final class CaptureGuardHostingController: HeaderStatusBarHostingController<LibraryView> {
+private final class CaptureGuardHostingController: UIHostingController<LibraryView> {
     private let environment: AppEnvironment
     init(environment: AppEnvironment) {
         self.environment = environment
         super.init(rootView: LibraryView(library: environment.library, presentation: environment.presentation,
-                                         pairing: environment.pairing, sync: environment.sync),
-                   presentation: environment.presentation)
+                                         pairing: environment.pairing, sync: environment.sync))
     }
     @MainActor required dynamic init?(coder aDecoder: NSCoder) { nil }
     override func viewDidLoad() {

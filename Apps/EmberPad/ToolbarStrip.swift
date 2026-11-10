@@ -71,7 +71,7 @@ struct ToolbarStrip: View {
     }
 
     private func toolButton(_ tool: WorksheetTool) -> some View {
-        ToolButton(tool: tool, selected: tools.current == tool, tint: tint(for: tool)) { tools.tap(tool) }
+        ToolButton(tool: tool, selected: tools.current == tool) { tools.tap(tool) }
             .popover(isPresented: Binding(
                 get: { tools.settingsTool == tool },
                 set: { open in if !open, tools.settingsTool == tool { tools.settingsTool = nil } }
@@ -79,20 +79,6 @@ struct ToolbarStrip: View {
                 ToolSettingsPopover(tool: tool, tools: tools)
                     .presentationCompactAdaptation(.popover)
             }
-    }
-
-    /// A selected pen or highlighter takes its ink colour, as in GoodNotes; any other
-    /// selected tool takes the accent.
-    private func tint(for tool: WorksheetTool) -> Color {
-        switch tool {
-        case .pen, .highlighter:
-            let presets = tools.presets(for: tool)
-            let index = tool == .pen ? tools.settings.penColorIndex : tools.settings.highlighterColorIndex
-            guard presets.indices.contains(index), let color = UIColor(emberHex: presets[index]) else { return Theme.accent }
-            return Color(uiColor: color)
-        case .eraser, .lasso, .laser:
-            return Theme.accent
-        }
     }
 }
 
@@ -125,15 +111,17 @@ private enum ToolIconMetrics {
 private struct ToolButton: View {
     let tool: WorksheetTool
     let selected: Bool
-    let tint: Color
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: tool.symbol)
                 .font(.system(size: ToolIconMetrics.size, weight: .light))
-                .foregroundStyle(selected ? tint : Theme.text2)
+                .foregroundStyle(selected ? Theme.accent : Theme.text2)
                 .frame(width: ToolIconMetrics.width, height: ToolIconMetrics.height)
+                // Ember's selected tool: red on a soft red square, as before EP54 (EP57).
+                .background(selected ? Theme.accentSoft : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(alignment: .bottom) {
                     // The "tap again for settings" cue.
                     if selected { Circle().fill(Theme.accent).frame(width: 4, height: 4).offset(y: 1) }

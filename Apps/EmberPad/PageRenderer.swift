@@ -293,7 +293,7 @@ struct EditorScreen: View {
             }
             .overlay(alignment: .top) { ToolToastOverlay(toast: tools.toast) }
         }
-        // The slate-blue header replaces the system nav bar (EP54, laid out like GoodNotes).
+        // The worksheet header replaces the system nav bar (EP54, laid out like GoodNotes).
         .toolbar(.hidden, for: .navigationBar)
         .flattenedExportSheet(flattenedExport)
         .task {
@@ -327,7 +327,7 @@ struct EditorScreen: View {
 }
 
 extension EditorScreen {
-    /// The slate-blue title bar (EP54): back, library sidebar, pages and export on the
+    /// The Ember title bar (EP54 layout, EP57 colours): back, library sidebar, pages and export on the
     /// left; the title with its menu in the centre; undo, redo, Teacher copy, the
     /// student view and More on the right.
     private var header: some View {

@@ -294,9 +294,6 @@ final class PresentationState: ObservableObject {
     /// listed yet still hides the Teacher copy.
     @Published var screensSettled = true
     @Published var externalSceneCount = 0
-    /// True while the worksheet's slate-blue header fills the top of the screen, so the
-    /// main scene draws the status bar in white over it (EP54).
-    @Published var headerUnderStatusBar = false
     @Published var mainSceneActive = false {
         didSet { student.paused = policy.pauseStudentView }
     }

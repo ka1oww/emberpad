@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// The worksheet header's measurements, read off the teacher's GoodNotes recording
-/// on an 11-inch iPad (EP54): a slate-blue title bar under the status bar, then the
-/// white tool row (`ToolbarStrip`).
+/// on an 11-inch iPad (EP54): a title bar under the status bar, then the tool row
+/// (`ToolbarStrip`), both in Ember's colours (EP57).
 enum WorksheetHeaderMetrics {
     /// The title bar below the status bar.
     static let barHeight: CGFloat = 59
@@ -14,7 +14,7 @@ enum WorksheetHeaderMetrics {
     static let edgeInset: CGFloat = 0
 }
 
-/// A white line icon on the header bar. A toggle that is on gets a soft pressed-in square.
+/// An Ember red line icon on the header bar. A toggle that is on gets a soft pressed-in square.
 struct HeaderIcon: View {
     let symbol: String
     var isOn = false
@@ -32,7 +32,7 @@ struct HeaderIcon: View {
     }
 }
 
-/// The document title in white capitals with a small chevron, as GoodNotes shows it.
+/// The document title in capitals with a small chevron, as GoodNotes shows it.
 struct HeaderTitleLabel: View {
     let title: String
 
@@ -45,7 +45,7 @@ struct HeaderTitleLabel: View {
             Image(systemName: "chevron.down")
                 .font(.system(size: 11, weight: .semibold))
         }
-        .foregroundStyle(Theme.onHeaderBar)
+        .foregroundStyle(Theme.headerTitleColor)
         .contentShape(Rectangle())
     }
 }
