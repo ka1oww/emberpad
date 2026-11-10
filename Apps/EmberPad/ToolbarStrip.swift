@@ -30,30 +30,33 @@ enum ToolbarExtra: String, CaseIterable, Identifiable {
     }
 }
 
-/// The worksheet toolbar strip under the nav bar: lasso | pen, highlighter,
-/// eraser | greyed extras, laser pointer | the active tool menu (design 5.4). Tapping the
-/// selected tool again opens its settings popover.
+/// The worksheet tool row under the header bar, centred and in GoodNotes' order
+/// (EP54): pen, eraser, highlighter, shapes, lasso, image, text, laser pointer | the
+/// active tool's widths and colours. Shapes, image and text are greyed placeholders
+/// (design 5.4). Tapping the selected tool again opens its settings popover.
 struct ToolbarStrip: View {
     let tools: ToolState
     static let height: CGFloat = 48
+    /// GoodNotes' left-to-right order of the tools Ember Slate has.
+    static let order: [ToolbarSlot] = [
+        .tool(.pen), .tool(.eraser), .tool(.highlighter), .extra(.shapes),
+        .tool(.lasso), .extra(.image), .extra(.text), .tool(.laser),
+    ]
 
     var body: some View {
         GeometryReader { geometry in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
-                    toolButton(.lasso)
-                    StripSeparator()
-                    toolButton(.pen)
-                    toolButton(.highlighter)
-                    toolButton(.eraser)
-                    StripSeparator()
-                    ForEach(ToolbarExtra.allCases) { extra in
-                        ExtraButton(extra: extra) {
-                            tools.showToast(symbol: extra.symbol, text: "\(extra.title) · coming later")
+                    ForEach(Self.order) { slot in
+                        switch slot {
+                        case .tool(let tool): toolButton(tool)
+                        case .extra(let extra):
+                            ExtraButton(extra: extra) {
+                                tools.showToast(symbol: extra.symbol, text: "\(extra.title) · coming later")
+                            }
                         }
                     }
-                    toolButton(.laser)
-                    Spacer(minLength: 16)
+                    StripSeparator()
                     ActiveToolMenu(tools: tools)
                 }
                 .padding(.horizontal, 12)
@@ -61,14 +64,14 @@ struct ToolbarStrip: View {
             }
         }
         .frame(height: Self.height)
-        .background(Theme.surface)
+        .background(Theme.toolRow)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Theme.line).frame(height: Theme.hairlineWidth)
         }
     }
 
     private func toolButton(_ tool: WorksheetTool) -> some View {
-        ToolButton(tool: tool, selected: tools.current == tool) { tools.tap(tool) }
+        ToolButton(tool: tool, selected: tools.current == tool, tint: tint(for: tool)) { tools.tap(tool) }
             .popover(isPresented: Binding(
                 get: { tools.settingsTool == tool },
                 set: { open in if !open, tools.settingsTool == tool { tools.settingsTool = nil } }
@@ -77,31 +80,65 @@ struct ToolbarStrip: View {
                     .presentationCompactAdaptation(.popover)
             }
     }
+
+    /// A selected pen or highlighter takes its ink colour, as in GoodNotes; any other
+    /// selected tool takes the accent.
+    private func tint(for tool: WorksheetTool) -> Color {
+        switch tool {
+        case .pen, .highlighter:
+            let presets = tools.presets(for: tool)
+            let index = tool == .pen ? tools.settings.penColorIndex : tools.settings.highlighterColorIndex
+            guard presets.indices.contains(index), let color = UIColor(emberHex: presets[index]) else { return Theme.accent }
+            return Color(uiColor: color)
+        case .eraser, .lasso, .laser:
+            return Theme.accent
+        }
+    }
+}
+
+/// One place on the tool row: a working tool or a greyed placeholder.
+enum ToolbarSlot: Identifiable, Equatable {
+    case tool(WorksheetTool)
+    case extra(ToolbarExtra)
+
+    var id: String {
+        switch self {
+        case .tool(let tool): "tool.\(tool.rawValue)"
+        case .extra(let extra): "extra.\(extra.rawValue)"
+        }
+    }
 }
 
 private struct StripSeparator: View {
     var body: some View {
-        Rectangle().fill(Theme.line).frame(width: 1, height: 24).padding(.horizontal, 6)
+        Rectangle().fill(Theme.line).frame(width: 1, height: 28).padding(.horizontal, 6)
     }
+}
+
+/// Tool icons: 26 pt light symbols on a 48 pt target, 52 pt apart, as in GoodNotes.
+private enum ToolIconMetrics {
+    static let size: CGFloat = 26
+    static let width: CGFloat = 48
+    static let height: CGFloat = 44
 }
 
 private struct ToolButton: View {
     let tool: WorksheetTool
     let selected: Bool
+    let tint: Color
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: tool.symbol)
-                .font(.system(size: 20))
-                .foregroundStyle(selected ? Theme.accent : Theme.text2)
-                .frame(width: 40, height: 38)
-                .background(selected ? Theme.accentSoft : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .font(.system(size: ToolIconMetrics.size, weight: .light))
+                .foregroundStyle(selected ? tint : Theme.text2)
+                .frame(width: ToolIconMetrics.width, height: ToolIconMetrics.height)
                 .overlay(alignment: .bottom) {
                     // The "tap again for settings" cue.
-                    if selected { Circle().fill(Theme.accent).frame(width: 4, height: 4).offset(y: -2) }
+                    if selected { Circle().fill(Theme.accent).frame(width: 4, height: 4).offset(y: 1) }
                 }
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(tool.title)
@@ -117,9 +154,9 @@ private struct ExtraButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: extra.symbol)
-                .font(.system(size: 20))
+                .font(.system(size: ToolIconMetrics.size, weight: .light))
                 .foregroundStyle(Theme.text2)
-                .frame(width: 40, height: 38)
+                .frame(width: ToolIconMetrics.width, height: ToolIconMetrics.height)
                 .opacity(0.4)
         }
         .buttonStyle(.plain)
@@ -129,7 +166,7 @@ private struct ExtraButton: View {
 
 // MARK: - Active tool menu
 
-/// The right-aligned controls for the current tool.
+/// The current tool's controls after the divider: widths, then colours, as in GoodNotes.
 private struct ActiveToolMenu: View {
     let tools: ToolState
     @State private var pickedColor: PickedColor?
@@ -139,13 +176,11 @@ private struct ActiveToolMenu: View {
         HStack(spacing: 6) {
             switch tools.current {
             case .pen:
+                widthLines(Theme.penWidths, selected: tools.settings.penWidthIndex, thicknesses: [2, 3.5, 5.5], select: tools.selectPenWidth)
                 colorDots(.pen)
-                StripSeparator()
-                widthDots(Theme.penWidths, selected: tools.settings.penWidthIndex, diameters: [6, 9, 13], select: tools.selectPenWidth)
             case .highlighter:
+                widthLines(Theme.highlighterWidths, selected: tools.settings.highlighterWidthIndex, thicknesses: [5, 8, 11], select: tools.selectHighlighterWidth)
                 colorDots(.highlighter)
-                StripSeparator()
-                widthDots(Theme.highlighterWidths, selected: tools.settings.highlighterWidthIndex, diameters: [8, 12, 16], select: tools.selectHighlighterWidth)
             case .eraser:
                 Picker("Eraser", selection: Binding(get: { tools.settings.eraserMode }, set: tools.setEraserMode)) {
                     ForEach(EraserMode.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -191,10 +226,28 @@ private struct ActiveToolMenu: View {
                     .foregroundStyle(Theme.text2)
                     .frame(width: 22, height: 22)
                     .overlay(Circle().stroke(Theme.line, lineWidth: 1))
-                    .frame(width: 30, height: 30)
+                    .frame(width: 34, height: 34)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Add colour")
+        }
+    }
+
+    /// GoodNotes' width presets: three short strokes of rising thickness, the chosen one
+    /// on a grey rounded square.
+    private func widthLines(_ widths: [CGFloat], selected: Int, thicknesses: [CGFloat], select: @escaping (Int) -> Void) -> some View {
+        ForEach(widths.indices, id: \.self) { index in
+            Button { select(index) } label: {
+                Capsule()
+                    .fill(Theme.text)
+                    .frame(width: 22, height: thicknesses[index])
+                    .frame(width: 36, height: 36)
+                    .background(index == selected ? Theme.text.opacity(0.1) : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Width \(widths[index].formatted()) points")
+            .accessibilityAddTraits(index == selected ? .isSelected : [])
         }
     }
 

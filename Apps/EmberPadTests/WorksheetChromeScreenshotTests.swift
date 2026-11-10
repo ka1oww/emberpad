@@ -12,7 +12,7 @@ final class WorksheetChromeScreenshotTests: XCTestCase {
             ("not-sharing", .notSharing, false),
             ("sharing", .sharing, false),
             ("sharing-short", .sharing, true),
-            ("captured", .captured, false),
+            ("mirrored", .mirrored, false),
             ("paused", .paused, false),
         ]
         for scheme: ColorScheme in [.light, .dark] {

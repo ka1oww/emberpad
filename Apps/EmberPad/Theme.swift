@@ -114,6 +114,28 @@ enum Theme {
     /// The toast capsule: `#1C1C1E` at 88% in both themes (design 5.4).
     static let toastBackground = Color(.sRGB, red: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, opacity: 0.88)
 
+    // MARK: - Worksheet header (EP54, laid out like GoodNotes)
+
+    /// The worksheet title bar: a solid slate blue that runs up under the status bar.
+    /// Sampled from the teacher's GoodNotes recording (`#434F73`); a deeper slate in dark mode.
+    static let headerBar = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x2B / 255, green: 0x33 / 255, blue: 0x4B / 255, alpha: 1)
+            : UIColor(red: 0x43 / 255, green: 0x4F / 255, blue: 0x73 / 255, alpha: 1)
+    })
+    /// Line icons and the title on the header bar.
+    static let onHeaderBar = Color.white
+    /// A pressed-in look for a header toggle that is on (the Teacher copy panel).
+    static let headerBarActive = Color.white.opacity(0.2)
+    /// The white tool row under the header bar (GoodNotes' `#F8F8F8`).
+    static let toolRow = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x1F / 255, green: 0x1F / 255, blue: 0x22 / 255, alpha: 1)
+            : UIColor(red: 0xF8 / 255, green: 0xF8 / 255, blue: 0xF8 / 255, alpha: 1)
+    })
+    /// The worksheet title: white capitals, 15 pt semibold SF Pro.
+    static let headerTitle = Font.system(size: 15, weight: .semibold)
+
     // MARK: - Type (SF Pro for UI, New York serif for titles)
 
     /// Large title 34, e.g. the library class name.

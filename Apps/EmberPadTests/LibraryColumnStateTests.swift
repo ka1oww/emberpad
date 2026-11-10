@@ -45,6 +45,30 @@ final class LibraryColumnStateTests: XCTestCase {
         XCTAssertEqual(columns.visibility, .all)
     }
 
+    /// EP54: the worksheet header's sidebar button shows the library beside the page and hides it
+    /// again; the white status bar follows whether the slate header has the whole width.
+    func testHeaderSidebarButtonTogglesTheLibraryWhileAWorksheetIsOpen() {
+        var columns = LibraryColumnState()
+        columns.sizeClassChanged(to: .regular)
+        columns.toggleSidebar()
+        XCTAssertEqual(columns.visibility, .all, "the toggle does nothing on the library itself")
+        XCTAssertFalse(columns.headerUnderStatusBar)
+
+        columns.worksheetOpened()
+        XCTAssertTrue(columns.headerUnderStatusBar)
+        columns.toggleSidebar()
+        XCTAssertEqual(columns.visibility, .all)
+        XCTAssertFalse(columns.headerUnderStatusBar)
+        columns.toggleSidebar()
+        XCTAssertEqual(columns.visibility, .detailOnly)
+        XCTAssertTrue(columns.headerUnderStatusBar)
+
+        columns.toggleSidebar()
+        columns.worksheetClosed()
+        XCTAssertEqual(columns.visibility, .all, "Back still restores what the library showed")
+        XCTAssertFalse(columns.headerUnderStatusBar)
+    }
+
     func testRepeatedOpenAndCloseEventsAreIdempotent() {
         var columns = LibraryColumnState()
         columns.sizeClassChanged(to: .regular)
