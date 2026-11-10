@@ -144,24 +144,28 @@ extension LibraryController {
     func exportFlattenedPDF(_ id: UUID, page only: Int? = nil) async throws -> URL {
         let record = try await store.document(id)
         guard record.role == .student else { throw FlattenedExportError.teacherCopy }
-        if let only, only < 0 || only >= record.pageCount { throw FlattenedExportError.pageOutOfRange(page: only) }
-        let pages = only.map { [$0] } ?? Array(0..<record.pageCount)
+        let live = liveSession(for: id).flatMap { $0.record.source.sha256 == record.source.sha256 ? $0 : nil }
+        // Pages added in Ember Slate are exported in place, at their own paper size (EP61).
+        let manifest: PageManifest
+        if let live { manifest = live.pages } else { manifest = try await store.pageManifest(documentID: id) }
+        if let only, only < 0 || only >= manifest.count { throw FlattenedExportError.pageOutOfRange(page: only) }
+        let pages = only.map { [$0] } ?? Array(0..<manifest.count)
         let sourceURL = try await store.originalURL(documentID: id)
         var inkData: [Int: Data] = [:]
-        if let live = liveSession(for: id), live.record.source.sha256 == record.source.sha256 {
+        if let live {
             for (page, drawing) in live.drawings where pages.contains(page) && !drawing.strokes.isEmpty {
                 inkData[page] = drawing.dataRepresentation()
             }
         } else {
             for page in pages {
-                if let data = try await store.drawing(documentID: id, page: page) { inkData[page] = data }
+                if let data = try await store.drawing(documentID: id, pageID: manifest.pages[page].id) { inkData[page] = data }
             }
         }
         let title = record.title
         let name = FlattenedExport.fileName(for: record, page: only)
         let ink = inkData
         let data = try await Task.detached(priority: .userInitiated) { () -> Data in
-            guard let pdf = PDFDocument(url: sourceURL), !pdf.isLocked else { throw FlattenedExportError.unreadablePDF }
+            let pdf = try WorksheetPages.document(url: sourceURL, manifest: manifest)
             return try FlattenedExport.render(source: pdf, drawings: ink, title: title, page: only)
         }.value
         return try FlattenedExport.writeTemporary(data, fileName: name)
@@ -172,11 +176,11 @@ extension FlattenedExport {
     /// The ink backup's renderer (EP-33): the same flattening as Share, from the saved ink the backup read, off the
     /// main actor. Like Share it opens the source PDF read-only and writes nothing to the library.
     static func backupRenderer(store: LibraryStore) -> InkBackupQueue.Flatten {
-        { record, drawings in
+        { record, manifest, drawings in
             let sourceURL = try await store.originalURL(documentID: record.id)
             let title = record.title
             return try await Task.detached(priority: .utility) { () -> Data in
-                guard let pdf = PDFDocument(url: sourceURL), !pdf.isLocked else { throw FlattenedExportError.unreadablePDF }
+                let pdf = try WorksheetPages.document(url: sourceURL, manifest: manifest)
                 return try FlattenedExport.render(source: pdf, drawings: drawings, title: title)
             }.value
         }

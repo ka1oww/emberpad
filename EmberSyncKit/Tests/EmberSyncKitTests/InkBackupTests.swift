@@ -256,9 +256,10 @@ struct InkBackupTests {
         #expect(restored.documentID == record.id && restored.pdfSHA256 == record.source.sha256 && restored.pageCount == 3)
         #expect(restored.pages.map(\.page) == [0, 2])
         #expect(restored.pages.map(\.drawing) == [drawings[0]!, drawings[2]!])
-        #expect(InkPackage.drawingFileName(page: 2) == "page-2.drawing")
+        #expect(InkPackage.drawingFileName(pageID: "pdf-2") == "ink/pdf-2.drawing")
         // The README's restore drill reads the file as plain JSON: base64 drawings and a hex PDF hash.
         let json = try #require(try JSONSerialization.jsonObject(with: package) as? [String: Any])
+        #expect(json["layout"] == nil, "A worksheet with only its PDF pages encodes exactly as before pages could be added")
         let pages = try #require(json["pages"] as? [[String: Any]])
         #expect(json["format"] as? String == "emberpad.ink/1" && json["pdfSHA256"] as? String == record.source.sha256.rawValue)
         #expect(pages.first?["page"] as? Int == 0)
@@ -491,8 +492,8 @@ struct BackupHarness {
 
     func queue(serviceID: String = "synthetic-pairing") -> InkBackupQueue {
         let large = largeFlattened
-        return InkBackupQueue(store: store, ledgerURL: ledgerURL, serviceID: serviceID) { record, drawings in
-            let package = try InkPackage(record: record, drawings: drawings).encoded()
+        return InkBackupQueue(store: store, ledgerURL: ledgerURL, serviceID: serviceID) { record, manifest, drawings in
+            let package = try InkPackage(record: record, manifest: manifest, drawings: drawings).encoded()
             return BackupHarness.flattened(.digest(package), large: large)
         }
     }

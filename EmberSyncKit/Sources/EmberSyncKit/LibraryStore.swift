@@ -138,33 +138,198 @@ public actor LibraryStore {
         return try refreshedPairs(documentID)
     }
 
+    /// The saved ink of the page at zero-based `page` in reading order (added pages included), if any.
     public func drawing(documentID: UUID, page: Int) throws -> Data? {
         let record = try read(documentID)
-        try validate(page, in: record)
-        let url = drawingURL(documentID, page)
+        let manifest = try pageManifest(for: record)
+        guard manifest.pages.indices.contains(page) else { throw LibraryError.pageOutOfRange }
+        return try readInk(documentID, manifest.pages[page].id)
+    }
+
+    /// The saved ink of the page with id `pageID`, if any.
+    public func drawing(documentID: UUID, pageID: String) throws -> Data? {
+        let record = try read(documentID)
+        guard try pageManifest(for: record).index(of: pageID) != nil else { throw LibraryError.pageOutOfRange }
+        return try readInk(documentID, pageID)
+    }
+
+    /// Saves the ink of the page at zero-based `page` in reading order.
+    public func saveDrawing(_ data: Data, documentID: UUID, page: Int, hasInk: Bool) throws {
+        let manifest = try pageManifest(for: try read(documentID))
+        guard manifest.pages.indices.contains(page) else { throw LibraryError.pageOutOfRange }
+        try saveDrawing(data, documentID: documentID, pageID: manifest.pages[page].id, hasInk: hasInk)
+    }
+
+    /// Saves the ink of the page with id `pageID`. Ink follows the page, wherever it moves in the worksheet.
+    public func saveDrawing(_ data: Data, documentID: UUID, pageID: String, hasInk: Bool) throws {
+        var record = try read(documentID)
+        var manifest = try pageManifest(for: record)
+        guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
+        guard !hasInk || record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        let entry = manifest.pages[index]
+        let url = inkURL(documentID, pageID)
+        if files.fileExists(atPath: url.path) { try Self.requireRegularFile(url) }
+        // Mark ink before writing. A failed write/crash may overprotect a version, never overwrite its ink.
+        if hasInk {
+            if !entry.hasInk {
+                manifest.pages[index].hasInk = true
+                try writePageManifest(manifest, documentID)
+            }
+            if entry.isOriginal, let pdfPage = entry.pdfPage { record.inkPages.insert(pdfPage) }
+            record.hasInk = true
+            try write(record)
+        }
+        try files.createDirectory(at: inkFolder(documentID), withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+        if !hasInk {
+            if entry.hasInk {
+                manifest.pages[index].hasInk = false
+                try writePageManifest(manifest, documentID)
+            }
+            if entry.isOriginal, let pdfPage = entry.pdfPage { record.inkPages.remove(pdfPage) }
+            record.hasInk = manifest.hasTeacherContent
+            try write(record)
+        }
+    }
+
+    // MARK: Pages (EP61)
+
+    /// Every page of the worksheet in reading order: the PDF's own pages and the pages the teacher added. A worksheet
+    /// stored before pages could be added is migrated here, on first use.
+    public func pageManifest(documentID: UUID) throws -> PageManifest {
+        try pageManifest(for: try read(documentID))
+    }
+
+    /// Adds a blank page of `template` paper at zero-based `index` (0 puts it first, the page count puts it last).
+    /// Only a Student copy takes added pages. Returns the new manifest; the new page is `pages[index]`.
+    @discardableResult
+    public func insertPage(_ template: PaperTemplate, at index: Int, documentID: UUID) throws -> PageManifest {
+        var record = try read(documentID)
+        guard record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        var manifest = try pageManifest(for: record)
+        guard (0...manifest.count).contains(index) else { throw LibraryError.pageOutOfRange }
+        manifest.pages.insert(.template(template), at: index)
+        // Protect the worksheet first: a crash in between overprotects it, never lets an update replace it.
+        record.hasInk = true
+        try write(record)
+        try writePageManifest(manifest, documentID)
+        return manifest
+    }
+
+    /// Copies the page `pageID`, paper and ink, straight after it. Returns the new manifest.
+    @discardableResult
+    public func duplicatePage(_ pageID: String, documentID: UUID) throws -> PageManifest {
+        var record = try read(documentID)
+        guard record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        var manifest = try pageManifest(for: record)
+        guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
+        let source = manifest.pages[index]
+        let copy = PageEntry(id: UUID().uuidString, pdfPage: source.pdfPage, template: source.template, hasInk: source.hasInk)
+        record.hasInk = true
+        try write(record)
+        // The ink is in place before the manifest names the copy, so the copy never shows up without it.
+        if let ink = try readInk(documentID, source.id) {
+            try files.createDirectory(at: inkFolder(documentID), withIntermediateDirectories: true)
+            try ink.write(to: inkURL(documentID, copy.id), options: .atomic)
+        }
+        manifest.pages.insert(copy, at: index + 1)
+        try writePageManifest(manifest, documentID)
+        return manifest
+    }
+
+    /// Removes an added page and its ink. The PDF's own pages can never be removed.
+    @discardableResult
+    public func removePage(_ pageID: String, documentID: UUID) throws -> PageManifest {
+        var record = try read(documentID)
+        var manifest = try pageManifest(for: record)
+        guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
+        guard !manifest.pages[index].isOriginal else { throw LibraryError.pageNotRemovable }
+        manifest.pages.remove(at: index)
+        try writePageManifest(manifest, documentID)
+        let url = inkURL(documentID, pageID)
+        if files.fileExists(atPath: url.path) { try Self.requireRegularFile(url); try files.removeItem(at: url) }
+        record.hasInk = manifest.hasTeacherContent
+        try write(record)
+        return manifest
+    }
+
+    /// The journal of a migration in progress: the moves it makes and the manifest it commits.
+    struct PageMigration: Codable, Equatable {
+        struct Move: Codable, Equatable { let from: String; let to: String }
+        let moves: [Move]
+        let manifest: PageManifest
+    }
+
+    /// Test hook: called after the journal is written (step 0) and after each ink move (step 1, 2, ...). Throwing
+    /// stops the migration there, as a crash would.
+    private var migrationFault: (@Sendable (Int) throws -> Void)?
+    func setMigrationFault(_ fault: (@Sendable (Int) throws -> Void)?) { migrationFault = fault }
+
+    private func pageManifest(for record: DocumentRecord) throws -> PageManifest {
+        let url = pageManifestURL(record.id)
+        if files.fileExists(atPath: migrationJournalURL(record.id).path) || !files.fileExists(atPath: url.path) {
+            try migratePages(record)
+        }
+        try Self.requireRegularFile(url)
+        let manifest = try ManifestCodec.decoder().decode(PageManifest.self, from: Data(contentsOf: url))
+        guard manifest.isValid(pdfPageCount: record.pageCount) else { throw LibraryError.invalidDocument }
+        return manifest
+    }
+
+    /// Moves `page-<n>.drawing` ink to `ink/pdf-<n>.drawing` and writes `pages.json`, journalled so a crash at any
+    /// point resumes on next use with the same moves. Each move is a rename within the folder, so a drawing is
+    /// always in exactly one of its two places; `pages.json` is written last and is what marks the work done.
+    /// `original.pdf` is never touched.
+    private func migratePages(_ record: DocumentRecord) throws {
+        let id = record.id
+        let journalURL = migrationJournalURL(id)
+        let journal: PageMigration
+        if files.fileExists(atPath: journalURL.path) {
+            try Self.requireRegularFile(journalURL)
+            journal = try ManifestCodec.decoder().decode(PageMigration.self, from: Data(contentsOf: journalURL))
+            guard journal.manifest.isValid(pdfPageCount: record.pageCount) else { throw LibraryError.invalidDocument }
+        } else {
+            let moves = (0..<record.pageCount).compactMap { page -> PageMigration.Move? in
+                let legacy = "page-\(page).drawing"
+                guard files.fileExists(atPath: folder(id).appendingPathComponent(legacy).path) else { return nil }
+                return PageMigration.Move(from: legacy, to: "ink/" + PageEntry.originalID(pdfPage: page) + ".drawing")
+            }
+            journal = PageMigration(moves: moves, manifest: .original(pageCount: record.pageCount, inkPages: record.inkPages))
+            try ManifestCodec.encoder().encode(journal).write(to: journalURL, options: .atomic)
+        }
+        try migrationFault?(0)
+        try files.createDirectory(at: inkFolder(id), withIntermediateDirectories: true)
+        for (step, move) in journal.moves.enumerated() {
+            let from = folder(id).appendingPathComponent(move.from)
+            let to = folder(id).appendingPathComponent(move.to)
+            if files.fileExists(atPath: from.path) {
+                try Self.requireRegularFile(from)
+                if files.fileExists(atPath: to.path) {
+                    // Only a finished move leaves the target; two different drawings are never resolved by guessing.
+                    guard try Data(contentsOf: from) == Data(contentsOf: to) else { throw LibraryError.invalidDocument }
+                    try files.removeItem(at: from)
+                } else {
+                    try files.moveItem(at: from, to: to)
+                }
+            }
+            try migrationFault?(step + 1)
+        }
+        // A crash after `pages.json` but before the journal went keeps the committed manifest as it is.
+        if !files.fileExists(atPath: pageManifestURL(id).path) {
+            try writePageManifest(journal.manifest, id)
+        }
+        try files.removeItem(at: journalURL)
+    }
+
+    private func readInk(_ id: UUID, _ pageID: String) throws -> Data? {
+        let url = inkURL(id, pageID)
         guard files.fileExists(atPath: url.path) else { return nil }
         try Self.requireRegularFile(url)
         return try Data(contentsOf: url)
     }
 
-    public func saveDrawing(_ data: Data, documentID: UUID, page: Int, hasInk: Bool) throws {
-        var record = try read(documentID)
-        try validate(page, in: record)
-        guard !hasInk || record.role == .student else { throw LibraryError.teacherCopyReadOnly }
-        let url = drawingURL(documentID, page)
-        if files.fileExists(atPath: url.path) { try Self.requireRegularFile(url) }
-        // Mark ink before writing. A failed write/crash may overprotect a version, never overwrite its ink.
-        if hasInk {
-            record.inkPages.insert(page)
-            record.hasInk = true
-            try write(record)
-        }
-        try data.write(to: url, options: .atomic)
-        if !hasInk {
-            record.inkPages.remove(page)
-            record.hasInk = !record.inkPages.isEmpty
-            try write(record)
-        }
+    private func writePageManifest(_ manifest: PageManifest, _ id: UUID) throws {
+        try ManifestCodec.encoder().encode(manifest).write(to: pageManifestURL(id), options: .atomic)
     }
 
     public func archive(documentID: UUID) throws {
@@ -370,10 +535,10 @@ public actor LibraryStore {
     }
 
     private func folder(_ id: UUID) -> URL { root.appendingPathComponent(id.uuidString, isDirectory: true) }
-    private func drawingURL(_ id: UUID, _ page: Int) -> URL { folder(id).appendingPathComponent("page-\(page).drawing") }
-    private func validate(_ page: Int, in doc: DocumentRecord) throws {
-        guard (0..<doc.pageCount).contains(page) else { throw LibraryError.pageOutOfRange }
-    }
+    private func inkFolder(_ id: UUID) -> URL { folder(id).appendingPathComponent("ink", isDirectory: true) }
+    private func inkURL(_ id: UUID, _ pageID: String) -> URL { inkFolder(id).appendingPathComponent(pageID + ".drawing") }
+    private func pageManifestURL(_ id: UUID) -> URL { folder(id).appendingPathComponent("pages.json") }
+    private func migrationJournalURL(_ id: UUID) -> URL { folder(id).appendingPathComponent(".pages-migration.json") }
     static func requireDirectory(_ url: URL) throws {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard attributes[.type] as? FileAttributeType == .typeDirectory else { throw LibraryError.invalidDocument }

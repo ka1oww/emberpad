@@ -56,6 +56,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var highlighterErase: HighlighterEraseStroke?
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
+    var startPage: Int?
 
     init(session: DocumentSession, student: StudentDisplayModel, tools: ToolState) {
         self.session = session; self.student = student; self.tools = tools
@@ -135,6 +136,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        if let page = startPage {
+            startPage = nil
+            // After PDFKit's first layout, or `go(to:)` lands on the first page.
+            DispatchQueue.main.async { [weak self] in self?.goToPage(page) }
+        }
         if let canvas = canvases[currentPage] { focus(canvas) }
         observeScrolling()
         publishPage()
@@ -381,6 +387,21 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.tool = tools.pencilTool
         // First responder keeps undo on the touched page.
         canvas.becomeFirstResponder()
+    }
+
+    func setPageInput(_ enabled: Bool) {
+        if !enabled {
+            finishHighlighterErase()
+            inkSelection.dismiss()
+        }
+        pdfView.isUserInteractionEnabled = enabled
+    }
+
+    func retire() {
+        setPageInput(false)
+        publishing = false
+        for canvas in canvases.values { canvas.undoManager?.removeAllActions() }
+        inkSelection.undoManagerOverride?.removeAllActions()
     }
 
     func goToPage(_ index: Int) {

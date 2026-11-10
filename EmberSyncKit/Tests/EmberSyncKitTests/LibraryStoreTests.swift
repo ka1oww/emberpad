@@ -128,6 +128,7 @@ struct LibraryStoreTests {
         await #expect(throws: (any Error).self) { try await store.documents() }
         await #expect(throws: (any Error).self) { try await store.saveDrawing(Data([1]), documentID: doc.id, page: 0, hasInk: true) }
         #expect(!FileManager.default.fileExists(atPath: outside.appendingPathComponent("page-0.drawing").path))
+        #expect(!FileManager.default.fileExists(atPath: outside.appendingPathComponent("ink/pdf-0.drawing").path))
     }
 
     @Test func interruptedUninkedReplacementRecoversNewCopyAndRetainsOriginal() async throws {

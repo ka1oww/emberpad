@@ -134,6 +134,7 @@ struct LibraryStoreV2Tests {
             try await store.saveDrawing(Data("ink".utf8), documentID: teacher.id, page: 0, hasInk: true)
         }
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(teacher.id.uuidString + "/page-0.drawing").path))
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(teacher.id.uuidString + "/ink/pdf-0.drawing").path))
         #expect(try await store.document(teacher.id).hasInk == false)
 
         let changed = try await importEntry(publishedEntry("paper-1", .teacher, bytes: "corrected answers"), into: store)
