@@ -146,8 +146,9 @@ struct LiveInkSample: Equatable {
 
 /// Watches Apple Pencil touches beside PencilKit's drawing recogniser and reports their coalesced and predicted
 /// samples. It never leaves `.possible` while a stroke is drawn and fails on pen-up, so it never claims, delays or
-/// cancels a touch: PencilKit's ink and first-stroke latency are unchanged. Finger touches never reach it, and
-/// `strokeTarget` returns nil for anything that will not ink (an eraser, the lasso, a touch outside the page).
+/// cancels a touch: PencilKit's ink and first-stroke latency are unchanged. Finger touches never reach it. For live
+/// ink, `strokeTarget` returns nil for anything that will not ink (an eraser, the lasso, a touch outside the page);
+/// a second instance watches only the eraser's touches, to move the eraser circle (EP68).
 final class LiveInkRecognizer: UIGestureRecognizer {
     enum Event: Equatable {
         case began([LiveInkSample])

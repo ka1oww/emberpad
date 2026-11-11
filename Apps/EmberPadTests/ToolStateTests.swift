@@ -32,9 +32,9 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(s.highlighterColors, ["FACC15", "4ADE80", "F472B6"])
         XCTAssertEqual(Theme.penWidths, [1.5, 2.5, 4])
         XCTAssertEqual(Theme.highlighterWidths, [12, 18, 26])
-        XCTAssertEqual(Theme.eraserSizes, [8, 16, 32])
+        XCTAssertEqual(Theme.eraserSizes, [16.4, 32, 64])
         XCTAssertEqual(s.highlighterWidth, 18)
-        XCTAssertEqual(s.eraserSize, 16)
+        XCTAssertEqual(s.eraserSize, 32)
         XCTAssertEqual(s.eraserMode, .partial)
         XCTAssertTrue(s.straightHighlighter)
         XCTAssertTrue(s.highlighterAlwaysStraight, "GoodNotes' Draw in Straight Line is on")
@@ -65,7 +65,7 @@ final class ToolStateTests: XCTestCase {
         s.eraserSizeIndex = 2
         let partial = try XCTUnwrap(s.pencilTool(for: .eraser) as? PKEraserTool)
         XCTAssertEqual(partial.eraserType, .fixedWidthBitmap)
-        XCTAssertEqual(partial.width, 32)
+        XCTAssertEqual(partial.width, 64)
         s.eraserMode = .wholeStroke
         XCTAssertEqual(try XCTUnwrap(s.pencilTool(for: .eraser) as? PKEraserTool).eraserType, .vector)
 
