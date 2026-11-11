@@ -1,22 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <!-- EmberPad AppIcon source (EP-19). Original art: Ember House worksheet + pen on Ember red. -->
-  <!-- Regenerate PNGs with: python3 Brand.Sources/generate-appicon.py -->
-  <!-- Full-bleed square; iOS applies the rounded mask. No stock, no GoodNotes reference. -->
-  <rect x="0" y="0" width="1024" height="1024" fill="#B23A2E"/>
-  <!-- worksheet sheet -->
-  <rect x="256" y="168" width="512" height="688" rx="56" fill="#FFFFFF"/>
-  <!-- folded corner -->
-  <path d="M608,168 H768 V328 Z" fill="#EFE9DE"/>
-  <line x1="608" y1="168" x2="768" y2="328" stroke="#D8CDBD" stroke-width="8"/>
-  <!-- title bar (Ember red) + three taupe rules -->
-  <rect x="328" y="360" width="200" height="36" rx="18" fill="#B23A2E"/>
-  <rect x="328" y="440" width="368" height="30" rx="15" fill="#9C8A78"/>
-  <rect x="328" y="520" width="368" height="30" rx="15" fill="#9C8A78"/>
-  <rect x="328" y="600" width="368" height="30" rx="15" fill="#9C8A78"/>
-  <!-- pen shaft (dark slate) lying diagonally across the sheet, top end over the red field -->
-  <polygon points="772,117 836,159 424,789 360,747" fill="#1F2937" stroke="#1F2937" stroke-width="12" stroke-linejoin="round"/>
-  <line x1="778" y1="168" x2="400" y2="740" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.85"/>
-  <!-- nib + collar -->
-  <polygon points="360,747 424,789 332,860" fill="#1F2937"/>
-  <line x1="375" y1="757" x2="409" y2="779" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- EP-73 direction 4B-navy, full design: pen-drawn Ember star tuned for small sizes. -->
+  <!-- Full-bleed square; iOS applies its own rounded mask. Original art; Ember star traced from ember-education-logo.png. -->
+  <defs><radialGradient id="g" gradientUnits="userSpaceOnUse" cx="512" cy="480" r="740"><stop offset="0" stop-color="#1F2937"/><stop offset="0.5" stop-color="#1F2937"/><stop offset="1" stop-color="#3A4B63"/></radialGradient></defs>
+  <rect width="1024" height="1024" fill="url(#g)"/>
+  <path d="M508.2,798.7 L509.4,803.1 L510.9,807.4 L512.7,811.7 L514.7,815.8 L517.0,819.8 L519.5,823.7 L522.3,827.5 L525.3,831.1 L528.5,834.6 L532.0,837.9 L535.6,841.0 L539.4,843.9 L543.4,846.6 L547.5,849.2 L551.8,851.5 L556.2,853.6 L560.8,855.5 L565.4,857.2 L570.2,858.7 L575.0,860.1 L579.9,861.3 L584.9,862.3 L589.9,863.3 L595.0,864.1 L600.1,864.8 L605.3,865.4 L610.5,865.9 L615.8,866.2 L621.1,866.4 L626.5,866.6 L631.9,866.6 L637.3,866.5 L642.8,866.3 L648.3,866.0 L653.9,865.5 L659.4,865.0 L665.0,864.4 L670.7,863.6 L676.3,862.8 L682.0,861.8 L687.7,860.7 L693.4,859.5 L699.1,858.3 L704.9,856.9 L710.6,855.4 L716.4,853.8 L722.2,852.1 L727.9,850.3 L733.7,848.4 L739.5,846.4 L745.3,844.3 L751.0,842.1 L756.8,839.8 L762.5,837.4 L768.3,834.9 L774.0,832.3 L779.7,829.6 L785.4,826.8 L791.1,823.8 L796.8,820.8 L802.4,817.7 L808.0,814.5 L813.6,811.2 L819.1,807.8 L796.9,772.2 L791.9,775.3 L786.9,778.2 L781.8,781.1 L776.8,783.9 L771.7,786.6 L766.6,789.2 L761.5,791.7 L756.3,794.2 L751.2,796.5 L746.0,798.8 L740.9,800.9 L735.7,803.0 L730.6,805.0 L725.4,806.8 L720.3,808.6 L715.1,810.3 L710.0,811.9 L704.9,813.4 L699.8,814.8 L694.7,816.1 L689.6,817.4 L684.6,818.5 L679.6,819.5 L674.6,820.4 L669.7,821.3 L664.8,822.0 L659.9,822.7 L655.0,823.2 L650.2,823.7 L645.5,824.1 L640.8,824.3 L636.2,824.5 L631.6,824.6 L627.0,824.6 L622.6,824.5 L618.2,824.3 L613.8,824.0 L609.5,823.6 L605.3,823.1 L601.2,822.6 L597.2,821.9 L593.2,821.1 L589.3,820.3 L585.5,819.4 L581.8,818.4 L578.1,817.3 L574.5,816.3 L571.0,815.3 L567.5,814.2 L564.0,813.1 L560.6,812.1 L557.2,811.0 L553.8,809.9 L550.4,808.7 L547.0,807.5 L543.6,806.3 L540.3,805.0 L536.8,803.7 L533.4,802.2 L530.0,800.7 L526.5,799.0 L522.9,797.3 L519.4,795.4 L515.8,793.3 Z M829.0,790.0 a21.0,21.0 0 1 0 -42.0,0 a21.0,21.0 0 1 0 42.0,0 Z" fill="#EFE9DE"/>
+  <path d="M512.00,122.00 L577.56,413.44 L788.25,462.00 L577.56,510.56 L512.00,802.00 L446.44,510.56 L235.75,462.00 L446.44,413.44 Z" fill="#B23A2E"/>
+  <clipPath id="star"><path d="M512.00,122.00 L577.56,413.44 L788.25,462.00 L577.56,510.56 L512.00,802.00 L446.44,510.56 L235.75,462.00 L446.44,413.44 Z"/></clipPath>
+  <g clip-path="url(#star)">
+    <rect x="501.0" y="574" width="22" height="232" fill="#1F2937"/>
+    <circle cx="512" cy="574" r="34" fill="#1F2937"/>
+  </g>
 </svg>

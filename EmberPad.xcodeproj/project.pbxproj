@@ -388,6 +388,7 @@
 			"isa" = "PBXFileSystemSynchronizedBuildFileExceptionSet";
 			"membershipExceptions" = (
 				"Info.plist",
+				"Brand.Sources/AppIcon-small.source.svg",
 				"Brand.Sources/AppIcon.source.svg",
 				"Brand.Sources/generate-appicon.py",
 				"Brand.Sources/README.md",
