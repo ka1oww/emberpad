@@ -3,8 +3,8 @@ import Foundation
 @testable import EmberPad
 @testable import EmberSyncKit
 
-/// EP-10 acceptance: subject grouping and class filtering over Student copies.
-/// Teacher copies never produce cards, counts, or filter chips.
+/// EP-10 acceptance: subject grouping over Student copies. Teacher copies never produce cards or counts.
+/// EP69 removed the class filter chips; folders are covered by `LibraryFolderBrowserTests`.
 @MainActor
 final class LibraryGroupingTests: XCTestCase {
     private var counter = 0
@@ -48,49 +48,31 @@ final class LibraryGroupingTests: XCTestCase {
         XCTAssertEqual(rows.first(where: { $0.name == "H2 Math" })?.count, 1)
     }
 
-    func testClassTagsScopedToSubject() throws {
-        let a = try makeRecord(subject: "H2 Chemistry", classTag: "MI PU3", role: .student)
-        let b = try makeRecord(subject: "H2 Chemistry", classTag: "YIJC JC1", role: .student)
-        let c = try makeRecord(subject: "H2 Math", classTag: "MI PU3", role: .student)
-        let untagged = try makeRecord(subject: "H2 Chemistry", classTag: nil, role: .student)
-        _ = untagged
-        XCTAssertEqual(LibraryController.classTags(in: [a, b, c], subject: nil), ["MI PU3", "YIJC JC1"])
-        XCTAssertEqual(LibraryController.classTags(in: [a, b, c], subject: "H2 Chemistry"), ["MI PU3", "YIJC JC1"])
-        XCTAssertEqual(LibraryController.classTags(in: [a, b, c], subject: "H2 Math"), ["MI PU3"])
-        XCTAssertEqual(LibraryController.classTags(in: [a, b, c], subject: "H2 Physics"), [])
-    }
-
-    func testNilClassTagOnlyAppearsUnderAllClasses() throws {
-        let tagged = try makeRecord(subject: "H2 Chemistry", classTag: "MI PU3", role: .student)
-        let untagged = try makeRecord(subject: "H2 Chemistry", classTag: nil, role: .student)
-        let all = LibraryController.filteredCards(in: [tagged, untagged], subject: "H2 Chemistry",
-                                                  classTag: nil, archived: false, sortNewestFirst: true)
-        XCTAssertEqual(Set(all.map(\.id)), Set([tagged.id, untagged.id]))
-        let filtered = LibraryController.filteredCards(in: [tagged, untagged], subject: "H2 Chemistry",
-                                                       classTag: "MI PU3", archived: false, sortNewestFirst: true)
-        XCTAssertEqual(filtered.map(\.id), [tagged.id])
-    }
-
     func testArchivedSeparatedFromGrid() throws {
         let current = try makeRecord(subject: "H2 Chemistry", classTag: "MI PU3", role: .student)
         let archived = try makeRecord(subject: "H2 Chemistry", classTag: "MI PU3", role: .student, status: .archived)
-        let grid = LibraryController.filteredCards(in: [current, archived], subject: nil,
-                                                   classTag: nil, archived: false, sortNewestFirst: true)
-        XCTAssertEqual(grid.map(\.id), [current.id])
-        let box = LibraryController.filteredCards(in: [current, archived], subject: nil,
-                                                  classTag: nil, archived: true, sortNewestFirst: true)
-        XCTAssertEqual(box.map(\.id), [archived.id])
+        let grid = LibraryController.listing(in: [current, archived], selection: .folder(subject: "H2 Chemistry", path: []),
+                                             sortOrder: .newestFirst)
+        XCTAssertEqual(grid.worksheets.map(\.id), [current.id])
+        let box = LibraryController.listing(in: [current, archived], selection: .archived, sortOrder: .newestFirst)
+        XCTAssertEqual(box.worksheets.map(\.id), [archived.id])
+        XCTAssertTrue(box.folders.isEmpty)
     }
 
-    func testSortNewestFirstThenOldest() throws {
+    func testSortByNameNewestFirstThenOldest() throws {
         let older = try makeRecord(subject: "H2 Math", classTag: nil, role: .student, title: "B paper", daysAgo: 5)
         let newer = try makeRecord(subject: "H2 Math", classTag: nil, role: .student, title: "A paper", daysAgo: 1)
-        let newest = LibraryController.filteredCards(in: [older, newer], subject: nil,
-                                                     classTag: nil, archived: false, sortNewestFirst: true)
-        XCTAssertEqual(newest.map(\.id), [newer.id, older.id])
-        let oldest = LibraryController.filteredCards(in: [older, newer], subject: nil,
-                                                     classTag: nil, archived: false, sortNewestFirst: false)
-        XCTAssertEqual(oldest.map(\.id), [older.id, newer.id])
+        let ten = try makeRecord(subject: "H2 Math", classTag: nil, role: .student, title: "A paper 10", daysAgo: 3)
+        let two = try makeRecord(subject: "H2 Math", classTag: nil, role: .student, title: "a paper 2", daysAgo: 4)
+        func order(_ sort: LibrarySortOrder) -> [UUID] {
+            LibraryController.listing(in: [older, newer, ten, two], selection: .folder(subject: "H2 Math", path: []),
+                                      sortOrder: sort).worksheets.map(\.id)
+        }
+        XCTAssertEqual(order(.name), [newer.id, two.id, ten.id, older.id], "Drive's name order: case-insensitive, numeric")
+        XCTAssertEqual(order(.newestFirst), [newer.id, ten.id, two.id, older.id])
+        XCTAssertEqual(order(.oldestFirst), [older.id, two.id, ten.id, newer.id])
+        XCTAssertEqual(LibraryController(store: try LibraryStore(root: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)), inbox: FileManager.default.temporaryDirectory).sortOrder, .name)
     }
 
     func testThumbnailCacheRefusesTeacherCopies() throws {
@@ -101,7 +83,7 @@ final class LibraryGroupingTests: XCTestCase {
         XCTAssertTrue(key.contains(teacher.source.sha256.rawValue))
     }
 
-    func testArchivingLastSubjectDocumentClearsStaleSubjectAndClassFilter() async throws {
+    func testArchivingLastSubjectDocumentClearsStaleSubject() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
@@ -114,14 +96,15 @@ final class LibraryGroupingTests: XCTestCase {
         let library = LibraryController(store: store, inbox: root.appendingPathComponent("Inbox", isDirectory: true))
         await library.refresh()
         library.sidebarSelection = .subject("H2 Chemistry")
-        library.selectedSubject = "H2 Chemistry"
-        library.selectedClassTag = "MI PU3"
+        XCTAssertEqual(library.selectedSubject, "H2 Chemistry")
 
         await library.archiveDocument(archived.id)
 
         XCTAssertNil(library.selectedSubject)
-        XCTAssertNil(library.selectedClassTag)
         XCTAssertEqual(library.sidebarSelection, .allSubjects)
+        XCTAssertEqual(library.visibleFolders.map(\.subject), ["H2 Math"], "All subjects lists each subject as a folder")
+        XCTAssertTrue(library.visibleCards.isEmpty)
+        library.searchText = "math"
         XCTAssertEqual(library.visibleCards.map(\.id), [remaining.id])
     }
 
