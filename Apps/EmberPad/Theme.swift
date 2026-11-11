@@ -117,10 +117,11 @@ enum Theme {
     /// The three pen thickness dots; the middle one is the default.
     static let penWidths: [CGFloat] = [1.5, 2.5, 4]
     static let penDefaultWidthIndex = 1
-    /// GoodNotes' three highlighter sizes, 1.6, 2.8 and 6.9 mm, in page points (EP71; 12, 18 and 26 before). The
-    /// middle one, which the teacher uses in GoodNotes, is the default. The stored width is the index, so saved
-    /// settings keep thin, middle or thick.
-    static let highlighterWidths: [CGFloat] = [4.5, 8, 19.6]
+    /// The three highlighter sizes in page points: thin, then GoodNotes' 2.8 and 6.9 mm (EP71; 12, 18 and 26 before).
+    /// Thin is 7.5, PencilKit's narrowest live marker, so no preset changes width when the Pencil lifts (EP75; it
+    /// was GoodNotes' 1.6 mm, 4.5 points, drawn at 7.5 and narrowed on lift). The middle one, which the teacher uses
+    /// in GoodNotes, is the default. The stored width is the index, so saved settings keep thin, middle or thick.
+    static let highlighterWidths: [CGFloat] = [7.5, 8, 19.6]
     static let highlighterDefaultWidthIndex = 1
     /// Partial-eraser sizes, in screen points (PencilKit erases the same on-screen width at every zoom); the
     /// whole-stroke eraser has no size. EP71: GoodNotes' small, medium and large erase about 25, 50 and 100 points

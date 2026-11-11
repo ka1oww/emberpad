@@ -447,28 +447,29 @@ final class StraightHighlighterTests: XCTestCase {
         XCTAssertEqual(Array(try XCTUnwrap(canvas.drawing.strokes.last).path).map(\.location), Array(uTurn.path).map(\.location))
     }
 
-    /// The thin highlighter is drawn live at PencilKit's narrowest marker and takes its true 4.5 point width on lift,
-    /// straightened or not (the swap is the same one undo step as the straight line's).
-    func testThinHighlighterTakesItsTrueWidthOnLift() async throws {
-        let minimum = PKInk.InkType.marker.validWidthRange.lowerBound
-        for alwaysStraight in [false, true] {
-            let (controller, session) = try await Self.makeController(pages: 1)
-            let canvas = try Self.canvas(controller, session, page: 0)
-            let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
-            controller.tools.select(.highlighter)
-            controller.tools.selectHighlighterWidth(0)
-            controller.tools.setHighlighterAlwaysStraight(alwaysStraight)
-            let live = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 124), width: minimum)
+    /// Every highlighter preset is stored on lift at the live tool's width, straightened or not (EP75): the ink
+    /// never changes width when the Pencil lifts.
+    func testEveryHighlighterPresetKeepsItsLiveWidthOnLift() async throws {
+        for index in Theme.highlighterWidths.indices {
+            for alwaysStraight in [false, true] {
+                let (controller, session) = try await Self.makeController(pages: 1)
+                let canvas = try Self.canvas(controller, session, page: 0)
+                let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+                controller.tools.select(.highlighter)
+                controller.tools.selectHighlighterWidth(index)
+                controller.tools.setHighlighterAlwaysStraight(alwaysStraight)
+                let liveWidth = try XCTUnwrap(controller.tools.settings.pencilTool(for: .highlighter) as? PKInkingTool).width
+                let live = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 124), width: liveWidth)
 
-            hold.pencilStroke = true
-            canvas.drawing = PKDrawing(strokes: [live])
-            controller.canvasViewDrawingDidChange(canvas)
-            await Self.settle()
+                hold.pencilStroke = true
+                canvas.drawing = PKDrawing(strokes: [live])
+                controller.canvasViewDrawingDidChange(canvas)
+                await Self.settle()
 
-            let stroke = try XCTUnwrap(session.drawing(on: 0).strokes.last)
-            XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
-            XCTAssertEqual(stroke.path.map(\.size.width).max() ?? 0, Theme.highlighterWidths[0], accuracy: 0.001, "the thin preset's true width")
-            XCTAssertEqual(stroke.path.allSatisfy { abs($0.location.y - 122) < 1e-6 }, alwaysStraight, "straightened only with Always straight")
+                let stroke = try XCTUnwrap(session.drawing(on: 0).strokes.last)
+                XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
+                XCTAssertEqual(stroke.path.map(\.size.width).max() ?? 0, liveWidth, accuracy: 0.001, "preset \(index)")
+            }
         }
     }
 

@@ -1036,15 +1036,8 @@ extension PDFOverlayPageController {
             return true
         }
         guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last else { return false }
-        var replacement = snapsStraight(stroke, held: held, lineLike: lineLike)
+        let replacement = snapsStraight(stroke, held: held, lineLike: lineLike)
             ? StrokeSnap.straightened(stroke, level: stroke.ink.inkType == .marker ? .highlighter : .pen) : nil
-        var actionName = "Straight Line"
-        if stroke.ink.inkType == .marker, tools.current == .highlighter,
-           let narrowed = StrokeSnap.resized(replacement ?? stroke, scale: tools.settings.highlighterLiftScale) {
-            // The thin highlighter, drawn live at PencilKit's narrowest marker, takes its true width (EP71).
-            if replacement == nil { actionName = "Ink" }
-            replacement = narrowed
-        }
         guard var straight = replacement else { return false }
         if PenFeel.isPenInk(straight.ink.inkType) {
             // A held pen line takes the same pen feel as the handwriting around it, in the same one swap.
@@ -1055,7 +1048,7 @@ extension PDFOverlayPageController {
         let undoManager = canvas.undoManager
         DispatchQueue.main.async { [weak self] in
             self?.replaceNewestStroke(page: page, strokeCount: count, with: straight, undoManager: undoManager,
-                                      actionName: actionName)
+                                      actionName: "Straight Line")
         }
         return true
     }

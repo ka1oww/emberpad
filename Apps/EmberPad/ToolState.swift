@@ -205,12 +205,6 @@ struct ToolSettings: Codable, Equatable, Sendable {
     var highlighterColor: UIColor { UIColor(emberHex: highlighterColors[highlighterColorIndex]) ?? .emberHighlighterYellow }
     var penWidth: CGFloat { Theme.penWidths[penWidthIndex] }
     var highlighterWidth: CGFloat { Theme.highlighterWidths[highlighterWidthIndex] }
-    /// What a just-drawn highlighter stroke's point sizes are multiplied by on lift. PencilKit draws a marker no
-    /// thinner than its `validWidthRange` lower bound (7.5 points on iOS 26), so the thin preset (4.5) is drawn at
-    /// that width while the Pencil is down and narrowed to its true width when it lifts (EP71). 1 for every other width.
-    var highlighterLiftScale: CGFloat {
-        highlighterWidth / max(highlighterWidth, PKInk.InkType.marker.validWidthRange.lowerBound)
-    }
     var eraserSize: CGFloat { Theme.eraserSizes[eraserSizeIndex] }
     var penFeel: PenFeelSettings {
         PenFeelSettings(tipSharpness: penTipSharpness, pressureSensitivity: penPressureSensitivity)
