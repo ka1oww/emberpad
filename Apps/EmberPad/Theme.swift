@@ -103,8 +103,14 @@ enum Theme {
     static let highlighterPink = ThemeToken.highlighterPink.color
     static let highlighterCyan = ThemeToken.highlighterCyan.color
     static let highlighterMagenta = ThemeToken.highlighterMagenta.color
-    /// Highlighter presets are stored opaque and drawn at this alpha.
-    static let highlighterDefaultOpacity: CGFloat = 0.45
+    /// Highlighter presets are stored opaque and drawn at this alpha. EP71: chosen so GoodNotes' yellow, #FFFF82,
+    /// shows as its pale lemon #FFFFC1 on white paper (0.45 before). PencilKit draws a Pencil marker stroke at about
+    /// `highlighterPointOpacity` of the ink's alpha, so the page shows `highlighterSwatchOpacity`.
+    static let highlighterDefaultOpacity: CGFloat = 0.68
+    /// The point opacity PencilKit gives a marker stroke drawn with the Pencil, measured on iOS 26.5.
+    static let highlighterPointOpacity: CGFloat = 0.73
+    /// The alpha a highlight shows at on the page, which the strip's colour dots use so they look like the ink.
+    static let highlighterSwatchOpacity: CGFloat = highlighterDefaultOpacity * highlighterPointOpacity
 
     // MARK: - Toolbar strip presets (design 5.4)
 

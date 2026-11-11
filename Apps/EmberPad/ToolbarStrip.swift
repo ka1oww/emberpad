@@ -166,7 +166,7 @@ private struct ActiveToolMenu: View {
                 widthLines(Theme.penWidths, selected: tools.settings.penWidthIndex, thicknesses: [2, 3.5, 5.5], select: tools.selectPenWidth)
                 colorDots(.pen)
             case .highlighter:
-                widthLines(Theme.highlighterWidths, selected: tools.settings.highlighterWidthIndex, thicknesses: [5, 8, 11], select: tools.selectHighlighterWidth)
+                widthLines(Theme.highlighterWidths, selected: tools.settings.highlighterWidthIndex, thicknesses: [3, 5.5, 11], select: tools.selectHighlighterWidth)
                 colorDots(.highlighter)
             case .eraser:
                 Picker("Eraser", selection: Binding(get: { tools.settings.eraserMode }, set: tools.setEraserMode)) {
@@ -269,7 +269,7 @@ private struct ColorDot: View {
         // Highlighter dots sit on white so they read as they look on the page.
         Circle()
             .fill(highlighter ? Color.white : Color.clear)
-            .overlay(Circle().fill(color.opacity(highlighter ? Theme.highlighterDefaultOpacity : 1)))
+            .overlay(Circle().fill(color.opacity(highlighter ? Theme.highlighterSwatchOpacity : 1)))
             .frame(width: 22, height: 22)
             .overlay(Circle().stroke(Theme.line, lineWidth: Theme.hairlineWidth))
             .overlay {
@@ -327,11 +327,10 @@ struct ToolSettingsPopover: View {
                     Toggle("Draw and hold: straight line",
                            isOn: Binding(get: { tools.settings.straightHighlighter }, set: tools.setStraightHighlighter))
                         .disabled(tools.settings.highlighterAlwaysStraight)
-                    TaggedRow(title: "Highlight behind ink", tag: "Phase 4")
                 } footer: {
                     Text(tools.settings.highlighterAlwaysStraight
-                         ? "Every highlighter stroke becomes a straight line from where it starts to where it ends. Lines within 8° of level lie flat."
-                         : "Hold the Pencil still for half a second at the end of a stroke and it snaps straight. Lines within 8° of level lie flat.")
+                         ? "A highlighter stroke drawn as a line becomes straight when the Pencil lifts; one that doubles back or scribbles stays as drawn. Lines within 3° of level lie flat."
+                         : "Hold the Pencil still for half a second at the end of a stroke and it snaps straight. Lines within 3° of level lie flat.")
                 }
             case .eraser:
                 Section {
