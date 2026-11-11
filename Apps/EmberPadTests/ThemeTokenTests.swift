@@ -31,9 +31,12 @@ final class ThemeTokenTests: XCTestCase {
         (.penBlack, "#000000", nil),
         (.penBlue, "#1E3A8B", nil),
         (.penRed, "#B23A2E", nil),
-        (.highlighterYellow, "#FACC15", nil),
-        (.highlighterGreen, "#4ADE80", nil),
-        (.highlighterPink, "#F472B6", nil),
+        // GoodNotes' five highlighter presets (EP71).
+        (.highlighterYellow, "#FFFF82", nil),
+        (.highlighterGreen, "#00FF00", nil),
+        (.highlighterPink, "#FFDEEB", nil),
+        (.highlighterCyan, "#00FFFF", nil),
+        (.highlighterMagenta, "#FF00FF", nil),
     ]
 
     func testTableCoversEveryToken() {
@@ -100,6 +103,7 @@ final class ThemeTokenTests: XCTestCase {
             (.penBlack, .emberPenBlack), (.penBlue, .emberPenBlue), (.penRed, .emberPenRed),
             (.highlighterYellow, .emberHighlighterYellow),
             (.highlighterGreen, .emberHighlighterGreen), (.highlighterPink, .emberHighlighterPink),
+            (.highlighterCyan, .emberHighlighterCyan), (.highlighterMagenta, .emberHighlighterMagenta),
         ]
         XCTAssertEqual(accessors.count, ThemeToken.allCases.count)
         for (token, accessor) in accessors {
@@ -123,10 +127,10 @@ final class ThemeTokenTests: XCTestCase {
 
         let highlighter = try XCTUnwrap(defaults.pencilTool(for: .highlighter) as? PKInkingTool)
         XCTAssertEqual(highlighter.inkType, .marker)
-        var highlighterYellow = hex("#FACC15")
+        var highlighterYellow = hex("#FFFF82")
         highlighterYellow[3] = Theme.highlighterDefaultOpacity
         assertEqual(rgba(highlighter.color, style: .light), highlighterYellow, "highlighterYellow", "light")
-        XCTAssertEqual(highlighter.width, 18)
+        XCTAssertEqual(highlighter.width, 8, accuracy: 1e-6)
     }
 
     // MARK: - Helpers

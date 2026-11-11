@@ -27,6 +27,7 @@ final class EraserPreviewTests: XCTestCase {
     func testPartialCircleIsTheErasersOwnWidthAtEveryZoom() throws {
         var settings = ToolSettings()
         settings.current = .eraser
+        settings.eraserMode = .partial
         let range = PKEraserTool.EraserType.fixedWidthBitmap.validWidthRange
         for (index, size) in Theme.eraserSizes.enumerated() {
             settings.eraserSizeIndex = index
@@ -56,6 +57,7 @@ final class EraserPreviewTests: XCTestCase {
         XCTAssertEqual(Set(Theme.eraserSizes).count, Theme.eraserSizes.count, "three distinct sizes")
         XCTAssertEqual(Theme.eraserSizes, Theme.eraserSizes.sorted(), "small, medium, large")
         var settings = ToolSettings()
+        settings.eraserMode = .partial
         let diameters = try Theme.eraserSizes.indices.map { index -> CGFloat in
             settings.eraserSizeIndex = index
             return EraserPreview.diameter(for: try XCTUnwrap(settings.pencilTool(for: .eraser) as? PKEraserTool), pageScale: 1)
@@ -349,7 +351,10 @@ final class EraserPreviewTests: XCTestCase {
 
     private func makeTools() -> ToolState {
         suiteName = "EmberPadTests.EraserPreview.\(UUID().uuidString)"
-        return ToolState(defaults: UserDefaults(suiteName: suiteName)!)
+        let tools = ToolState(defaults: UserDefaults(suiteName: suiteName)!)
+        // These tests start from the partial eraser, which has sizes; Whole stroke is the default since EP71.
+        tools.setEraserMode(.partial)
+        return tools
     }
 
     private func makeSession(pages: Int) throws -> DocumentSession {

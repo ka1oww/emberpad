@@ -191,9 +191,10 @@ final class StraightHighlighterTests: XCTestCase {
         let strokes = canvas.drawing.strokes
         XCTAssertEqual(strokes.count, 1)
         let points = Array(try XCTUnwrap(strokes.last).path)
-        XCTAssertTrue(points.allSatisfy { abs($0.location.y - 120) < 1e-6 }, "the held stroke lies flat")
+        // Within 3 degrees of level: flat, halfway between the heights of its ends, as GoodNotes places it (EP71).
+        XCTAssertTrue(points.allSatisfy { abs($0.location.y - 125.5) < 1e-6 }, "the held stroke lies flat")
         XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
-        XCTAssertEqual(Array(try XCTUnwrap(session.drawing(on: 0).strokes.last).path).last?.location, CGPoint(x: 400, y: 120))
+        XCTAssertEqual(Array(try XCTUnwrap(session.drawing(on: 0).strokes.last).path).last?.location, CGPoint(x: 400, y: 125.5))
     }
 
     func testUnheldPenAndSwitchedOffStrokesStayAsDrawn() async throws {
@@ -402,7 +403,7 @@ final class StraightHighlighterTests: XCTestCase {
         await Self.settle()
 
         let points = Array(try XCTUnwrap(canvas.drawing.strokes.last).path)
-        XCTAssertTrue(points.allSatisfy { abs($0.location.y - 120) < 1e-6 }, "the unheld highlighter stroke lies flat")
+        XCTAssertTrue(points.allSatisfy { abs($0.location.y - 125.5) < 1e-6 }, "the unheld highlighter stroke lies flat")
         XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
     }
 
@@ -430,6 +431,61 @@ final class StraightHighlighterTests: XCTestCase {
         }
     }
 
+    /// GoodNotes' "Draw in Straight Line" (EP71): a highlighter stroke that doubles back stays exactly as drawn.
+    func testAlwaysStraightLeavesAStrokeThatDoublesBackAsDrawn() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        controller.tools.select(.highlighter)
+        let uTurn = HighlighterGoodNotesTests.uTurn()
+
+        hold.pencilStroke = true
+        canvas.drawing = PKDrawing(strokes: [uTurn])
+        controller.canvasViewDrawingDidChange(canvas)
+        await Self.settle()
+
+        XCTAssertEqual(Array(try XCTUnwrap(canvas.drawing.strokes.last).path).map(\.location), Array(uTurn.path).map(\.location))
+    }
+
+    /// The thin highlighter is drawn live at PencilKit's narrowest marker and takes its true 4.5 point width on lift,
+    /// straightened or not (the swap is the same one undo step as the straight line's).
+    func testThinHighlighterTakesItsTrueWidthOnLift() async throws {
+        let minimum = PKInk.InkType.marker.validWidthRange.lowerBound
+        for alwaysStraight in [false, true] {
+            let (controller, session) = try await Self.makeController(pages: 1)
+            let canvas = try Self.canvas(controller, session, page: 0)
+            let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+            controller.tools.select(.highlighter)
+            controller.tools.selectHighlighterWidth(0)
+            controller.tools.setHighlighterAlwaysStraight(alwaysStraight)
+            let live = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 124), width: minimum)
+
+            hold.pencilStroke = true
+            canvas.drawing = PKDrawing(strokes: [live])
+            controller.canvasViewDrawingDidChange(canvas)
+            await Self.settle()
+
+            let stroke = try XCTUnwrap(session.drawing(on: 0).strokes.last)
+            XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
+            XCTAssertEqual(stroke.path.map(\.size.width).max() ?? 0, Theme.highlighterWidths[0], accuracy: 0.001, "the thin preset's true width")
+            XCTAssertEqual(stroke.path.allSatisfy { abs($0.location.y - 122) < 1e-6 }, alwaysStraight, "straightened only with Always straight")
+        }
+    }
+
+    func testMiddleHighlighterIsNotResized() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        controller.tools.select(.highlighter)
+        controller.tools.setHighlighterAlwaysStraight(false)
+        let marker = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 131), width: 8)
+        hold.pencilStroke = true
+        canvas.drawing = PKDrawing(strokes: [marker])
+        controller.canvasViewDrawingDidChange(canvas)
+        await Self.settle()
+        XCTAssertEqual(try XCTUnwrap(canvas.drawing.strokes.last).path.map(\.size), marker.path.map(\.size))
+    }
+
     // MARK: - Fixtures
 
     /// A synthetic fountain-pen line with the same wobble as `wobblyMarker`.
@@ -452,13 +508,13 @@ final class StraightHighlighterTests: XCTestCase {
         return CGPoint(x: start.x + dx * length * cos(radians), y: start.y + dy * length * sin(radians))
     }
 
-    /// A synthetic 18 pt marker stroke with thin ends and a small wobble.
-    static func wobblyMarker(from start: CGPoint, to end: CGPoint, wobble: CGFloat = 2) -> PKStroke {
+    /// A synthetic marker stroke, 18 pt unless `full` says otherwise, with thin ends and a small wobble.
+    static func wobblyMarker(from start: CGPoint, to end: CGPoint, wobble: CGFloat = 2, width full: CGFloat = 18) -> PKStroke {
         let count = 24
         let points = (0..<count).map { index -> PKStrokePoint in
             let t = CGFloat(index) / CGFloat(count - 1)
             let offset = index == 0 || index == count - 1 ? 0 : wobble * sin(t * 9)
-            let width: CGFloat = index < 2 || index >= count - 2 ? 6 : 18
+            let width: CGFloat = index < 2 || index >= count - 2 ? full / 3 : full
             return PKStrokePoint(location: CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t + offset),
                                  timeOffset: Double(index) * 0.02, size: CGSize(width: width, height: width),
                                  opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)

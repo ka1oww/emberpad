@@ -29,13 +29,13 @@ final class ToolStateTests: XCTestCase {
         let s = ToolState(defaults: defaults).settings
         XCTAssertEqual(s.current, .pen)
         XCTAssertEqual(s.penColors, ["000000", "1E3A8A", "B23A2E"])
-        XCTAssertEqual(s.highlighterColors, ["FACC15", "4ADE80", "F472B6"])
+        XCTAssertEqual(s.highlighterColors, ["FFFF82", "00FF00", "FFDEEB", "00FFFF", "FF00FF"], "GoodNotes' five presets (EP71)")
         XCTAssertEqual(Theme.penWidths, [1.5, 2.5, 4])
-        XCTAssertEqual(Theme.highlighterWidths, [12, 18, 26])
-        XCTAssertEqual(Theme.eraserSizes, [16.4, 32, 64])
-        XCTAssertEqual(s.highlighterWidth, 18)
-        XCTAssertEqual(s.eraserSize, 32)
-        XCTAssertEqual(s.eraserMode, .partial)
+        XCTAssertEqual(Theme.highlighterWidths, [4.5, 8, 19.6])
+        XCTAssertEqual(Theme.eraserSizes, [25, 50, 80.4])
+        XCTAssertEqual(s.highlighterWidth, 8)
+        XCTAssertEqual(s.eraserSize, 50)
+        XCTAssertEqual(s.eraserMode, .wholeStroke, "GoodNotes' default eraser (EP71)")
         XCTAssertTrue(s.straightHighlighter)
         XCTAssertTrue(s.highlighterAlwaysStraight, "GoodNotes' Draw in Straight Line is on")
         XCTAssertTrue(s.penDrawAndHold, "GoodNotes' pen Draw and Hold is on")
@@ -58,14 +58,15 @@ final class ToolStateTests: XCTestCase {
         s.highlighterWidthIndex = 2
         let marker = try XCTUnwrap(s.pencilTool(for: .highlighter) as? PKInkingTool)
         XCTAssertEqual(marker.inkType, .marker)
-        XCTAssertEqual(marker.color.emberHex, "4ADE80")
+        XCTAssertEqual(marker.color.emberHex, "00FF00")
         XCTAssertEqual(marker.color.cgColor.alpha, Theme.highlighterDefaultOpacity, accuracy: 0.001)
-        XCTAssertEqual(marker.width, 26)
+        XCTAssertEqual(marker.width, 19.6, accuracy: 0.001)
 
         s.eraserSizeIndex = 2
+        s.eraserMode = .partial
         let partial = try XCTUnwrap(s.pencilTool(for: .eraser) as? PKEraserTool)
         XCTAssertEqual(partial.eraserType, .fixedWidthBitmap)
-        XCTAssertEqual(partial.width, 64)
+        XCTAssertEqual(partial.width, 80.4, accuracy: 0.001)
         s.eraserMode = .wholeStroke
         XCTAssertEqual(try XCTUnwrap(s.pencilTool(for: .eraser) as? PKEraserTool).eraserType, .vector)
 
@@ -82,7 +83,7 @@ final class ToolStateTests: XCTestCase {
         tools.addColor(UIColor(emberHex: "ABCDEF")!, for: .pen)
         tools.selectPenColor(1)
         tools.selectPenWidth(0)
-        tools.setEraserMode(.wholeStroke)
+        tools.setEraserMode(.partial)
         tools.selectEraserSize(0)
         tools.setStraightHighlighter(false)
         tools.setHighlighterAlwaysStraight(false)
@@ -95,12 +96,12 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(s.current, .highlighter)
         XCTAssertEqual(s.previous, .pen)
         XCTAssertEqual(s.highlighterColors.last, "123456")
-        XCTAssertEqual(s.highlighterColorIndex, 3)
+        XCTAssertEqual(s.highlighterColorIndex, 5)
         XCTAssertEqual(s.highlighterWidthIndex, 2)
         XCTAssertEqual(s.penColors, ["000000", "1E3A8A", "B23A2E", "ABCDEF"])
         XCTAssertEqual(s.penColorIndex, 1)
         XCTAssertEqual(s.penWidthIndex, 0)
-        XCTAssertEqual(s.eraserMode, .wholeStroke)
+        XCTAssertEqual(s.eraserMode, .partial, "a chosen eraser mode is kept")
         XCTAssertEqual(s.eraserSizeIndex, 0)
         XCTAssertFalse(s.straightHighlighter)
         XCTAssertFalse(s.highlighterAlwaysStraight)
@@ -155,7 +156,7 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(s.penWidthIndex, 0)
         XCTAssertEqual(s.highlighterColors, ToolSettings.defaultHighlighterColors)
         XCTAssertEqual(s.eraserSizeIndex, 2)
-        XCTAssertEqual(s.eraserMode, .partial)
+        XCTAssertEqual(s.eraserMode, .wholeStroke, "no stored mode: the new default")
         XCTAssertTrue(s.circleToLasso)
     }
 
@@ -211,7 +212,7 @@ final class ToolStateTests: XCTestCase {
         tools.select(.eraser)
         XCTAssertEqual(applied.count, 3)
         let marker = try XCTUnwrap(applied[1] as? PKInkingTool)
-        XCTAssertEqual(marker.color.emberHex, "F472B6")
+        XCTAssertEqual(marker.color.emberHex, "FFDEEB")
         XCTAssertTrue(applied[2] is PKEraserTool)
     }
 
@@ -248,7 +249,7 @@ final class ToolStateTests: XCTestCase {
         tools.select(.highlighter)
         XCTAssertEqual(tools.handlePencil(.switchEraser, gesture: .doubleTap), .select(.eraser))
         XCTAssertEqual(tools.current, .eraser)
-        XCTAssertEqual(tools.toast?.text, "Partial eraser · Pencil double-tap")
+        XCTAssertEqual(tools.toast?.text, "Whole stroke eraser · Pencil double-tap", "the default eraser (EP71)")
         XCTAssertEqual(tools.toast?.symbol, "eraser")
         XCTAssertEqual(tools.handlePencil(.switchEraser, gesture: .doubleTap), .select(.highlighter))
         XCTAssertEqual(tools.current, .highlighter)
@@ -257,10 +258,10 @@ final class ToolStateTests: XCTestCase {
 
     func testSwitchEraserKeepsTheLastEraserMode() throws {
         let tools = ToolState(defaults: defaults)
-        tools.setEraserMode(.wholeStroke)
+        tools.setEraserMode(.partial)
         tools.handlePencil(.switchEraser, gesture: .squeeze)
-        XCTAssertEqual(try XCTUnwrap(tools.pencilTool as? PKEraserTool).eraserType, .vector)
-        XCTAssertEqual(tools.toast?.text, "Whole stroke eraser · Pencil squeeze")
+        XCTAssertEqual(try XCTUnwrap(tools.pencilTool as? PKEraserTool).eraserType, .fixedWidthBitmap)
+        XCTAssertEqual(tools.toast?.text, "Partial eraser · Pencil squeeze")
     }
 
     func testPaletteActionsOpenTheCurrentToolsSettingsWithoutSwitching() {
@@ -305,7 +306,7 @@ final class ToolStateTests: XCTestCase {
         for canvas in canvases {
             let marker = try XCTUnwrap(canvas.tool as? PKInkingTool)
             XCTAssertEqual(marker.inkType, .marker)
-            XCTAssertEqual(marker.color.emberHex, "4ADE80")
+            XCTAssertEqual(marker.color.emberHex, "00FF00")
         }
         tools.handlePencil(.switchEraser, gesture: .doubleTap)
         for canvas in canvases { XCTAssertTrue(canvas.tool is PKEraserTool) }
@@ -339,7 +340,8 @@ final class ToolStateTests: XCTestCase {
         // Defaults stay within one 8-bit step of the ink colour sets.
         for (hex, token) in zip(ToolSettings.defaultPenColors + ToolSettings.defaultHighlighterColors,
                                 [UIColor.emberPenBlack, .emberPenBlue, .emberPenRed,
-                                 .emberHighlighterYellow, .emberHighlighterGreen, .emberHighlighterPink]) {
+                                 .emberHighlighterYellow, .emberHighlighterGreen, .emberHighlighterPink,
+                                 .emberHighlighterCyan, .emberHighlighterMagenta]) {
             let a = UInt32(hex, radix: 16)!, b = UInt32(token.emberHex, radix: 16)!
             for shift in [16, 8, 0] {
                 XCTAssertLessThanOrEqual(abs(Int((a >> shift) & 0xFF) - Int((b >> shift) & 0xFF)), 1, hex)

@@ -927,19 +927,22 @@ extension PDFOverlayPageController {
     /// curve, a circle to lasso) shows no guide, because it will not snap.
     /// With "Always straight" on the highlighter shows no guide, as GoodNotes'
     /// "Draw in Straight Line" shows none: the stroke straightens on lift (EP71).
+    static func showsHoldGuide(tool: WorksheetTool, settings: ToolSettings, held: Bool, lineLike: Bool) -> Bool {
+        switch tool {
+        case .highlighter: !settings.highlighterAlwaysStraight && held && settings.straightHighlighter
+        case .pen: held && settings.penDrawAndHold && lineLike
+        case .lasso, .eraser, .laser, .shape: false
+        }
+    }
+
     private func updateHoldGuide(_ hold: HoldRecognizer) {
         // Read-only: a Pencil scrolling the page draws nothing, not even a guide.
         guard !readOnly, let canvas = hold.view, let start = hold.startLocation, let current = hold.currentLocation else {
             holdGuide.removeFromSuperlayer()
             return
         }
-        let settings = tools.settings
-        let snaps = switch tools.current {
-        case .highlighter: !settings.highlighterAlwaysStraight && hold.isHeld && settings.straightHighlighter
-        case .pen: hold.isHeld && settings.penDrawAndHold && hold.lineLikeAtHold
-        case .lasso, .eraser, .laser, .shape: false
-        }
-        guard snaps else {
+        guard Self.showsHoldGuide(tool: tools.current, settings: tools.settings, held: hold.isHeld,
+                                  lineLike: hold.lineLikeAtHold) else {
             holdGuide.removeFromSuperlayer()
             return
         }
@@ -1032,10 +1035,17 @@ extension PDFOverlayPageController {
             }
             return true
         }
-        guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
-              snapsStraight(stroke, held: held, lineLike: lineLike),
-              var straight = StrokeSnap.straightened(stroke, level: stroke.ink.inkType == .marker ? .highlighter : .pen)
-        else { return false }
+        guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last else { return false }
+        var replacement = snapsStraight(stroke, held: held, lineLike: lineLike)
+            ? StrokeSnap.straightened(stroke, level: stroke.ink.inkType == .marker ? .highlighter : .pen) : nil
+        var actionName = "Straight Line"
+        if stroke.ink.inkType == .marker, tools.current == .highlighter,
+           let narrowed = StrokeSnap.resized(replacement ?? stroke, scale: tools.settings.highlighterLiftScale) {
+            // The thin highlighter, drawn live at PencilKit's narrowest marker, takes its true width (EP71).
+            if replacement == nil { actionName = "Ink" }
+            replacement = narrowed
+        }
+        guard var straight = replacement else { return false }
         if PenFeel.isPenInk(straight.ink.inkType) {
             // A held pen line takes the same pen feel as the handwriting around it, in the same one swap.
             straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth,
@@ -1044,7 +1054,8 @@ extension PDFOverlayPageController {
         let count = canvas.drawing.strokes.count
         let undoManager = canvas.undoManager
         DispatchQueue.main.async { [weak self] in
-            self?.replaceNewestStroke(page: page, strokeCount: count, with: straight, undoManager: undoManager)
+            self?.replaceNewestStroke(page: page, strokeCount: count, with: straight, undoManager: undoManager,
+                                      actionName: actionName)
         }
         return true
     }
