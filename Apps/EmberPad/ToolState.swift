@@ -61,7 +61,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
     var highlighterColors: [String] = ToolSettings.defaultHighlighterColors
     var highlighterColorIndex = 0
     var highlighterWidthIndex = Theme.highlighterDefaultWidthIndex
-    var eraserMode: EraserMode = .partial
+    /// Whole stroke by default (EP71), the teacher's GoodNotes eraser setting; a stored choice is kept.
+    var eraserMode: EraserMode = .wholeStroke
     var eraserSizeIndex = Theme.eraserDefaultSizeIndex
     /// Draw and hold for a straight highlighter line (EP-14).
     var straightHighlighter = true
@@ -108,7 +109,13 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// The default black before EP60. A stored pen preset of exactly this colour
     /// decodes as today's black, so existing settings follow the new default.
     static let legacyDefaultPenBlack = "1B1B1B"
-    static let defaultHighlighterColors = ["FACC15", "4ADE80", "F472B6"]
+    /// GoodNotes' five highlighter presets, in its order: yellow, green, pink, cyan and magenta (EP71).
+    static let defaultHighlighterColors = ["FFFF82", "00FF00", "FFDEEB", "00FFFF", "FF00FF"]
+    /// The presets before EP71, each with the nearest new preset by hue. A stored list holding any of them is
+    /// migrated by `migratedHighlighterPresets`.
+    static let legacyHighlighterPresets = ["FACC15": "FFFF82", "4ADE80": "00FF00", "F472B6": "FFDEEB"]
+    /// The presets EP71 added, given to a migrated list that lacks them.
+    static let addedHighlighterPresets = ["00FFFF", "FF00FF"]
 
     init() {}
 
@@ -124,6 +131,7 @@ struct ToolSettings: Codable, Equatable, Sendable {
         penWidthIndex = (try? c.decodeIfPresent(Int.self, forKey: .penWidthIndex)) ?? d.penWidthIndex
         highlighterColors = (try? c.decodeIfPresent([String].self, forKey: .highlighterColors)) ?? d.highlighterColors
         highlighterColorIndex = (try? c.decodeIfPresent(Int.self, forKey: .highlighterColorIndex)) ?? d.highlighterColorIndex
+        (highlighterColors, highlighterColorIndex) = Self.migratedHighlighterPresets(highlighterColors, selected: highlighterColorIndex)
         highlighterWidthIndex = (try? c.decodeIfPresent(Int.self, forKey: .highlighterWidthIndex)) ?? d.highlighterWidthIndex
         eraserMode = (try? c.decodeIfPresent(EraserMode.self, forKey: .eraserMode)) ?? d.eraserMode
         eraserSizeIndex = (try? c.decodeIfPresent(Int.self, forKey: .eraserSizeIndex)) ?? d.eraserSizeIndex
@@ -166,6 +174,24 @@ struct ToolSettings: Codable, Equatable, Sendable {
         return s
     }
 
+    /// Brings a highlighter preset list stored before EP71 to GoodNotes' palette: each old preset becomes the nearest
+    /// new one in its place, custom colours are kept, then cyan and magenta are added at the end if missing (within
+    /// `maxPresets`). A colour that appears twice afterwards keeps its first place. The same colour stays selected
+    /// (an old preset's selection moves to its new preset). A list with no old preset is returned unchanged.
+    static func migratedHighlighterPresets(_ presets: [String], selected: Int) -> ([String], Int) {
+        let legacy = Dictionary(uniqueKeysWithValues: legacyHighlighterPresets.map { ($0.key.uppercased(), $0.value) })
+        guard presets.contains(where: { legacy[$0.uppercased()] != nil }) else { return (presets, selected) }
+        let mapped = presets.map { legacy[$0.uppercased()] ?? $0 }
+        let selectedHex = mapped.indices.contains(selected) ? mapped[selected].uppercased() : nil
+        var result: [String] = []
+        for hex in mapped + addedHighlighterPresets where !result.contains(where: { $0.uppercased() == hex.uppercased() }) {
+            guard result.count < maxPresets else { break }
+            result.append(hex)
+        }
+        let index = selectedHex.flatMap { hex in result.firstIndex { $0.uppercased() == hex } } ?? selected
+        return (result, index)
+    }
+
     private static func cleanPresets(_ presets: [String], fallback: [String]) -> [String] {
         let valid = presets.compactMap { UIColor(emberHex: $0)?.emberHex }.prefix(maxPresets)
         return valid.isEmpty ? fallback : Array(valid)
@@ -179,6 +205,12 @@ struct ToolSettings: Codable, Equatable, Sendable {
     var highlighterColor: UIColor { UIColor(emberHex: highlighterColors[highlighterColorIndex]) ?? .emberHighlighterYellow }
     var penWidth: CGFloat { Theme.penWidths[penWidthIndex] }
     var highlighterWidth: CGFloat { Theme.highlighterWidths[highlighterWidthIndex] }
+    /// What a just-drawn highlighter stroke's point sizes are multiplied by on lift. PencilKit draws a marker no
+    /// thinner than its `validWidthRange` lower bound (7.5 points on iOS 26), so the thin preset (4.5) is drawn at
+    /// that width while the Pencil is down and narrowed to its true width when it lifts (EP71). 1 for every other width.
+    var highlighterLiftScale: CGFloat {
+        highlighterWidth / max(highlighterWidth, PKInk.InkType.marker.validWidthRange.lowerBound)
+    }
     var eraserSize: CGFloat { Theme.eraserSizes[eraserSizeIndex] }
     var penFeel: PenFeelSettings {
         PenFeelSettings(tipSharpness: penTipSharpness, pressureSensitivity: penPressureSensitivity)

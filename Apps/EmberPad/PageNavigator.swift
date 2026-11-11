@@ -41,7 +41,8 @@ enum PageThumbnailRenderer {
             UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
                 ink = drawing.image(from: CGRect(origin: .zero, size: pageSize), scale: scale * size.width / pageSize.width)
             }
-            ink.draw(in: CGRect(origin: .zero, size: size))
+            // Multiplied into the page, as on screen (EP71).
+            ink.draw(in: CGRect(origin: .zero, size: size), blendMode: .multiply, alpha: 1)
         }
     }
 }

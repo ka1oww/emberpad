@@ -10,8 +10,14 @@ import UIKit
 /// The drawing stays in page points. This view's own coordinates are the page's ink space, and everything EmberPad
 /// measures on a page (live ink, the laser, holds, the lasso, paste, the selection) uses them through
 /// `PKCanvasView.pageSpace`, never the canvas's own coordinates, which are `inkScale` times larger.
+///
+/// EP71: the page's ink multiplies into the printed page, as GoodNotes' does, so black print stays black under a
+/// highlight instead of turning olive. On white paper multiplying changes nothing, so pen ink looks as before.
 @MainActor
 final class PageInkView: UIView {
+    /// Core Animation's multiply compositing filter, also used by the student display's ink layers.
+    static let multiplyFilter = "multiplyBlendMode"
+
     /// The largest zoom the ink is drawn for. Above it the ink is magnified again, slightly soft. PencilKit's tiles
     /// grow with the square of the zoom, so this bounds the ink's memory per page at 16 times the unzoomed page while
     /// covering 3x fit-width in portrait (about 3.8x).
@@ -26,6 +32,7 @@ final class PageInkView: UIView {
         super.init(frame: CGRect(origin: .zero, size: pageSize))
         backgroundColor = .clear
         isOpaque = false
+        layer.compositingFilter = Self.multiplyFilter
         addSubview(canvas)
     }
 

@@ -109,7 +109,7 @@ final class LiveInkTests: XCTestCase {
         // The provisional line is as wide as the iPad's live monoline, the reshaped stroke's middle width (EP53).
         XCTAssertEqual(pen.width, PenFeel.widthPerToolWidth * settings.penWidth, accuracy: 1e-6)
         let marker = try XCTUnwrap(LiveInkStyle(tool: settings.pencilTool(for: .highlighter)))
-        XCTAssertEqual(marker.width, settings.highlighterWidth)
+        XCTAssertEqual(marker.width, settings.highlighterWidth, accuracy: 1e-6)
         var alpha: CGFloat = 0
         marker.color.getRed(nil, green: nil, blue: nil, alpha: &alpha)
         XCTAssertLessThan(alpha, 1, "The highlighter stays translucent")
