@@ -108,8 +108,11 @@ enum Theme {
     static let penDefaultWidthIndex = 1
     static let highlighterWidths: [CGFloat] = [12, 18, 26]
     static let highlighterDefaultWidthIndex = 1
-    /// Partial-eraser sizes; the whole-stroke eraser has no size.
-    static let eraserSizes: [CGFloat] = [8, 16, 32]
+    /// Partial-eraser sizes, in screen points (PencilKit erases the same on-screen width at every zoom); the
+    /// whole-stroke eraser has no size. EP68: PencilKit's partial eraser takes only 16.4 to 80.4 points and raises
+    /// anything smaller to 16.4, so the old 8 and 16 erased the same. Small is PencilKit's minimum, and each size is
+    /// twice the one before. The stored size is the index, so saved settings keep small, medium or large.
+    static let eraserSizes: [CGFloat] = [16.4, 32, 64]
     static let eraserDefaultSizeIndex = 1
     /// The toast capsule: `#1C1C1E` at 88% in both themes (design 5.4).
     static let toastBackground = Color(.sRGB, red: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, opacity: 0.88)

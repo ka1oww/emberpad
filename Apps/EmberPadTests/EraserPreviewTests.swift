@@ -45,6 +45,25 @@ final class EraserPreviewTests: XCTestCase {
         XCTAssertGreaterThan(EraserPreview.diameter(for: large, pageScale: 1), EraserPreview.diameter(for: medium, pageScale: 1))
     }
 
+    /// Each size is one PencilKit really erases: inside its partial eraser's range, so never raised to its minimum,
+    /// and all three different, so choosing a size changes what is erased and the circle with it.
+    func testEverySizeIsADistinctWidthPencilKitErases() throws {
+        let range = PKEraserTool.EraserType.fixedWidthBitmap.validWidthRange
+        for size in Theme.eraserSizes {
+            XCTAssertTrue(range.contains(size), "\(size) pt is inside PencilKit's \(range)")
+            XCTAssertEqual(PKEraserTool(.fixedWidthBitmap, width: size).width, size, accuracy: 0.001)
+        }
+        XCTAssertEqual(Set(Theme.eraserSizes).count, Theme.eraserSizes.count, "three distinct sizes")
+        XCTAssertEqual(Theme.eraserSizes, Theme.eraserSizes.sorted(), "small, medium, large")
+        var settings = ToolSettings()
+        let diameters = try Theme.eraserSizes.indices.map { index -> CGFloat in
+            settings.eraserSizeIndex = index
+            return EraserPreview.diameter(for: try XCTUnwrap(settings.pencilTool(for: .eraser) as? PKEraserTool), pageScale: 1)
+        }
+        XCTAssertEqual(diameters, Theme.eraserSizes, "the circle is each size's real width")
+        XCTAssertEqual(Theme.eraserDefaultSizeIndex, 1, "medium stays the default")
+    }
+
     func testWholeStrokeCircleZoomsWithThePage() throws {
         var settings = ToolSettings()
         settings.eraserMode = .wholeStroke
