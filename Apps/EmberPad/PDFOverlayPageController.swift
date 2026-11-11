@@ -751,7 +751,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
               let tool = tools.pencilTool as? PKEraserTool else { return }
         let scale = EraserPreview.pageScale(of: space, in: view)
         guard scale > 0 else { return }
-        erase.reach = max(erase.reach, EraserPreview.diameter(for: tool, pageScale: scale) / 2 / scale)
+        let width = tool.width.isFinite ? max(0, tool.width) : 0
+        let diameter = max(EraserPreview.diameter(for: tool, pageScale: scale), width)
+        erase.reach = max(erase.reach, diameter / 2 / scale)
         erase.sweep.append(contentsOf: samples.map { space.convert($0.location, from: pdfView) })
     }
 

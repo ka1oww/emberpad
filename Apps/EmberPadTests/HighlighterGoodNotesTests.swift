@@ -121,6 +121,17 @@ final class HighlighterGoodNotesTests: XCTestCase {
         XCTAssertTrue(HighlighterOnlyErase.sweep([CGPoint(x: 200, y: 150)], reach: 12, mayCut: page), "a single touch on it")
     }
 
+    /// EP79: a scaled highlight is wider than its stored point size, so a sweep near its true edge still counts.
+    func testSweepMeasuresAScaledHighlightAtItsDrawnWidth() {
+        let base = Self.line(y: 50, ink: PKInk(.marker, color: .yellow), width: 8, from: 50, to: 153)
+        let scaled = PKStroke(ink: base.ink, path: base.path, transform: CGAffineTransform(scaleX: 3, y: 3))
+        let page = PKDrawing(strokes: [scaled])
+        let nearEdge = [CGPoint(x: 300, y: 185), CGPoint(x: 400, y: 185)]
+        XCTAssertTrue(HighlighterOnlyErase.sweep(nearEdge, reach: 12, mayCut: page), "within reach, slack and the drawn half-width")
+        let far = [CGPoint(x: 300, y: 200), CGPoint(x: 400, y: 200)]
+        XCTAssertFalse(HighlighterOnlyErase.sweep(far, reach: 12, mayCut: page), "well clear")
+    }
+
     // MARK: H1: the highlighter multiplies into the page
 
     func testPageInkMultipliesIntoThePage() {
