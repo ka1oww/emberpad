@@ -269,6 +269,35 @@ struct EmberLibrarySourceTests {
         #expect(snapshot.misses.map(\.reason) == [.duplicatePaperKey, .duplicatePaperKey])
     }
 
+    @Test func aStudentMarkedCopyBesideAnUnmarkedOneMakesTheUnmarkedOneTheTeacherCopy() throws {
+        let tree = try SyntheticDriveTree(); defer { tree.remove() }
+        try tree.write("EMBER CHEMISTRY/Synthetic Technique/EMBER - Synthetic Techniques.pdf")
+        try tree.write("EMBER CHEMISTRY/Synthetic Technique/EMBER - synthetic  techniques (Student).pdf")
+        // Two Student-marked copies beside an unmarked one are still ambiguous.
+        try tree.write("EMBER MATH/Topic/Synthetic Sheet.pdf")
+        try tree.write("EMBER MATH/Topic/Synthetic Sheet (Student).pdf")
+        try tree.write("EMBER MATH/Topic/Synthetic Sheet - Student.pdf")
+        // In different folders the copies do not pair.
+        try tree.write("EMBER PHYSICS/A/Synthetic Notes.pdf")
+        try tree.write("EMBER PHYSICS/B/Synthetic Notes (Student).pdf")
+
+        let snapshot = try read(tree)
+        let teacher = try #require(snapshot.document("EMBER CHEMISTRY/Synthetic Technique/EMBER - Synthetic Techniques.pdf")).entry
+        let student = try #require(snapshot.document("EMBER CHEMISTRY/Synthetic Technique/EMBER - synthetic  techniques (Student).pdf")).entry
+        #expect(teacher.role == .teacher && student.role == .student)
+        #expect(student.paperKey?.rawValue == "Chemistry/Synthetic Technique/EMBER - synthetic  techniques")
+        #expect(teacher.paperKey == student.paperKey)
+        #expect(snapshot.misses.filter { $0.path.hasPrefix("EMBER CHEMISTRY") }.isEmpty)
+        #expect(snapshot.misses.filter { $0.path.hasPrefix("EMBER MATH") }.map(\.reason) == Array(repeating: .duplicatePaperKey, count: 3))
+        #expect(snapshot.document("EMBER PHYSICS/A/Synthetic Notes.pdf")?.entry.role == .student)
+        #expect(snapshot.document("EMBER PHYSICS/B/Synthetic Notes (Student).pdf")?.entry.role == .student)
+        #expect(snapshot.pairCount == 1)
+
+        let local = snapshot.manifest.files.map { DocumentRecord(source: $0, pageCount: 1, importedAt: fixtureDate) }
+        let studentRecord = try #require(local.first { $0.source.source.relativePath.hasSuffix("(Student).pdf") && $0.subject == "Chemistry" })
+        #expect(DiffPlanner.pairs(in: local)[studentRecord.id] != nil, "the iPad pairs the two copies")
+    }
+
     // MARK: Archive folders
 
     @Test func underscoreFoldersAreIncludedButArchived() throws {

@@ -660,13 +660,27 @@ private struct Walker {
         }
         let groups = Dictionary(grouping: pdfs, by: { RoleMarker.normalized($0.base) })
         for name in groups.keys.sorted() {
-            guard let copies = groups[name]?.sorted(by: { $0.child.name < $1.child.name }) else { continue }
+            guard var copies = groups[name]?.sorted(by: { $0.child.name < $1.child.name }) else { continue }
+            // EP69: a Student-marked PDF beside an unmarked PDF of the same name, with no Teacher-marked PDF, is a
+            // pair: the unmarked one is the full-answers Teacher copy (Drive files the blank copy as "(Student)").
+            if let unmarked = Self.unmarkedTeacherIndex(copies.map { ($0.role, $0.stem, $0.base) }) {
+                copies[unmarked].role = .teacher
+            }
             // Both copies of a pair share the paper key named after the Student copy's unmarked name.
             let base = (copies.first { $0.role == .student } ?? copies[0]).base
             for copy in copies {
                 read(copy.child, stem: copy.stem, ext: copy.ext, role: copy.role, base: base, context: context)
             }
         }
+    }
+
+    /// In one same-name group, the unmarked PDF to deliver as the Teacher copy: only when the group is exactly one
+    /// Student-marked PDF and one unmarked PDF. Any other mix (a Teacher-marked PDF, two Student-marked PDFs, two
+    /// unmarked PDFs) keeps its roles, so duplicates are still held back.
+    static func unmarkedTeacherIndex(_ copies: [(role: DocumentRole, stem: String, base: String)]) -> Int? {
+        guard copies.count == 2, copies.allSatisfy({ $0.role == .student }) else { return nil }
+        let unmarked = copies.indices.filter { copies[$0].stem == copies[$0].base }
+        return unmarked.count == 1 ? unmarked[0] : nil
     }
 
     private mutating func read(_ file: Child, stem: String, ext: String, role: DocumentRole, base: String, context: Context) {
