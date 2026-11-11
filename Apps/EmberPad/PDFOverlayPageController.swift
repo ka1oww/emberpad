@@ -38,6 +38,15 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// The clock the trail fades by. Internal so tests can fade it without waiting.
     var laserClock: () -> TimeInterval = { CACurrentMediaTime() }
     private var laserTrailLink: CADisplayLink?
+    /// EP68: the eraser's reach, a see-through circle under the Pencil while the eraser touches or hovers over a page.
+    /// Internal for tests.
+    let eraserCircle = EraserPreview.makeLayer()
+    /// Watches the eraser's Pencil touches beside PencilKit's, as live ink does, to move the circle. Internal for tests.
+    let eraserTouch = LiveInkRecognizer()
+    /// Apple Pencil hover with the eraser chosen, on iPads that support it; elsewhere it never fires. Internal for tests.
+    let eraserHover = UIHoverGestureRecognizer()
+    /// The page ink space of the eraser stroke in progress, fixed at pen-down, which sizes the whole-stroke circle.
+    private weak var eraserStrokeSpace: UIView?
     private var currentPage = 0
     /// Off from the moment the worksheet starts leaving, so a late throttled frame cannot put a page back on the
     /// student view after the editor has cleared it.
@@ -135,6 +144,15 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         laserTrailLayer.zPosition = 9
         view.layer.addSublayer(laserTrailLayer)
         view.layer.addSublayer(laserDot)
+        eraserTouch.strokeTarget = { [weak self] touch in self?.eraserStrokeTarget(for: touch) }
+        eraserTouch.onStroke = { [weak self] event in self?.eraserTouchEvent(event) }
+        eraserTouch.delegate = self
+        pdfView.addGestureRecognizer(eraserTouch)
+        eraserHover.addTarget(self, action: #selector(eraserHovered(_:)))
+        eraserHover.allowedTouchTypes = [UITouch.TouchType.pencil.rawValue as NSNumber]
+        eraserHover.delegate = self
+        pdfView.addGestureRecognizer(eraserHover)
+        view.layer.addSublayer(eraserCircle)
         updateCanvasInput()
         publishPage()
         onPageChange?(currentPage)
@@ -191,6 +209,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         livePen.cancel()
         hideLaser(animated: false)
         clearLaserTrail()
+        hideEraserCircle()
     }
 
     deinit {
@@ -340,6 +359,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     func apply(_ tool: any PKTool) {
         finishHighlighterErase()
         inkSelection.dismiss()
+        hideEraserCircle()
         for canvas in canvases.values { canvas.tool = tool }
         updateCanvasInput()
     }
@@ -360,6 +380,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         }
         if laser.isEnabled != pointing { laser.isEnabled = pointing }
         if !pointing { hideLaser(animated: false); clearLaserTrail() }
+        let erasing = tools.current == .eraser && !readOnly
+        if eraserTouch.isEnabled != erasing { eraserTouch.isEnabled = erasing }
+        if eraserHover.isEnabled != erasing { eraserHover.isEnabled = erasing }
+        if !erasing { hideEraserCircle() }
     }
 
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
@@ -417,6 +441,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 showLivePen(page: page)
             }
             holdGuide.removeFromSuperlayer()
+            eraserStrokeSpace = nil
             activeCanvas?.resignFirstResponder()
         }
         undoTap.isEnabled = !readOnly
@@ -467,6 +492,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if !enabled {
             finishHighlighterErase()
             inkSelection.dismiss()
+            hideEraserCircle()
         }
         pdfView.isUserInteractionEnabled = enabled
     }
@@ -505,11 +531,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     // MARK: Live ink (EP-30)
 
-    /// The live-ink recogniser only observes, so it runs beside every other recogniser, PencilKit's included.
-    /// The laser recogniser is not simultaneous: once it has the Pencil, the pages do not scroll under it.
+    /// The live-ink and eraser-circle recognisers only observe, so they run beside every other recogniser,
+    /// PencilKit's included. The laser recogniser is not simultaneous: once it has the Pencil, the pages do not
+    /// scroll under it.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        gestureRecognizer === liveInk || otherGestureRecognizer === liveInk
+        let observers: [UIGestureRecognizer] = [liveInk, eraserTouch, eraserHover]
+        return observers.contains { $0 === gestureRecognizer || $0 === otherGestureRecognizer }
     }
 
     /// The page space of the canvas a Pencil touch will ink, or nil when it will not: the hit-tested page is not
@@ -593,6 +621,64 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         }
         livePenExpiry = work
         DispatchQueue.main.asyncAfter(deadline: .now() + LivePenStrokes.timeout / 2, execute: work)
+    }
+
+    // MARK: Eraser circle (EP68)
+
+    /// Shows the eraser's circle centred on `location` (PDF view coordinates), sized for the page whose ink space is
+    /// `space`, or for the page under `location` when `space` is nil. Returns false, and hides the circle, when the
+    /// eraser is not chosen, the pages are read-only or there is no page there. Internal for tests.
+    @discardableResult
+    func showEraserCircle(at location: CGPoint, on space: UIView? = nil) -> Bool {
+        guard !readOnly, tools.current == .eraser, let tool = tools.pencilTool as? PKEraserTool,
+              let space = space ?? pageLocation(of: location).flatMap({ canvases[$0.page]?.pageSpace }) else {
+            hideEraserCircle()
+            return false
+        }
+        let diameter = EraserPreview.diameter(for: tool, pageScale: EraserPreview.pageScale(of: space, in: view))
+        EraserPreview.show(eraserCircle, at: view.convert(location, from: pdfView), diameter: diameter)
+        return true
+    }
+
+    func hideEraserCircle() { EraserPreview.hide(eraserCircle) }
+
+    /// Whether the eraser circle is showing, for tests.
+    var eraserCircleVisible: Bool { !eraserCircle.isHidden }
+
+    /// A Pencil touch with the eraser: watched, in PDF view coordinates, when it lands on a page. The page under it is
+    /// already focused by the PDF view's hit test, so it is the page PencilKit erases.
+    private func eraserStrokeTarget(for touch: UITouch) -> UIView? {
+        let location = touch.preciseLocation(in: pdfView)
+        guard let page = pageLocation(of: location)?.page, let space = canvases[page]?.pageSpace,
+              showEraserCircle(at: location, on: space) else { return nil }
+        eraserStrokeSpace = space
+        return pdfView
+    }
+
+    /// The circle follows the newest Pencil sample, on and off the page, until the Pencil lifts. Internal for tests.
+    func eraserTouchEvent(_ event: LiveInkRecognizer.Event) {
+        switch event {
+        case .began(let samples), .moved(let samples, _):
+            guard let space = eraserStrokeSpace, let newest = samples.last else { return }
+            showEraserCircle(at: newest.location, on: space)
+        case .ended, .cancelled:
+            eraserStrokeSpace = nil
+            hideEraserCircle()
+        }
+    }
+
+    @objc private func eraserHovered(_ hover: UIHoverGestureRecognizer) {
+        eraserHover(hover.state, at: hover.location(in: pdfView))
+    }
+
+    /// Hovering shows the same circle over a page; touching down hands it to the stroke, and leaving hides it. iPads
+    /// without Pencil hover never call this. `location` is in PDF view coordinates. Internal for tests.
+    func eraserHover(_ state: UIGestureRecognizer.State, at location: CGPoint) {
+        guard eraserStrokeSpace == nil else { return }
+        switch state {
+        case .began, .changed: showEraserCircle(at: location)
+        default: hideEraserCircle()
+        }
     }
 
     // MARK: Laser pointer (P6)
