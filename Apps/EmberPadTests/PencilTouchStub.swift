@@ -55,16 +55,21 @@ struct PencilStroke {
     let window: UIWindow
     let view: UIView
     let recognizers: [UIGestureRecognizer]
+    /// As UIKit does, ask every recogniser's delegate whether it takes the touch before handing it to any of them.
+    let asksDelegates: Bool
     private(set) var touch: PencilTouchStub?
 
-    init(window: UIWindow, view: UIView, recognizers: [UIGestureRecognizer]) {
-        self.window = window; self.view = view; self.recognizers = recognizers
+    init(window: UIWindow, view: UIView, recognizers: [UIGestureRecognizer], asksDelegates: Bool = false) {
+        self.window = window; self.view = view; self.recognizers = recognizers; self.asksDelegates = asksDelegates
     }
 
     mutating func down(at point: CGPoint) {
         let touch = PencilTouchStub(window: window, view: view, at: point)
         self.touch = touch
         let event = PencilEventStub(touch)
+        if asksDelegates {
+            for recognizer in recognizers { _ = recognizer.delegate?.gestureRecognizer?(recognizer, shouldReceive: touch) }
+        }
         recognizers.forEach { $0.touchesBegan([touch], with: event) }
         Self.turn()
     }

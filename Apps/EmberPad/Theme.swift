@@ -32,11 +32,14 @@ enum ThemeToken: String, CaseIterable, Sendable {
     case highlighterYellow
     case highlighterGreen
     case highlighterPink
+    case highlighterCyan
+    case highlighterMagenta
 
     /// Ink tokens sit on the white page, so they are not themed.
     var isThemed: Bool {
         switch self {
-        case .penBlack, .penBlue, .penRed, .highlighterYellow, .highlighterGreen, .highlighterPink: return false
+        case .penBlack, .penBlue, .penRed, .highlighterYellow, .highlighterGreen, .highlighterPink, .highlighterCyan,
+             .highlighterMagenta: return false
         default: return true
         }
     }
@@ -98,6 +101,8 @@ enum Theme {
     static let highlighterYellow = ThemeToken.highlighterYellow.color
     static let highlighterGreen = ThemeToken.highlighterGreen.color
     static let highlighterPink = ThemeToken.highlighterPink.color
+    static let highlighterCyan = ThemeToken.highlighterCyan.color
+    static let highlighterMagenta = ThemeToken.highlighterMagenta.color
     /// Highlighter presets are stored opaque and drawn at this alpha.
     static let highlighterDefaultOpacity: CGFloat = 0.45
 
@@ -106,13 +111,16 @@ enum Theme {
     /// The three pen thickness dots; the middle one is the default.
     static let penWidths: [CGFloat] = [1.5, 2.5, 4]
     static let penDefaultWidthIndex = 1
-    static let highlighterWidths: [CGFloat] = [12, 18, 26]
+    /// GoodNotes' three highlighter sizes, 1.6, 2.8 and 6.9 mm, in page points (EP71; 12, 18 and 26 before). The
+    /// middle one, which the teacher uses in GoodNotes, is the default. The stored width is the index, so saved
+    /// settings keep thin, middle or thick.
+    static let highlighterWidths: [CGFloat] = [4.5, 8, 19.6]
     static let highlighterDefaultWidthIndex = 1
     /// Partial-eraser sizes, in screen points (PencilKit erases the same on-screen width at every zoom); the
-    /// whole-stroke eraser has no size. EP68: PencilKit's partial eraser takes only 16.4 to 80.4 points and raises
-    /// anything smaller to 16.4, so the old 8 and 16 erased the same. Small is PencilKit's minimum, and each size is
-    /// twice the one before. The stored size is the index, so saved settings keep small, medium or large.
-    static let eraserSizes: [CGFloat] = [16.4, 32, 64]
+    /// whole-stroke eraser has no size. EP71: GoodNotes' small, medium and large erase about 25, 50 and 100 points
+    /// across. PencilKit's partial eraser takes only 16.4 to 80.4 points (EP68), so large is its maximum, 80.4. The
+    /// stored size is the index, so saved settings keep small, medium or large.
+    static let eraserSizes: [CGFloat] = [25, 50, 80.4]
     static let eraserDefaultSizeIndex = 1
     /// The toast capsule: `#1C1C1E` at 88% in both themes (design 5.4).
     static let toastBackground = Color(.sRGB, red: 0x1C / 255, green: 0x1C / 255, blue: 0x1E / 255, opacity: 0.88)
@@ -200,6 +208,8 @@ extension UIColor {
     static let emberHighlighterYellow = ThemeToken.highlighterYellow.uiColor
     static let emberHighlighterGreen = ThemeToken.highlighterGreen.uiColor
     static let emberHighlighterPink = ThemeToken.highlighterPink.uiColor
+    static let emberHighlighterCyan = ThemeToken.highlighterCyan.uiColor
+    static let emberHighlighterMagenta = ThemeToken.highlighterMagenta.uiColor
 }
 
 #if DEBUG

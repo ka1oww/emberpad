@@ -277,6 +277,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             erase.changed = true
             inkSelection.pageDidChange(page)
             session.update(HighlighterOnlyErase.merge(before: erase.before, erased: canvasView.drawing), page: page)
+            if erase.lifted {
+                // The partial eraser's cut, committed after the lift: the pen ink can go back now.
+                erase.pendingFinish?.cancel()
+                erase.pendingFinish = nil
+                DispatchQueue.main.async { [weak self] in self?.eraserStrokeDone() }
+            }
             return
         }
         let previousCount = session.drawing(on: page).strokes.count
@@ -386,19 +392,37 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if !erasing { hideEraserCircle() }
     }
 
+    /// PencilKit has started the eraser on the ink it holds. "Erase highlighter only" set the pen ink aside before
+    /// this, when the Pencil touched down (`eraserStrokeTarget`): swapping the canvas's drawing now would cancel the
+    /// eraser for the whole stroke, which is how it erased nothing before EP71.
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
-        beginHighlighterErase(on: canvasView, undoManager: canvasView.undoManager)
+        if let erase = highlighterErase, erase.canvas === canvasView { erase.toolBegan = true }
     }
 
     /// The eraser lifted. Waits a turn of the run loop, like the straight-line snap, so PencilKit commits the erase
-    /// and closes its undo group before the set-aside ink goes back and the tool switches.
+    /// and closes its undo group before the set-aside ink goes back and the tool switches. PencilKit's partial eraser
+    /// commits its cut only after the lift (about 10 ms later on iOS 26.5), so under "Erase highlighter only" the pen
+    /// ink waits for that commit, or for `partialEraseCommitWait` when the sweep cut nothing: put back sooner, it
+    /// would make PencilKit throw the cut away (EP71).
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
         guard tools.current == .eraser else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.finishHighlighterErase()
-            self.tools.eraserLifted()
+        if let erase = highlighterErase, erase.canvas === canvasView, tools.settings.eraserMode == .partial {
+            erase.lifted = true
+            let work = DispatchWorkItem { [weak self] in self?.eraserStrokeDone() }
+            erase.pendingFinish = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.partialEraseCommitWait, execute: work)
+            return
         }
+        DispatchQueue.main.async { [weak self] in self?.eraserStrokeDone() }
+    }
+
+    /// The longest a highlighter-only partial erase waits after the lift for PencilKit's commit, in seconds.
+    static let partialEraseCommitWait: TimeInterval = 0.3
+
+    /// One eraser stroke is over: the set-aside ink goes back and, with "Back to last tool on lift", the tool switches.
+    private func eraserStrokeDone() {
+        finishHighlighterErase()
+        tools.eraserLifted()
     }
 
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
@@ -649,10 +673,37 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// already focused by the PDF view's hit test, so it is the page PencilKit erases.
     private func eraserStrokeTarget(for touch: UITouch) -> UIView? {
         let location = touch.preciseLocation(in: pdfView)
-        guard let page = pageLocation(of: location)?.page, let space = canvases[page]?.pageSpace,
-              showEraserCircle(at: location, on: space) else { return nil }
-        eraserStrokeSpace = space
+        guard let page = pageLocation(of: location)?.page, let canvas = canvases[page],
+              showEraserCircle(at: location, on: canvas.pageSpace) else { return nil }
+        eraserStrokeSpace = canvas.pageSpace
+        prepareHighlighterErase(on: canvas)
         return pdfView
+    }
+
+    /// UIKit asks every recogniser whether it takes a new touch before it hands the touch to any of them, PencilKit's
+    /// included, so the eraser's touch-down sets the pen ink aside here (EP71). `eraserStrokeTarget` does the same for
+    /// a touch handed straight to the recogniser.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === eraserTouch, Self.isPencil(touch),
+           let page = pageLocation(of: touch.preciseLocation(in: pdfView))?.page, let canvas = canvases[page] {
+            prepareHighlighterErase(on: canvas)
+        }
+        return true
+    }
+
+    /// The touches the eraser circle and "Erase highlighter only" act on.
+    static func isPencil(_ touch: UITouch) -> Bool { touch.type == .pencil }
+
+    /// Eraser pen-down on `canvas` with "Erase highlighter only" on: the pen ink leaves the focused page's canvas
+    /// before PencilKit starts erasing, the only moment it can (EP71). An erase from the last stroke still waiting for
+    /// its commit is finished first, so each stroke is its own undo step.
+    private func prepareHighlighterErase(on canvas: PKCanvasView) {
+        guard !readOnly, canvas === activeCanvas, tools.current == .eraser, tools.settings.eraseHighlighterOnly else { return }
+        if let erase = highlighterErase {
+            guard erase.lifted || erase.canvas !== canvas else { return }
+            finishHighlighterErase()
+        }
+        beginHighlighterErase(on: canvas, undoManager: canvas.undoManager)
     }
 
     /// The circle follows the newest Pencil sample, on and off the page, until the Pencil lifts. Internal for tests.
@@ -664,6 +715,14 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         case .ended, .cancelled:
             eraserStrokeSpace = nil
             hideEraserCircle()
+            // A touch PencilKit never erased with (it began off the focused page, or was cancelled) still puts the
+            // pen ink back; one PencilKit did erase with waits for `canvasViewDidEndUsingTool`, after its commit.
+            if let erase = highlighterErase, !erase.toolBegan {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.highlighterErase === erase, !erase.toolBegan else { return }
+                    self.finishHighlighterErase()
+                }
+            }
         }
     }
 
@@ -861,11 +920,13 @@ extension PDFOverlayPageController {
         return guide
     }
 
-    /// While a stroke that will snap is down, a dashed line shows where it
+    /// While a held stroke that will snap is down, a dashed line shows where it
     /// will snap: from where it began to the (flattened) Pencil position. That
-    /// is every always-straight highlighter stroke, and a held highlighter or
-    /// pen stroke. A held pen stroke that is not close to a line (a letter, a
+    /// is a held highlighter stroke with "Always straight" off, or a held pen
+    /// stroke. A held pen stroke that is not close to a line (a letter, a
     /// curve, a circle to lasso) shows no guide, because it will not snap.
+    /// With "Always straight" on the highlighter shows no guide, as GoodNotes'
+    /// "Draw in Straight Line" shows none: the stroke straightens on lift (EP71).
     private func updateHoldGuide(_ hold: HoldRecognizer) {
         // Read-only: a Pencil scrolling the page draws nothing, not even a guide.
         guard !readOnly, let canvas = hold.view, let start = hold.startLocation, let current = hold.currentLocation else {
@@ -874,7 +935,7 @@ extension PDFOverlayPageController {
         }
         let settings = tools.settings
         let snaps = switch tools.current {
-        case .highlighter: settings.highlighterAlwaysStraight || (hold.isHeld && settings.straightHighlighter)
+        case .highlighter: !settings.highlighterAlwaysStraight && hold.isHeld && settings.straightHighlighter
         case .pen: hold.isHeld && settings.penDrawAndHold && hold.lineLikeAtHold
         case .lasso, .eraser, .laser, .shape: false
         }
@@ -882,9 +943,11 @@ extension PDFOverlayPageController {
             holdGuide.removeFromSuperlayer()
             return
         }
+        let level: StrokeSnap.Level = tools.current == .highlighter ? .highlighter : .pen
+        let line = StrokeSnap.straightLine(first: start, last: current, level: level) ?? (start, current)
         let path = UIBezierPath()
-        path.move(to: start)
-        path.addLine(to: StrokeSnap.snappedEnd(from: start, to: current))
+        path.move(to: line.start)
+        path.addLine(to: line.end)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         // In page space, so the guide is drawn and measured in page points like the hold itself.
@@ -939,7 +1002,7 @@ extension PDFOverlayPageController {
     }
 
     /// After PencilKit commits a stroke, swap it for a straight one when it
-    /// is a highlighter stroke with "Always straight" on, or a highlighter or
+    /// is a line-like highlighter stroke with "Always straight" on, or a highlighter or
     /// pen stroke held still at its end with its draw-and-hold switch on. A
     /// held closed pen loop is circle to lasso instead. The swap waits a turn
     /// of the run loop so PencilKit finishes its commit and closes its undo
@@ -970,7 +1033,9 @@ extension PDFOverlayPageController {
             return true
         }
         guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
-              snapsStraight(stroke, held: held, lineLike: lineLike), var straight = StrokeSnap.straightened(stroke) else { return false }
+              snapsStraight(stroke, held: held, lineLike: lineLike),
+              var straight = StrokeSnap.straightened(stroke, level: stroke.ink.inkType == .marker ? .highlighter : .pen)
+        else { return false }
         if PenFeel.isPenInk(straight.ink.inkType) {
             // A held pen line takes the same pen feel as the handwriting around it, in the same one swap.
             straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth,
@@ -990,7 +1055,11 @@ extension PDFOverlayPageController {
         let settings = tools.settings
         switch stroke.ink.inkType {
         case .marker:
-            return tools.current == .highlighter && (settings.highlighterAlwaysStraight || (held && settings.straightHighlighter))
+            guard tools.current == .highlighter else { return false }
+            // "Always straight" is GoodNotes' "Draw in Straight Line" (EP71): only a stroke that already looks like a
+            // line straightens. A stroke that doubles back, a scribble over a word or a second line stays as drawn.
+            if settings.highlighterAlwaysStraight { return StrokeSnap.isLineLike(stroke) }
+            return held && settings.straightHighlighter
         case .fountainPen, PenFeel.liveInkType:
             // Only a stroke already close to a line when held snaps; a held letter,
             // curve or closed loop stays as written (shapes come later).
@@ -1114,6 +1183,11 @@ final class HighlighterEraseStroke {
     let inkLayer: PKCanvasView
     let undoManager: UndoManager?
     var changed = false
+    /// PencilKit started erasing with this stroke, so its end puts the ink back (`canvasViewDidEndUsingTool`).
+    var toolBegan = false
+    /// The Pencil lifted; the ink goes back once PencilKit's partial eraser commits, or `pendingFinish` runs.
+    var lifted = false
+    var pendingFinish: DispatchWorkItem?
 
     init(canvas: PKCanvasView, page: Int, before: PKDrawing, inkLayer: PKCanvasView, undoManager: UndoManager?) {
         self.canvas = canvas; self.page = page; self.before = before; self.inkLayer = inkLayer; self.undoManager = undoManager
@@ -1123,7 +1197,8 @@ final class HighlighterEraseStroke {
 extension PDFOverlayPageController {
     /// Pen-down with the eraser and "Erase highlighter only" on: every non-highlighter stroke leaves the canvas for a
     /// passive layer above it, so PencilKit's eraser can reach only highlighter strokes and the pen ink never flickers.
-    /// Undo registration is held off until lift, when the whole erase becomes one step of EmberPad's own.
+    /// Undo registration is held off until lift, when the whole erase becomes one step of EmberPad's own. Called from
+    /// the eraser's touch-down, before PencilKit begins erasing; a swap after that cancels PencilKit's eraser (EP71).
     func beginHighlighterErase(on canvas: PKCanvasView, undoManager: UndoManager?) {
         guard highlighterErase == nil, tools.current == .eraser, tools.settings.eraseHighlighterOnly,
               let page = canvases.first(where: { $0.value === canvas })?.key else { return }
@@ -1154,6 +1229,7 @@ extension PDFOverlayPageController {
     func finishHighlighterErase() {
         guard let erase = highlighterErase else { return }
         highlighterErase = nil
+        erase.pendingFinish?.cancel()
         let merged = erase.changed ? HighlighterOnlyErase.merge(before: erase.before, erased: erase.canvas.drawing) : erase.before
         isReplacingStroke = true
         erase.canvas.drawing = merged

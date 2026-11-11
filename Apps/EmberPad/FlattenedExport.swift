@@ -89,7 +89,8 @@ enum FlattenedExport {
                         }
                         cg.saveGState()
                         cg.clip(to: pageRect)
-                        image.draw(in: pageRect)
+                        // Multiplied into the page, as on screen (EP71): black print stays black under a highlight.
+                        image.draw(in: pageRect, blendMode: .multiply, alpha: 1)
                         cg.restoreGState()
                     }
                 }

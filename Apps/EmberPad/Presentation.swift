@@ -454,6 +454,8 @@ final class StudentPageDrawingView: UIView {
         while pageLayers.count < scene.items.count {
             let page = CALayer(); page.backgroundColor = UIColor.white.cgColor
             let ink = CALayer()
+            // The ink multiplies into its page, as on the iPad (EP71).
+            ink.compositingFilter = PageInkView.multiplyFilter
             for item in [page, ink] { item.contentsGravity = .resize; item.magnificationFilter = .linear; item.minificationFilter = .trilinear }
             viewport.addSublayer(page); viewport.addSublayer(ink)
             pageLayers.append(page); inkLayers.append(ink)
@@ -497,6 +499,8 @@ final class StudentPageDrawingView: UIView {
             shape.fillColor = nil
             shape.lineCap = .round
             shape.lineJoin = .round
+            // Multiplied into the page like the committed ink it stands in for (EP71).
+            shape.compositingFilter = PageInkView.multiplyFilter
             liveLayer.addSublayer(shape)
             liveStrokeLayers.append(shape)
         }

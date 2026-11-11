@@ -3,12 +3,29 @@ import Foundation
 import PencilKit
 
 /// Geometry for straight lines (EP-14, design 5.4): a held marker or pen
-/// stroke, or any marker stroke with "Always straight" on, becomes a straight
-/// stroke from its first point to its last, laid flat when it is within ±8°
-/// of horizontal. Pure, so tests cover it without a canvas.
+/// stroke, or a line-like marker stroke with "Always straight" on (EP71), becomes a straight stroke from its first
+/// point to its last, laid flat when it is close to horizontal: within ±8° for the pen, keeping its start's height,
+/// and within ±3° for the highlighter, at the stroke's mid height, as GoodNotes lays its highlighter lines.
+/// Pure, so tests cover it without a canvas.
 enum StrokeSnap {
-    /// A line this close to horizontal, in either direction, snaps flat.
+    /// How a straightened line is laid level.
+    struct Level: Equatable, Sendable {
+        /// A line this close to horizontal, in either direction, snaps flat, in degrees.
+        let tolerance: CGFloat
+        /// A flattened line sits halfway between the stroke's start and end heights, rather than at its start's.
+        let atMidHeight: Bool
+
+        /// The pen's draw and hold, and the Shape tool's lines.
+        static let pen = Level(tolerance: flatTolerance, atMidHeight: false)
+        /// The highlighter (EP71): GoodNotes flattens 1° and 2° lines, keeps 3.5° and 5° ones tilted, and lays the
+        /// flattened line at the stroke's mid height.
+        static let highlighter = Level(tolerance: highlighterFlatTolerance, atMidHeight: true)
+    }
+
+    /// A pen line this close to horizontal, in either direction, snaps flat.
     static let flatTolerance: CGFloat = 8
+    /// A highlighter line this close to horizontal snaps flat (EP71; 8° before).
+    static let highlighterFlatTolerance: CGFloat = 3
     /// Distance between the replacement path's control points, in points.
     static let pointSpacing: CGFloat = 4
     /// A held stroke shorter than this is a dot, and stays as drawn.
@@ -57,22 +74,36 @@ enum StrokeSnap {
     }
 
     /// The straight line for a stroke whose first and last points are
-    /// `first` and `last` in drawing space, or nil for a dot.
-    static func straightLine(first: CGPoint, last: CGPoint) -> (start: CGPoint, end: CGPoint)? {
-        let end = snappedEnd(from: first, to: last)
-        guard hypot(end.x - first.x, end.y - first.y) >= minimumLength else { return nil }
-        return (first, end)
+    /// `first` and `last` in drawing space, laid level as `level` says, or nil for a dot.
+    static func straightLine(first: CGPoint, last: CGPoint, level: Level = .pen) -> (start: CGPoint, end: CGPoint)? {
+        var start = first
+        var end = snappedEnd(from: first, to: last, tolerance: level.tolerance)
+        if level.atMidHeight, end != last {
+            // Flattened: level at the height halfway between the stroke's ends.
+            let y = (first.y + last.y) / 2
+            start.y = y
+            end.y = y
+        }
+        guard hypot(end.x - start.x, end.y - start.y) >= minimumLength else { return nil }
+        return (start, end)
+    }
+
+    /// Whether `stroke`, as drawn on the page, is close enough to a line to straighten (`isLineLike`): a wobbly line
+    /// is; a stroke that doubles back, a scribble or a curve is not.
+    static func isLineLike(_ stroke: PKStroke) -> Bool {
+        isLineLike(stroke.path.map { $0.location.applying(stroke.transform) })
     }
 
     /// The straight replacement for `stroke`: the same ink, width, transform
     /// and random seed, on a path from its first point to its (snapped) last
-    /// point. Nil for a dot, or a stroke already cut by the eraser.
-    static func straightened(_ stroke: PKStroke) -> PKStroke? {
+    /// point, laid level as `level` says. Nil for a dot, or a stroke already cut by the eraser.
+    static func straightened(_ stroke: PKStroke, level: Level = .pen) -> PKStroke? {
         let path = stroke.path
         guard stroke.mask == nil, let first = path.first, let last = path.last else { return nil }
         // Snap in drawing space, so "flat" means flat on the page whatever the stroke's transform.
         let transform = stroke.transform
-        guard let line = straightLine(first: first.location.applying(transform), last: last.location.applying(transform))
+        guard let line = straightLine(first: first.location.applying(transform), last: last.location.applying(transform),
+                                      level: level)
         else { return nil }
         let inverse = transform.inverted()
         let template = widthTemplate(of: path)
