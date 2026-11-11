@@ -135,33 +135,24 @@ final class HighlighterGoodNotesTests: XCTestCase {
     // MARK: H2 and E2: sizes
 
     func testSavedWidthAndSizeIndexesKeepTheirMeaning() {
-        for (index, width) in [(0, 4.5), (1, 8), (2, 19.6)] as [(Int, CGFloat)] {
+        for (index, width) in [(0, 7.5), (1, 8), (2, 19.6)] as [(Int, CGFloat)] {
             let tools = stored(#"{"highlighterWidthIndex":\#(index),"eraserSizeIndex":\#(index)}"#)
             XCTAssertEqual(tools.settings.highlighterWidth, width, accuracy: 0.001, "thin, middle, thick")
             XCTAssertEqual(tools.settings.eraserSize, Theme.eraserSizes[index])
         }
     }
 
-    /// PencilKit draws a marker no thinner than 7.5 points, so the thin preset is narrowed on lift; the others draw as set.
-    func testOnlyTheThinHighlighterIsNarrowedOnLift() throws {
+    /// PencilKit draws a marker no thinner than its `validWidthRange` lower bound, so every preset is at least that
+    /// wide and the live tool draws each at its own width: nothing has to change on lift (EP75).
+    func testEveryHighlighterPresetDrawsLiveAtItsOwnWidth() throws {
         var settings = ToolSettings()
-        let minimum = PKInk.InkType.marker.validWidthRange.lowerBound
-        XCTAssertGreaterThan(minimum, Theme.highlighterWidths[0], "PencilKit will not draw the thin preset live")
-        settings.highlighterWidthIndex = 0
-        XCTAssertEqual(settings.highlighterLiftScale, Theme.highlighterWidths[0] / minimum, accuracy: 0.0001)
-        for index in 1..<Theme.highlighterWidths.count {
+        let range = PKInk.InkType.marker.validWidthRange
+        for index in Theme.highlighterWidths.indices {
             settings.highlighterWidthIndex = index
-            XCTAssertEqual(settings.highlighterLiftScale, 1)
+            XCTAssertTrue(range.contains(Theme.highlighterWidths[index]), "PencilKit draws preset \(index) live")
             XCTAssertEqual(try XCTUnwrap(settings.pencilTool(for: .highlighter) as? PKInkingTool).width, Theme.highlighterWidths[index],
-                           accuracy: 0.001, "PencilKit draws the middle and thick presets at their own width")
+                           accuracy: 0.001)
         }
-        let stroke = Self.line(y: 100, ink: PKInk(.marker, color: .yellow), width: minimum)
-        let narrowed = try XCTUnwrap(StrokeSnap.resized(stroke, scale: Theme.highlighterWidths[0] / minimum))
-        XCTAssertTrue(narrowed.path.allSatisfy { abs($0.size.width - 4.5) < 0.001 && abs($0.size.height - 4.5) < 0.001 })
-        XCTAssertEqual(narrowed.path.map(\.location), stroke.path.map(\.location), "same path")
-        XCTAssertEqual(narrowed.ink.inkType, .marker)
-        XCTAssertEqual(narrowed.randomSeed, stroke.randomSeed)
-        XCTAssertNil(StrokeSnap.resized(stroke, scale: 1), "nothing to do at full width")
     }
 
     // MARK: H4: GoodNotes' palette

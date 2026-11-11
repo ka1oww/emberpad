@@ -31,7 +31,7 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(s.penColors, ["000000", "1E3A8A", "B23A2E"])
         XCTAssertEqual(s.highlighterColors, ["FFFF82", "00FF00", "FFDEEB", "00FFFF", "FF00FF"], "GoodNotes' five presets (EP71)")
         XCTAssertEqual(Theme.penWidths, [1.5, 2.5, 4])
-        XCTAssertEqual(Theme.highlighterWidths, [4.5, 8, 19.6])
+        XCTAssertEqual(Theme.highlighterWidths, [7.5, 8, 19.6])
         XCTAssertEqual(Theme.eraserSizes, [25, 50, 80.4])
         XCTAssertEqual(s.highlighterWidth, 8)
         XCTAssertEqual(s.eraserSize, 50)

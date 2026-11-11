@@ -121,22 +121,6 @@ enum StrokeSnap {
         return PKStroke(ink: stroke.ink, path: straightPath, transform: transform, mask: nil, randomSeed: stroke.randomSeed)
     }
 
-    /// `stroke` with every point's size multiplied by `scale`, the same path, ink, transform and seed: the thin
-    /// highlighter's true width, which PencilKit will not draw live (`ToolSettings.highlighterLiftScale`). Nil when
-    /// `scale` is 1 or the stroke is already cut by an eraser.
-    static func resized(_ stroke: PKStroke, scale: CGFloat) -> PKStroke? {
-        guard scale > 0, abs(scale - 1) > 0.001, stroke.mask == nil else { return nil }
-        let path = stroke.path
-        let points = path.map { point in
-            PKStrokePoint(location: point.location, timeOffset: point.timeOffset,
-                          size: CGSize(width: point.size.width * scale, height: point.size.height * scale),
-                          opacity: point.opacity, force: point.force, azimuth: point.azimuth, altitude: point.altitude,
-                          secondaryScale: point.secondaryScale)
-        }
-        return PKStroke(ink: stroke.ink, path: PKStrokePath(controlPoints: points, creationDate: path.creationDate),
-                        transform: stroke.transform, mask: nil, randomSeed: stroke.randomSeed)
-    }
-
     /// The point whose width is the stroke's median, so a light touch-down or
     /// lift-off taper does not set the width of the whole line.
     private static func widthTemplate(of path: PKStrokePath) -> PKStrokePoint {
