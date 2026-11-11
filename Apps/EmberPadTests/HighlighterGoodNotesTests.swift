@@ -49,7 +49,7 @@ final class HighlighterGoodNotesTests: XCTestCase {
             stroke.down(at: space.convert(CGPoint(x: 306, y: 100), to: nil))
             stroke.move(to: space.convert(CGPoint(x: 306, y: 300), to: nil))
             stroke.lift()
-            PencilStroke.turn(0.3)
+            PencilStroke.turn(0.1)
 
             let drawing = session.drawing(on: 0)
             let pens = drawing.strokes.filter { $0.ink.inkType == .pen }
