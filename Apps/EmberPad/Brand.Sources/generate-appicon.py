@@ -103,7 +103,7 @@ def path_subpaths(d: str) -> list[list[tuple[float, float]]]:
             x, y = (x + dx, y + dy) if cmd == "l" else (dx, dy)
             cur.append((x, y))
         elif cmd in "Aa":
-            rx, ry, rot, large, sweep = num(), num(), num(), num(), num()
+            rx, ry, rot, _large, sweep = num(), num(), num(), num(), num()
             ex, ey = num(), num()
             if cmd == "a":
                 ex, ey = x + ex, y + ey
