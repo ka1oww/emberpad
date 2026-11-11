@@ -49,7 +49,8 @@ final class HighlighterGoodNotesTests: XCTestCase {
             stroke.down(at: space.convert(CGPoint(x: 306, y: 100), to: nil))
             stroke.move(to: space.convert(CGPoint(x: 306, y: 300), to: nil))
             stroke.lift()
-            PencilStroke.turn(0.3)
+            Self.waitForEraseToFinish(controller)
+            XCTAssertFalse(controller.highlighterErasePending, "\(mode): the erase finished")
 
             let drawing = session.drawing(on: 0)
             let pens = drawing.strokes.filter { $0.ink.inkType == .pen }
@@ -71,6 +72,53 @@ final class HighlighterGoodNotesTests: XCTestCase {
             XCTAssertEqual(session.drawing(on: 0).strokes.count, 3, "\(mode): one undo brings the highlight back")
             windows.forEach { $0.isHidden = true }
         }
+    }
+
+    /// EP79: a highlighter-only partial sweep that passes clear of every highlight has nothing for PencilKit to commit,
+    /// so the pen ink goes back on the next turn instead of after `partialEraseCommitWait`, and no undo step is made.
+    func testHighlighterOnlyPartialSweepClearOfEveryHighlightFinishesAtOnce() throws {
+        let tools = makeTools()
+        let session = try makeSession(pages: 1)
+        let controller = try host(session, tools: tools)
+        let canvas = try XCTUnwrap(controller.canvases[0])
+        let window = try XCTUnwrap(canvas.window)
+        let pen = Self.line(y: 150, ink: PKInk(.pen, color: .black), width: 2)
+        let highlight = Self.line(y: 150, ink: PKInk(.marker, color: UIColor.yellow.withAlphaComponent(0.5)), width: 8)
+        canvas.drawing = PKDrawing(strokes: [pen, highlight])
+        controller.canvasViewDrawingDidChange(canvas)
+        let before = session.drawing(on: 0).dataRepresentation()
+        tools.setEraseHighlighterOnly(true)
+        tools.setEraserMode(.partial)
+        tools.select(.eraser)
+
+        let space = canvas.pageSpace
+        var stroke = PencilStroke(window: window, view: canvas,
+                                  recognizers: [canvas.drawingGestureRecognizer, controller.eraserTouch], asksDelegates: true)
+        stroke.down(at: space.convert(CGPoint(x: 306, y: 400), to: nil))
+        stroke.move(to: space.convert(CGPoint(x: 306, y: 600), to: nil))
+        stroke.lift()
+        PencilStroke.turn(0.05)
+        XCTAssertFalse(controller.highlighterErasePending, "the pen ink is back long before the commit wait")
+        XCTAssertEqual(session.drawing(on: 0).dataRepresentation(), before, "nothing was erased")
+        XCTAssertEqual(canvas.drawing.dataRepresentation(), session.drawing(on: 0).dataRepresentation())
+        XCTAssertFalse(canvas.undoManager?.canUndo ?? false, "no undo step for a sweep that erased nothing")
+    }
+
+    /// EP79: the lift waits for PencilKit's partial-erase commit only when the sweep came near a highlight.
+    func testSweepMayCutOnlyAHighlightItComesNear() {
+        let highlight = Self.line(y: 150, ink: PKInk(.marker, color: .yellow), width: 8)
+        let pen = Self.line(y: 300, ink: PKInk(.pen, color: .black), width: 2)
+        let page = PKDrawing(strokes: [pen, highlight])
+        let across = [CGPoint(x: 306, y: 100), CGPoint(x: 306, y: 200)]
+        XCTAssertTrue(HighlighterOnlyErase.sweep(across, reach: 12, mayCut: page), "straight across the highlight")
+        XCTAssertTrue(HighlighterOnlyErase.sweep([CGPoint(x: 306, y: 140), CGPoint(x: 400, y: 140)], reach: 12, mayCut: page),
+                      "alongside it, within the eraser's reach")
+        XCTAssertFalse(HighlighterOnlyErase.sweep([CGPoint(x: 306, y: 280), CGPoint(x: 306, y: 320)], reach: 12, mayCut: page),
+                       "across the pen line only: pen ink is never erased")
+        XCTAssertFalse(HighlighterOnlyErase.sweep([CGPoint(x: 600, y: 100), CGPoint(x: 600, y: 200)], reach: 12, mayCut: page),
+                       "past the highlight's end")
+        XCTAssertTrue(HighlighterOnlyErase.sweep([], reach: 12, mayCut: page), "no samples: wait for the commit")
+        XCTAssertTrue(HighlighterOnlyErase.sweep([CGPoint(x: 200, y: 150)], reach: 12, mayCut: page), "a single touch on it")
     }
 
     // MARK: H1: the highlighter multiplies into the page
@@ -288,6 +336,13 @@ final class HighlighterGoodNotesTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.set(Data(json.utf8), forKey: ToolState.defaultsKey)
         return ToolState(defaults: defaults)
+    }
+
+    /// Lets the run loop turn until the highlighter-only erase has put the pen ink back, as it does once PencilKit's
+    /// commit lands; bounded well past `partialEraseCommitWait`.
+    static func waitForEraseToFinish(_ controller: PDFOverlayPageController) {
+        let deadline = Date().addingTimeInterval(PDFOverlayPageController.partialEraseCommitWait + 3)
+        repeat { PencilStroke.turn(0.05) } while controller.highlighterErasePending && Date() < deadline
     }
 
     static func line(y: CGFloat, ink: PKInk, width: CGFloat, from x0: CGFloat = 150, to x1: CGFloat = 460) -> PKStroke {

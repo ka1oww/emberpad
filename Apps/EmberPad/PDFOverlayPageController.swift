@@ -401,9 +401,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     /// The eraser lifted. Waits a turn of the run loop, like the straight-line snap, so PencilKit commits the erase
     /// and closes its undo group before the set-aside ink goes back and the tool switches. PencilKit's partial eraser
-    /// commits its cut only after the lift (about 10 ms later on iOS 26.5), so under "Erase highlighter only" the pen
-    /// ink waits for that commit, or for `partialEraseCommitWait` when the sweep cut nothing: put back sooner, it
-    /// would make PencilKit throw the cut away (EP71).
+    /// commits its cut only after the lift (about 10 ms later on iOS 26.5, over 300 ms on a loaded Simulator), so
+    /// under "Erase highlighter only" the pen ink waits for that commit whenever the sweep came near a highlight: put
+    /// back sooner, it makes PencilKit throw the cut away and register its own "Pixel Erase" (EP71, EP79). A sweep
+    /// clear of every highlight has nothing to commit and finishes on the next turn. `partialEraseCommitWait` only
+    /// bounds a wait for a commit that never comes.
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
         guard tools.current == .eraser else { return }
         if let erase = highlighterErase, erase.canvas === canvasView, tools.settings.eraserMode == .partial {
@@ -411,13 +413,25 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             let work = DispatchWorkItem { [weak self] in self?.eraserStrokeDone() }
             erase.pendingFinish = work
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.partialEraseCommitWait, execute: work)
+            // A turn later, so the lift's own eraser samples are in the sweep.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.highlighterErase === erase, let pending = erase.pendingFinish,
+                      !HighlighterOnlyErase.sweep(erase.sweep, reach: erase.reach, mayCut: erase.canvas.drawing) else { return }
+                pending.cancel()
+                self.eraserStrokeDone()
+            }
             return
         }
         DispatchQueue.main.async { [weak self] in self?.eraserStrokeDone() }
     }
 
-    /// The longest a highlighter-only partial erase waits after the lift for PencilKit's commit, in seconds.
-    static let partialEraseCommitWait: TimeInterval = 0.3
+    /// The longest a highlighter-only partial erase that came near a highlight waits after the lift for PencilKit's
+    /// commit, in seconds. The commit normally ends the wait within milliseconds (EP79; 0.3 before, which a loaded
+    /// Simulator overran).
+    static let partialEraseCommitWait: TimeInterval = 2
+
+    /// Whether a highlighter-only eraser stroke is still holding the pen ink aside, for tests.
+    var highlighterErasePending: Bool { highlighterErase != nil }
 
     /// One eraser stroke is over: the set-aside ink goes back and, with "Back to last tool on lift", the tool switches.
     private func eraserStrokeDone() {
@@ -711,8 +725,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         switch event {
         case .began(let samples), .moved(let samples, _):
             guard let space = eraserStrokeSpace, let newest = samples.last else { return }
+            recordHighlighterSweep(samples, on: space)
             showEraserCircle(at: newest.location, on: space)
-        case .ended, .cancelled:
+        case .ended(let samples):
+            if let space = eraserStrokeSpace { recordHighlighterSweep(samples, on: space) }
+            fallthrough
+        case .cancelled:
             eraserStrokeSpace = nil
             hideEraserCircle()
             // A touch PencilKit never erased with (it began off the focused page, or was cancelled) still puts the
@@ -724,6 +742,17 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 }
             }
         }
+    }
+
+    /// Adds eraser samples (PDF view coordinates) to a highlighter-only erase's sweep, in the page points of `space`,
+    /// with the eraser's reach on that page, so the lift knows whether PencilKit has a cut to commit (EP79).
+    private func recordHighlighterSweep(_ samples: [LiveInkSample], on space: UIView) {
+        guard let erase = highlighterErase, erase.canvas.pageSpace === space,
+              let tool = tools.pencilTool as? PKEraserTool else { return }
+        let scale = EraserPreview.pageScale(of: space, in: view)
+        guard scale > 0 else { return }
+        erase.reach = max(erase.reach, EraserPreview.diameter(for: tool, pageScale: scale) / 2 / scale)
+        erase.sweep.append(contentsOf: samples.map { space.convert($0.location, from: pdfView) })
     }
 
     @objc private func eraserHovered(_ hover: UIHoverGestureRecognizer) {
@@ -1192,6 +1221,9 @@ final class HighlighterEraseStroke {
     /// The Pencil lifted; the ink goes back once PencilKit's partial eraser commits, or `pendingFinish` runs.
     var lifted = false
     var pendingFinish: DispatchWorkItem?
+    /// Where the eraser went while down, in page points, and how far either side of that it erases (EP79).
+    var sweep: [CGPoint] = []
+    var reach: CGFloat = 0
 
     init(canvas: PKCanvasView, page: Int, before: PKDrawing, inkLayer: PKCanvasView, undoManager: UndoManager?) {
         self.canvas = canvas; self.page = page; self.before = before; self.inkLayer = inkLayer; self.undoManager = undoManager
