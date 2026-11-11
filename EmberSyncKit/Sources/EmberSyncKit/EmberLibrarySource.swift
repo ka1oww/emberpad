@@ -14,7 +14,8 @@ public struct EmberLibrarySource: Sendable {
     /// Shown for an entry with no class tag: a nil `classTag` means the copy belongs under every class.
     public static let allClassesLabel = "All classes"
     /// Folders that hold build output, not documents (case-insensitive). A folder whose name starts with one of
-    /// `buildLeftoverFolderPrefixes` also counts. PDFs below them are counted as skipped and never read.
+    /// `buildLeftoverFolderPrefixes` also counts, and so does a source folder (`LibraryFolders.isHiddenSourceFolder`).
+    /// PDFs below them are counted as skipped and never read.
     public static let buildLeftoverFolders: Set<String> = ["redraws", "crops", "_build", "artifacts", "_assets", "_qa"]
     public static let buildLeftoverFolderPrefixes = ["_redraws"]
     /// Shared asset PDFs that every LaTeX source folder carries (case-insensitive), counted as skipped.
@@ -91,6 +92,8 @@ public struct EmberLibrarySource: Sendable {
             for entry in previous.files {
                 guard let key = entry.paperKey, let copy = Gate.copyKey(entry), !copies.contains(copy), !occupied.contains(entry.source)
                 else { continue }
+                // A copy below a hidden source folder is not delivered any more, so it is not carried forward either.
+                guard !LibraryFolders.isUnderHiddenSourceFolder(entry) else { continue }
                 guard Gate.passesPrivacy(entry, terms: withheld) else {
                     misses.append(LibraryMiss(path: key.rawValue, reason: .privacyWithheld,
                                               detail: "a previous entry failed the final privacy check", paperKey: key))
@@ -611,7 +614,7 @@ private struct Walker {
         let rootContext = Context(subject: EmberLibrarySource.rootSubject, folders: [], localPath: "", archived: false)
         files(children.filter { $0.isDirectory == false || ($0.isDirectory == nil && Self.isPDF($0.name)) }, in: rootContext)
         for child in children where child.isDirectory == true {
-            if Self.isLeftoverFolder(child.name) { countLeftovers(in: child.url); continue }
+            if Self.isSkippedFolder(child.name) { countLeftovers(in: child.url); continue }
             let archived = child.name.hasPrefix("_")
             let ownName = archived ? String(child.name.drop(while: { $0 == "_" })) : child.name
             let subject = EmberLibrarySource.subjectNames[child.name] ?? (ownName.isEmpty ? child.name : ownName)
@@ -636,7 +639,7 @@ private struct Walker {
         }
         files(children.filter { $0.isDirectory == false || ($0.isDirectory == nil && Self.isPDF($0.name)) }, in: context)
         for child in children where child.isDirectory == true {
-            if Self.isLeftoverFolder(child.name) { countLeftovers(in: child.url); continue }
+            if Self.isSkippedFolder(child.name) { countLeftovers(in: child.url); continue }
             folder(child.url, context.entering(child.name))
         }
         for child in children where child.isDirectory == nil && !Self.isPDF(child.name) {
@@ -657,13 +660,27 @@ private struct Walker {
         }
         let groups = Dictionary(grouping: pdfs, by: { RoleMarker.normalized($0.base) })
         for name in groups.keys.sorted() {
-            guard let copies = groups[name]?.sorted(by: { $0.child.name < $1.child.name }) else { continue }
+            guard var copies = groups[name]?.sorted(by: { $0.child.name < $1.child.name }) else { continue }
+            // EP69: a Student-marked PDF beside an unmarked PDF of the same name, with no Teacher-marked PDF, is a
+            // pair: the unmarked one is the full-answers Teacher copy (Drive files the blank copy as "(Student)").
+            if let unmarked = Self.unmarkedTeacherIndex(copies.map { ($0.role, $0.stem, $0.base) }) {
+                copies[unmarked].role = .teacher
+            }
             // Both copies of a pair share the paper key named after the Student copy's unmarked name.
             let base = (copies.first { $0.role == .student } ?? copies[0]).base
             for copy in copies {
                 read(copy.child, stem: copy.stem, ext: copy.ext, role: copy.role, base: base, context: context)
             }
         }
+    }
+
+    /// In one same-name group, the unmarked PDF to deliver as the Teacher copy: only when the group is exactly one
+    /// Student-marked PDF and one unmarked PDF. Any other mix (a Teacher-marked PDF, two Student-marked PDFs, two
+    /// unmarked PDFs) keeps its roles, so duplicates are still held back.
+    static func unmarkedTeacherIndex(_ copies: [(role: DocumentRole, stem: String, base: String)]) -> Int? {
+        guard copies.count == 2, copies.allSatisfy({ $0.role == .student }) else { return nil }
+        let unmarked = copies.indices.filter { copies[$0].stem == copies[$0].base }
+        return unmarked.count == 1 ? unmarked[0] : nil
     }
 
     private mutating func read(_ file: Child, stem: String, ext: String, role: DocumentRole, base: String, context: Context) {
@@ -709,10 +726,12 @@ private struct Walker {
         documents.append(LibraryDocument(entry: entry, fileURL: file.url, localPath: localPath))
     }
 
-    private static func isLeftoverFolder(_ name: String) -> Bool {
+    /// Build output, and source folders whose PDFs are build copies of documents filed elsewhere.
+    private static func isSkippedFolder(_ name: String) -> Bool {
         let lower = name.lowercased()
         return EmberLibrarySource.buildLeftoverFolders.contains(lower) ||
-            EmberLibrarySource.buildLeftoverFolderPrefixes.contains { lower.hasPrefix($0) }
+            EmberLibrarySource.buildLeftoverFolderPrefixes.contains { lower.hasPrefix($0) } ||
+            LibraryFolders.isHiddenSourceFolder(name)
     }
 
     private static func isPDF(_ name: String) -> Bool {

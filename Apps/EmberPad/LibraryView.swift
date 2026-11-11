@@ -2,12 +2,13 @@ import SwiftUI
 import UniformTypeIdentifiers
 import EmberSyncKit
 
-/// Library: subjects in the sidebar, an optional class filter, a grid of papers (EP-10).
+/// Library: subjects in the sidebar, and a folder browser of papers (EP-10, EP69).
 ///
 /// Adapted from design 5.1 to the Ember main folder: the sidebar groups by
 /// **subject** (publication subject, or the class folder for loose deliveries),
-/// with counts over non-archived Student copies. The class tag is an optional
-/// chip filter in the detail column. A Teacher copy is never its own card: the
+/// with counts over non-archived Student copies. The detail column mirrors the
+/// Drive EMBER folders below the subject, GoodNotes style: folders first, then
+/// worksheets, with a back control and a breadcrumb. A Teacher copy is never its own card: the
 /// grid shows Student copies only, thumbnails render the Student copy's first
 /// page, and the Teacher badge opens from its Student worksheet (EP-13 owns
 /// that card). Every colour routes through the EP-06 `Theme` tokens.
@@ -85,11 +86,6 @@ struct LibraryView: View {
         }
         .onAppear { columns.sizeClassChanged(to: horizontalSizeClass) }
         .onChange(of: horizontalSizeClass) { _, sizeClass in columns.sizeClassChanged(to: sizeClass) }
-        .onChange(of: library.sidebarSelection) { _, new in
-            if case .subject(let name) = new { library.selectedSubject = name }
-            else if new == .allSubjects { library.selectedSubject = nil }
-            library.selectedClassTag = nil
-        }
     }
 
     // MARK: - Sidebar
@@ -181,9 +177,27 @@ struct LibraryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(detailTitle)
-                        .font(Theme.libraryLargeTitle)
-                        .foregroundStyle(Theme.text)
+                    if !library.showingArchived && !library.folderPath.isEmpty {
+                        breadcrumb
+                    }
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        if !library.showingArchived && !library.folderPath.isEmpty {
+                            Button { library.closeFolder() } label: {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 22, weight: .semibold))
+                                    .foregroundStyle(Theme.accent)
+                                    .frame(minWidth: 32, minHeight: 32)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Back to \(backTitle)")
+                            .accessibilityIdentifier("library-folder-back")
+                        }
+                        Text(detailTitle)
+                            .font(Theme.libraryLargeTitle)
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(2)
+                    }
                     Text(detailSubline)
                         .font(.system(size: 15))
                         .foregroundStyle(Theme.text2)
@@ -234,25 +248,26 @@ struct LibraryView: View {
                     .padding(.horizontal, 24)
                 }
 
-                if !library.showingArchived && !library.availableClassTags.isEmpty {
-                    classFilterChips
-                }
-
-                if library.isImporting && library.visibleCards.isEmpty {
+                if library.isImporting && listing.folders.isEmpty && listing.worksheets.isEmpty {
                     HStack {
                         ProgressView("Importing")
                             .tint(Theme.accent)
                     }
                     .frame(maxWidth: .infinity, minHeight: 200)
-                } else if library.visibleCards.isEmpty && library.isSearching {
+                } else if listing.worksheets.isEmpty && library.isSearching {
                     noSearchResults
-                } else if library.visibleCards.isEmpty {
+                } else if listing.folders.isEmpty && listing.worksheets.isEmpty {
                     emptyState
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 22)], spacing: 26) {
-                        ForEach(library.visibleCards) { record in
+                    // Top-aligned, so folder names and worksheet titles start level across a row.
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 22, alignment: .top)], spacing: 26) {
+                        ForEach(listing.folders) { folder in
+                            Button { library.openFolder(folder) } label: { FolderCard(folder: folder) }
+                                .buttonStyle(.plain)
+                        }
+                        ForEach(listing.worksheets) { record in
                             LibraryCardCell(record: record, library: library, presentation: presentation,
-                                            thumbnails: thumbnails,
+                                            thumbnails: thumbnails, location: cardLocation(for: record),
                                             onWorksheetOpen: { columns.worksheetOpened() },
                                             onWorksheetClose: { columns.worksheetClosed() },
                                             onToggleSidebar: { columns.toggleSidebar() })
@@ -268,9 +283,10 @@ struct LibraryView: View {
         .toolbar {
             // The system sidebar toggle is the only one; Import from Files lives only here (P2).
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Menu(library.sortNewestFirst ? "Newest first" : "Oldest first") {
-                    Button("Newest first") { library.sortNewestFirst = true }
-                    Button("Oldest first") { library.sortNewestFirst = false }
+                Menu(library.sortOrder.label) {
+                    ForEach(LibrarySortOrder.allCases, id: \.self) { order in
+                        Button(order.label) { library.sortOrder = order }
+                    }
                 }
                 .disabled(library.isImporting)
                 // Tap files the Inbox; the menu also holds pairing (design 5.6: the iPad scans from this menu).
@@ -305,48 +321,81 @@ struct LibraryView: View {
         .task { await library.refresh() }
     }
 
+    private var listing: LibraryListing { library.listing }
+
     private var detailTitle: String {
         if library.showingArchived { return "Archived" }
-        return library.selectedSubject ?? "All subjects"
+        return library.folderPath.last ?? library.selectedSubject ?? "All subjects"
+    }
+
+    /// Where Back goes: the parent folder, or the subject.
+    private var backTitle: String {
+        library.folderPath.dropLast().last ?? library.selectedSubject ?? "All subjects"
     }
 
     private var detailSubline: String {
-        let count = library.visibleCards.count
-        let order = library.sortNewestFirst ? "newest first" : "oldest first"
+        let order = library.sortOrder.sublineLabel
+        let count = listing.worksheets.count
         if library.isSearching {
-            let total = library.unsearchedCardCount
+            let total = listing.scopeCount
             return "\(count) of \(total) \(total == 1 ? "worksheet" : "worksheets") · \(order)"
         }
-        let noun = count == 1 ? "worksheet" : "worksheets"
-        return "\(count) \(noun) · \(order)"
+        var parts: [String] = []
+        let folders = listing.folders.count
+        if folders > 0 { parts.append("\(folders) \(folders == 1 ? "folder" : "folders")") }
+        if count > 0 || folders == 0 { parts.append("\(count) \(count == 1 ? "worksheet" : "worksheets")") }
+        return (parts + [order]).joined(separator: " · ")
     }
 
-    private var searchPrompt: String {
-        library.showingArchived ? "Search Archived" : "Search \(library.selectedSubject ?? "all subjects")"
+    /// Where a search looks: the open folder (and the folders below it), the subject, all subjects or Archived.
+    private var searchScopeName: String {
+        if library.showingArchived { return "Archived" }
+        return library.folderPath.last ?? library.selectedSubject ?? "all subjects"
     }
 
-    private var classFilterChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                chip("All classes", selected: library.selectedClassTag == nil) {
-                    library.selectedClassTag = nil
-                }
-                ForEach(library.availableClassTags, id: \.self) { tag in
-                    chip(tag, selected: library.selectedClassTag == tag) {
-                        library.selectedClassTag = (library.selectedClassTag == tag) ? nil : tag
+    private var searchPrompt: String { "Search \(searchScopeName)" }
+
+    /// The visible path: the subject, then each folder; every level but the open one can be tapped.
+    private var breadcrumb: some View {
+        let subject = library.selectedSubject ?? ""
+        let levels = [subject] + library.folderPath
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(Array(levels.enumerated()), id: \.offset) { index, name in
+                    if index > 0 {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.text3)
+                            .accessibilityHidden(true)
+                    }
+                    if index < levels.count - 1 {
+                        Button(name) { library.showFolder(depth: index) }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.accent)
+                    } else {
+                        Text(name).foregroundStyle(Theme.text2)
                     }
                 }
             }
-            .padding(.horizontal, 24)
+            .font(.system(size: 15, weight: .medium))
+            .lineLimit(1)
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Path")
+        .accessibilityIdentifier("library-breadcrumb")
     }
 
-    private func chip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .font(.system(size: 13, weight: .semibold))
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(selected ? Theme.accent : Theme.surface2, in: Capsule())
-            .foregroundStyle(selected ? Theme.onAccent : Theme.text2)
+    /// A card's folder line: shown only when it is listed outside its own folder, in search results and Archived.
+    /// Inside a subject it starts below the searched folder ("Alkanes › Tutorial"); from All subjects and Archived it
+    /// starts at the subject.
+    private func cardLocation(for record: DocumentRecord) -> String? {
+        guard library.isSearching || library.showingArchived else { return nil }
+        let folders = LibraryFolders.folders(of: record.source)
+        guard !library.showingArchived, library.selectedSubject != nil else {
+            return ([record.subject] + folders.filter { !$0.hasPrefix("_") }).joined(separator: " › ")
+        }
+        let below = folders.dropFirst(library.folderPath.count).filter { !$0.hasPrefix("_") }
+        return below.isEmpty ? detailTitle : below.joined(separator: " › ")
     }
 
     private var noSearchResults: some View {
@@ -358,7 +407,9 @@ struct LibraryView: View {
                 .font(.system(.title3, design: .serif).weight(.semibold))
                 .foregroundStyle(Theme.text)
                 .multilineTextAlignment(.center)
-            Text("Search looks at worksheet titles in \(library.showingArchived ? "Archived" : library.selectedSubject ?? "all subjects").")
+            Text(library.folderPath.isEmpty || library.showingArchived
+                 ? "Search looks at worksheet titles in \(searchScopeName)."
+                 : "Search looks at worksheet titles in \(searchScopeName) and the folders inside it.")
                 .font(Theme.meta)
                 .foregroundStyle(Theme.text2)
                 .multilineTextAlignment(.center)
@@ -574,6 +625,7 @@ private struct LibraryCardCell: View {
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
     @ObservedObject var thumbnails: ThumbnailCache
+    var location: String? = nil
     var onWorksheetOpen: () -> Void = {}
     var onWorksheetClose: () -> Void = {}
     var onToggleSidebar: () -> Void = {}
@@ -588,12 +640,13 @@ private struct LibraryCardCell: View {
                 .onAppear(perform: onWorksheetOpen)
                 .onDisappear(perform: onWorksheetClose)
         } label: {
-            WorksheetCard(record: record, thumbnail: thumbnails.cachedImage(for: record))
+            WorksheetCard(record: record, thumbnail: thumbnails.cachedImage(for: record), location: location)
         }
         .buttonStyle(.plain)
         .contextMenu {
             if library.showingArchived {
-                if record.status == .archived {
+                // A copy below a hidden source folder stays under Archived even when restored, so it offers no Unarchive.
+                if record.status == .archived && !LibraryFolders.isUnderHiddenSourceFolder(record.source) {
                     Button("Unarchive", systemImage: "arrow.uturn.backward") {
                         Task { await library.unarchiveDocument(record.id) }
                     }

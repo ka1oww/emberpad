@@ -122,10 +122,58 @@ struct EmberLibrarySourceTests {
         try tree.lock("EMBER CHEMISTRY/Topic/crops/locked.pdf")
 
         let snapshot = try read(tree)
-        #expect(snapshot.documents.map(\.localPath) == ["EMBER CHEMISTRY/Topic/Source (LaTeX)/Synthetic Topic Notes.pdf",
-                                                        "EMBER MATH/_legacy-archive/Synthetic Workspace/Synthetic Old Paper.pdf"])
-        #expect(snapshot.skippedLeftoverPDFs == 12)
+        // EP69: the source folder's own PDF is a build copy too, so it is counted with them.
+        #expect(snapshot.documents.map(\.localPath) == ["EMBER MATH/_legacy-archive/Synthetic Workspace/Synthetic Old Paper.pdf"])
+        #expect(snapshot.skippedLeftoverPDFs == 13)
         #expect(snapshot.misses.isEmpty)
+    }
+
+    // MARK: Source folders (EP69)
+
+    @Test func sourceFoldersAreSkippedAndCountedButTextSourcesStays() throws {
+        let tree = try SyntheticDriveTree(); defer { tree.remove() }
+        try tree.write("EMBER CHEMISTRY/NOTES & TUTORIALS/Synthetic Topic/EMBER - Synthetic Topic.pdf")
+        try tree.write("EMBER CHEMISTRY/NOTES & TUTORIALS/Synthetic Topic/Notes Source (LaTeX)/SYNTHETIC/EMBER - SYNTHETIC.pdf")
+        try tree.write("EMBER CHEMISTRY/NOTES & TUTORIALS/Synthetic Topic/Tutorial/Synthetic Tutorial.pdf")
+        try tree.write("EMBER CHEMISTRY/NOTES & TUTORIALS/Synthetic Topic/Tutorial/Word Source/Synthetic Tutorial.pdf")
+        try tree.write("EMBER CHEMISTRY/Answering Technique/Source (LaTeX)/Synthetic Technique.pdf")
+        try tree.write("EMBER CHEMISTRY/Answering Technique/Synthetic Technique.pdf")
+        try tree.write("EMBER CHEMISTRY/Synthetic Papers/PAPER 1/word source/Synthetic Paper 1.pdf")
+        try tree.write("EMBER MATH/Synthetic Booklet/SOURCE/Synthetic Booklet.pdf")
+        try tree.write("EMBER CHEMISTRY/Text Sources/Synthetic Text.pdf")
+        try tree.write("EMBER PHYSICS/Synthetic Source Notes/Synthetic Physics.pdf")
+
+        let snapshot = try read(tree)
+        #expect(snapshot.documents.map(\.localPath).sorted() == [
+            "EMBER CHEMISTRY/Answering Technique/Synthetic Technique.pdf",
+            "EMBER CHEMISTRY/NOTES & TUTORIALS/Synthetic Topic/EMBER - Synthetic Topic.pdf",
+            "EMBER CHEMISTRY/NOTES & TUTORIALS/Synthetic Topic/Tutorial/Synthetic Tutorial.pdf",
+            "EMBER CHEMISTRY/Text Sources/Synthetic Text.pdf",
+            "EMBER PHYSICS/Synthetic Source Notes/Synthetic Physics.pdf",
+        ])
+        #expect(snapshot.skippedLeftoverPDFs == 5)
+        #expect(snapshot.misses.isEmpty)
+        #expect(snapshot.manifest.files.allSatisfy { !LibraryFolders.isUnderHiddenSourceFolder($0) })
+    }
+
+    @Test func aSourceFolderCopyDeliveredBeforeIsNotCarriedForward() throws {
+        let tree = try SyntheticDriveTree(); defer { tree.remove() }
+        let notes = "EMBER CHEMISTRY/NOTES & TUTORIALS/Synthetic Topic/EMBER - Synthetic Topic.pdf"
+        try tree.write(notes)
+        let current = try read(tree)
+        // A manifest from before EP69 that still lists the source folder's build copy.
+        let old = try #require(current.manifest.files.first)
+        let source = try SourcePath(classFolder: "Chemistry",
+                                    relativePath: "NOTES & TUTORIALS/Synthetic Topic/Notes Source (LaTeX)/EMBER - SYNTHETIC.pdf")
+        let publication = try Publication(subject: "Chemistry", paperKey: PaperKey(rawValue: "Chemistry/source-copy"),
+                                          role: .student, title: "NOTES & TUTORIALS / Synthetic Topic / Notes Source (LaTeX) / EMBER - SYNTHETIC")
+        let stale = try ManifestEntry(source: source, sha256: .digest(Data("stale".utf8)), size: 5, modifiedAt: fixtureDate,
+                                      publication: publication)
+        let previous = try Manifest(version: 2, generatedAt: fixtureDate, files: [old, stale])
+
+        let next = try read(tree, previous: previous)
+        #expect(next.manifest.files.map(\.source) == [old.source])
+        #expect(next.retained.isEmpty)
     }
 
     // MARK: Teacher pairing by name
@@ -219,6 +267,35 @@ struct EmberLibrarySourceTests {
         let snapshot = try read(tree)
         #expect(snapshot.documents.map(\.localPath) == ["EMBER MATH/Topic/Synthetic Paper (Teacher).pdf"])
         #expect(snapshot.misses.map(\.reason) == [.duplicatePaperKey, .duplicatePaperKey])
+    }
+
+    @Test func aStudentMarkedCopyBesideAnUnmarkedOneMakesTheUnmarkedOneTheTeacherCopy() throws {
+        let tree = try SyntheticDriveTree(); defer { tree.remove() }
+        try tree.write("EMBER CHEMISTRY/Synthetic Technique/EMBER - Synthetic Techniques.pdf")
+        try tree.write("EMBER CHEMISTRY/Synthetic Technique/EMBER - synthetic  techniques (Student).pdf")
+        // Two Student-marked copies beside an unmarked one are still ambiguous.
+        try tree.write("EMBER MATH/Topic/Synthetic Sheet.pdf")
+        try tree.write("EMBER MATH/Topic/Synthetic Sheet (Student).pdf")
+        try tree.write("EMBER MATH/Topic/Synthetic Sheet - Student.pdf")
+        // In different folders the copies do not pair.
+        try tree.write("EMBER PHYSICS/A/Synthetic Notes.pdf")
+        try tree.write("EMBER PHYSICS/B/Synthetic Notes (Student).pdf")
+
+        let snapshot = try read(tree)
+        let teacher = try #require(snapshot.document("EMBER CHEMISTRY/Synthetic Technique/EMBER - Synthetic Techniques.pdf")).entry
+        let student = try #require(snapshot.document("EMBER CHEMISTRY/Synthetic Technique/EMBER - synthetic  techniques (Student).pdf")).entry
+        #expect(teacher.role == .teacher && student.role == .student)
+        #expect(student.paperKey?.rawValue == "Chemistry/Synthetic Technique/EMBER - synthetic  techniques")
+        #expect(teacher.paperKey == student.paperKey)
+        #expect(snapshot.misses.filter { $0.path.hasPrefix("EMBER CHEMISTRY") }.isEmpty)
+        #expect(snapshot.misses.filter { $0.path.hasPrefix("EMBER MATH") }.map(\.reason) == Array(repeating: .duplicatePaperKey, count: 3))
+        #expect(snapshot.document("EMBER PHYSICS/A/Synthetic Notes.pdf")?.entry.role == .student)
+        #expect(snapshot.document("EMBER PHYSICS/B/Synthetic Notes (Student).pdf")?.entry.role == .student)
+        #expect(snapshot.pairCount == 1)
+
+        let local = snapshot.manifest.files.map { DocumentRecord(source: $0, pageCount: 1, importedAt: fixtureDate) }
+        let studentRecord = try #require(local.first { $0.source.source.relativePath.hasSuffix("(Student).pdf") && $0.subject == "Chemistry" })
+        #expect(DiffPlanner.pairs(in: local)[studentRecord.id] != nil, "the iPad pairs the two copies")
     }
 
     // MARK: Archive folders

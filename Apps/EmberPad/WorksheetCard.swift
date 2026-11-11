@@ -9,16 +9,28 @@ import EmberSyncKit
 struct WorksheetCard: View {
     let record: DocumentRecord
     let thumbnail: UIImage?
+    /// Where the worksheet is filed (`Chemistry › NOTES & TUTORIALS › Alkanes`), shown when the card is listed outside
+    /// its own folder: search results and Archived (EP69). Nil inside its folder.
+    var location: String? = nil
     var hasTeacherCopy: Bool { record.pairedDocumentID != nil }
+    /// The file's own title; its folders are the grid's breadcrumb or the location line (EP69).
+    var title: String { LibraryFolders.ownTitle(of: record) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             thumbnailView
             VStack(alignment: .leading, spacing: 4) {
-                Text(record.title)
+                Text(title)
                     .font(Theme.cardTitle)
                     .foregroundStyle(Theme.text)
                     .lineLimit(2)
+                if let location {
+                    Label(location, systemImage: "folder")
+                        .font(Theme.meta)
+                        .foregroundStyle(Theme.text3)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
                 Text(metaLine)
                     .font(Theme.meta)
                     .foregroundStyle(Theme.text2)
@@ -111,7 +123,7 @@ struct WorksheetCard: View {
     }
 
     var accessibilityLabel: String {
-        var parts = [record.title, metaLine]
+        var parts = [title] + (location.map { ["in \($0)"] } ?? []) + [metaLine]
         if record.status == .olderVersion {
             parts.append("Older version")
         } else if record.isUpdated {

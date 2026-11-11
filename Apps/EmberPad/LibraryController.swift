@@ -9,6 +9,37 @@ enum LibrarySidebarSelection: Hashable {
     case archived
 }
 
+/// The library grid's worksheet order. Name order is Drive's, and the default.
+enum LibrarySortOrder: String, CaseIterable {
+    case name, newestFirst, oldestFirst
+
+    var label: String {
+        switch self {
+        case .name: "Name"
+        case .newestFirst: "Newest first"
+        case .oldestFirst: "Oldest first"
+        }
+    }
+
+    /// The order as the grid's subline names it.
+    var sublineLabel: String { self == .name ? "name order" : label.lowercased() }
+}
+
+/// What the library's detail column lists: folders first, then worksheets.
+struct LibraryListing: Equatable {
+    enum Selection: Equatable {
+        case allSubjects
+        case archived
+        /// A subject's top level (`path` empty) or one of its folders.
+        case folder(subject: String, path: [String])
+    }
+
+    let folders: [LibraryFolderItem]
+    let worksheets: [DocumentRecord]
+    /// The worksheets a search here covers: the folder and every folder below it, All subjects, or Archived.
+    let scopeCount: Int
+}
+
 @MainActor
 final class LibraryController: ObservableObject {
     let store: LibraryStore
@@ -40,20 +71,33 @@ final class LibraryController: ObservableObject {
     }
     var classes: [String] { Set(documents.filter { !$0.showsAsArchived }.map { $0.source.source.classFolder }).sorted() }
 
-    // MARK: - EP-10 library selection (subject sidebar + class filter)
+    // MARK: - Library selection: subject sidebar and the Drive folder browser (EP69)
 
     /// Selected subject in the sidebar. `nil` shows every subject.
     @Published var selectedSubject: String? {
-        didSet { reconcileSelection() }
+        didSet {
+            if selectedSubject != oldValue { folderPath = [] }
+            reconcileSelection()
+        }
     }
-    /// Selected class tag chip. `nil` shows all classes within the subject.
-    @Published var selectedClassTag: String?
-    @Published var sidebarSelection: LibrarySidebarSelection = .allSubjects
-    /// When true the detail column shows archived Student worksheets instead of the subject grid.
+    /// The open folder below `selectedSubject`, outermost first; empty at the subject's top level.
+    @Published var folderPath: [String] = []
+    @Published var sidebarSelection: LibrarySidebarSelection = .allSubjects {
+        didSet {
+            guard sidebarSelection != oldValue else { return }
+            switch sidebarSelection {
+            case .subject(let name): selectedSubject = name
+            case .allSubjects: selectedSubject = nil
+            case .archived: break
+            }
+            folderPath = []
+        }
+    }
+    /// When true the detail column shows archived Student worksheets instead of the folders.
     var showingArchived: Bool { sidebarSelection == .archived }
-    /// Design 5.1 detail toolbar sort. Newest first by `importedAt`, then title.
-    @Published var sortNewestFirst = true
-    /// Library title search, applied within the current subject, class and Archived selection.
+    /// The grid's order for worksheets. Folders are always in Drive's name order, first.
+    @Published var sortOrder: LibrarySortOrder = .name
+    /// Library title search, applied to the current folder and every folder below it, or to Archived.
     @Published var searchText = ""
     /// True while a title search narrows the grid.
     var isSearching: Bool { !Self.normalizedQuery(searchText).isEmpty }
@@ -61,28 +105,47 @@ final class LibraryController: ObservableObject {
     /// Non-archived Student copies grouped for the SUBJECTS sidebar section, sorted by name.
     var subjectsWithCounts: [(name: String, count: Int)] { Self.subjectsWithCounts(in: documents) }
 
-    /// Archived Student-copy count for the LIBRARY section.
-    var archivedCount: Int {
-        Self.filteredCards(in: documents, subject: nil, classTag: nil,
-                           archived: true, sortNewestFirst: sortNewestFirst).count
+    /// Student copies listed under **Archived**.
+    var archivedCount: Int { Self.archivedCards(in: documents).count }
+
+    /// What the detail column shows now.
+    var listing: LibraryListing {
+        Self.listing(in: documents, selection: listingSelection, sortOrder: sortOrder, query: searchText)
     }
 
-    /// Distinct class tags among non-archived Student copies, optionally scoped to one subject.
-    /// Documents with a `nil` class tag appear under the "All classes" chip only.
-    var availableClassTags: [String] { Self.classTags(in: documents, subject: selectedSubject) }
+    /// Grid worksheets: the open folder's own, search results from it and below, or Archived.
+    var visibleCards: [DocumentRecord] { listing.worksheets }
+    /// Grid folders, shown first: the open folder's subfolders, or every subject at the All subjects level.
+    var visibleFolders: [LibraryFolderItem] { listing.folders }
+    /// Worksheets the search covers before the title search, for the "N of M" subline.
+    var unsearchedCardCount: Int { listing.scopeCount }
 
-    /// Grid contents: non-archived Student copies filtered by subject and class tag.
-    var visibleCards: [DocumentRecord] {
-        Self.filteredCards(in: documents, subject: showingArchived ? nil : selectedSubject,
-                           classTag: showingArchived ? nil : selectedClassTag,
-                           archived: showingArchived, sortNewestFirst: sortNewestFirst, query: searchText)
+    private var listingSelection: LibraryListing.Selection {
+        if showingArchived { return .archived }
+        guard let selectedSubject else { return .allSubjects }
+        return .folder(subject: selectedSubject, path: folderPath)
     }
 
-    /// Grid count before the title search, for the "N of M" subline.
-    var unsearchedCardCount: Int {
-        Self.filteredCards(in: documents, subject: showingArchived ? nil : selectedSubject,
-                           classTag: showingArchived ? nil : selectedClassTag,
-                           archived: showingArchived, sortNewestFirst: sortNewestFirst).count
+    /// Opens a folder card: a subject at the All subjects level, or a folder inside the open one.
+    func openFolder(_ folder: LibraryFolderItem) {
+        if folder.path.isEmpty {
+            sidebarSelection = .subject(folder.subject)
+        } else {
+            selectedSubject = folder.subject
+            folderPath = folder.path
+        }
+    }
+
+    /// The back control: up one folder.
+    func closeFolder() {
+        guard !folderPath.isEmpty else { return }
+        folderPath.removeLast()
+    }
+
+    /// A breadcrumb tap: the subject's top level at depth 0, or the folder `depth` levels down.
+    func showFolder(depth: Int) {
+        guard depth >= 0, depth < folderPath.count else { return }
+        folderPath = Array(folderPath.prefix(depth))
     }
 
     private func reconcileSelection() {
@@ -91,34 +154,79 @@ final class LibraryController: ObservableObject {
             selectedSubject = nil
             if sidebarSelection == .subject(subject) { sidebarSelection = .allSubjects }
         }
-        if let classTag = selectedClassTag, !availableClassTags.contains(classTag) {
-            selectedClassTag = nil
+        guard let subject = selectedSubject else {
+            if !folderPath.isEmpty { folderPath = [] }
+            return
         }
+        // A folder whose last worksheet left (archived, or moved on the Mac) closes back to the nearest one left.
+        let pool = Self.browsableCards(in: documents).filter { $0.subject == subject }
+        var path = folderPath
+        while !path.isEmpty && LibraryFolders.documents(pool, under: path).isEmpty { path.removeLast() }
+        if path != folderPath { folderPath = path }
     }
 
-    /// Pure grouping helper: subjects with counts over non-archived Student copies.
-    /// Teacher copies and archived documents never produce rows or counts.
+    /// Pure grouping helper: subjects with counts over the Student copies the folders show.
+    /// Teacher copies, archived documents and copies below hidden source folders never produce rows or counts.
     static func subjectsWithCounts(in documents: [DocumentRecord]) -> [(name: String, count: Int)] {
-        let grouped = Dictionary(grouping: studentCards(in: documents).filter { !$0.showsAsArchived }, by: \.subject)
+        let grouped = Dictionary(grouping: browsableCards(in: documents), by: \.subject)
         return grouped.map { (name: $0.key, count: $0.value.count) }.sorted { $0.name < $1.name }
     }
 
-    /// Pure helper: distinct sorted class tags for the chip row.
-    static func classTags(in documents: [DocumentRecord], subject: String? = nil) -> [String] {
-        let pool = studentCards(in: documents).filter { !$0.showsAsArchived && (subject == nil || $0.subject == subject) }
-        return Array(Set(pool.compactMap(\.classTag))).sorted()
+    /// Student copies the folders show: not archived, and not below a hidden source folder.
+    static func browsableCards(in documents: [DocumentRecord]) -> [DocumentRecord] {
+        studentCards(in: documents).filter { !$0.showsAsArchived && !LibraryFolders.isUnderHiddenSourceFolder($0.source) }
     }
 
-    /// Pure helper: the grid's documents. Teacher copies are always excluded.
-    static func filteredCards(in documents: [DocumentRecord], subject: String?, classTag: String?,
-                              archived: Bool, sortNewestFirst: Bool, query: String = "") -> [DocumentRecord] {
-        let pool = studentCards(in: documents).filter { doc in
-            guard doc.showsAsArchived == archived else { return false }
-            if let subject, doc.subject != subject { return false }
-            if let classTag, doc.classTag != classTag { return false }
-            return titleMatches(doc.title, query: query)
+    /// Student copies under **Archived**: archived ones, except that a copy below a hidden source folder is listed
+    /// here only when it has ink (so ink is never out of reach), and an uninked one is not listed at all.
+    static func archivedCards(in documents: [DocumentRecord]) -> [DocumentRecord] {
+        studentCards(in: documents).filter {
+            LibraryFolders.isUnderHiddenSourceFolder($0.source) ? $0.hasInk : $0.showsAsArchived
         }
-        return sortCards(pool, sortNewestFirst: sortNewestFirst)
+    }
+
+    /// Pure helper: the detail column's folders and worksheets for `selection`. Teacher copies are never cards.
+    /// Without a search a folder shows its subfolders and its own worksheets, and All subjects shows every subject
+    /// as a folder. A search lists the matching worksheets from the folder and every folder below it (All subjects:
+    /// everything; Archived: every archived copy), and no folders.
+    static func listing(in documents: [DocumentRecord], selection: LibraryListing.Selection,
+                        sortOrder: LibrarySortOrder, query: String = "") -> LibraryListing {
+        let searching = !normalizedQuery(query).isEmpty
+        let scope: [DocumentRecord]
+        var folders: [LibraryFolderItem] = []
+        var worksheets: [DocumentRecord] = []
+        switch selection {
+        case .archived:
+            scope = archivedCards(in: documents)
+            worksheets = scope
+        case .allSubjects:
+            scope = browsableCards(in: documents)
+            if !searching {
+                let bySubject = Dictionary(grouping: scope, by: \.subject)
+                folders = bySubject.keys.sorted().map { LibraryFolders.subjectItem($0, documents: bySubject[$0] ?? []) }
+            }
+        case .folder(let subject, let path):
+            let subjectCards = browsableCards(in: documents).filter { $0.subject == subject }
+            scope = LibraryFolders.documents(subjectCards, under: path)
+            if !searching {
+                let contents = LibraryFolders.contents(of: subjectCards, subject: subject, at: path)
+                folders = contents.folders
+                worksheets = contents.worksheets
+            }
+        }
+        if searching {
+            let depth: Int
+            if case .folder(_, let path) = selection { depth = path.count } else { depth = 0 }
+            worksheets = scope.filter { titleMatches(searchableTitle(of: $0, below: depth), query: query) }
+        }
+        return LibraryListing(folders: folders, worksheets: sortCards(worksheets, order: sortOrder), scopeCount: scope.count)
+    }
+
+    /// What a search matches: the worksheet's own title with the folders between the search's folder and it, so
+    /// "tutorial" inside NOTES & TUTORIALS finds the Tutorial folders' worksheets rather than everything in it.
+    static func searchableTitle(of record: DocumentRecord, below depth: Int) -> String {
+        let folders = LibraryFolders.folders(of: record.source).dropFirst(depth).filter { !$0.hasPrefix("_") }
+        return (folders + [LibraryFolders.ownTitle(of: record)]).joined(separator: " / ")
     }
 
     /// The query with surrounding whitespace removed and runs of whitespace collapsed to one space.
@@ -138,9 +246,13 @@ final class LibraryController: ObservableObject {
         documents.filter { $0.role == .student }
     }
 
-    static func sortCards(_ docs: [DocumentRecord], sortNewestFirst: Bool) -> [DocumentRecord] {
+    static func sortCards(_ docs: [DocumentRecord], order: LibrarySortOrder) -> [DocumentRecord] {
         docs.sorted {
-            if $0.importedAt != $1.importedAt { return sortNewestFirst ? $0.importedAt > $1.importedAt : $0.importedAt < $1.importedAt }
+            if order == .name {
+                let lhs = LibraryFolders.ownTitle(of: $0), rhs = LibraryFolders.ownTitle(of: $1)
+                if lhs != rhs { return LibraryFolders.nameOrder(lhs, rhs) }
+            }
+            if $0.importedAt != $1.importedAt { return order == .oldestFirst ? $0.importedAt < $1.importedAt : $0.importedAt > $1.importedAt }
             if $0.title != $1.title { return $0.title < $1.title }
             return $0.id.uuidString < $1.id.uuidString
         }

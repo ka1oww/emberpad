@@ -254,7 +254,7 @@ final class LibrarySearchAndReopenTests: XCTestCase {
         XCTAssertEqual(LibraryController.normalizedQuery("  rate   law \n"), "rate law")
     }
 
-    func testSearchNarrowsTheCurrentSubjectClassAndArchiveOnly() throws {
+    func testSearchNarrowsTheCurrentSubjectAndArchiveOnly() throws {
         let kinetics = try record("Kinetics Worksheet 1")
         let kineticsB = try record("Kinetics Worksheet 2", classTag: "Demo B")
         let equilibria = try record("Equilibria Worksheet")
@@ -263,16 +263,15 @@ final class LibrarySearchAndReopenTests: XCTestCase {
         let archived = try record("Kinetics Worksheet 0", status: .archived)
         let all = [kinetics, kineticsB, equilibria, mathKinematics, teacher, archived]
 
-        func ids(subject: String?, classTag: String?, archived: Bool, query: String) -> [UUID] {
-            LibraryController.filteredCards(in: all, subject: subject, classTag: classTag, archived: archived,
-                                            sortNewestFirst: false, query: query).map(\.id)
+        func ids(_ selection: LibraryListing.Selection, query: String) -> [UUID] {
+            LibraryController.listing(in: all, selection: selection, sortOrder: .oldestFirst, query: query).worksheets.map(\.id)
         }
-        XCTAssertEqual(ids(subject: nil, classTag: nil, archived: false, query: "kine"),
+        XCTAssertEqual(ids(.allSubjects, query: "kine"),
                        [kinetics.id, kineticsB.id, mathKinematics.id], "all subjects, Teacher and archived copies never match")
-        XCTAssertEqual(ids(subject: "H2 Chemistry", classTag: nil, archived: false, query: "kinetics"), [kinetics.id, kineticsB.id])
-        XCTAssertEqual(ids(subject: "H2 Chemistry", classTag: "Demo B", archived: false, query: "kinetics"), [kineticsB.id])
-        XCTAssertEqual(ids(subject: nil, classTag: nil, archived: true, query: "kinetics"), [archived.id])
-        XCTAssertEqual(ids(subject: "Physics", classTag: nil, archived: false, query: "equilibria"), [])
+        XCTAssertEqual(ids(.folder(subject: "H2 Chemistry", path: []), query: "kinetics"), [kinetics.id, kineticsB.id],
+                       "class tags no longer filter")
+        XCTAssertEqual(ids(.archived, query: "kinetics"), [archived.id])
+        XCTAssertEqual(ids(.folder(subject: "Physics", path: []), query: "equilibria"), [])
     }
 
     func testControllerSearchTextDrivesTheGridAndItsCount() async throws {
