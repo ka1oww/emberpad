@@ -408,14 +408,16 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// under "Erase highlighter only" the pen ink waits for that commit whenever the sweep came near a highlight: put
     /// back sooner, it makes PencilKit throw the cut away and register its own "Pixel Erase" (EP71, EP79). A sweep
     /// clear of every highlight has nothing to commit and finishes on the next turn. `partialEraseCommitWait` only
-    /// bounds a wait for a commit that never comes.
+    /// bounds a wait for a commit that never comes, and counts only time the app was running (`ResponsiveDeadline`),
+    /// so a stall right after the lift cannot use it up before PencilKit's commit lands (EP89).
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
         guard tools.current == .eraser else { return }
         if let erase = highlighterErase, erase.canvas === canvasView, tools.settings.eraserMode == .partial {
             erase.lifted = true
-            let work = DispatchWorkItem { [weak self] in self?.eraserStrokeDone() }
-            erase.pendingFinish = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.partialEraseCommitWait, execute: work)
+            afterHighlighterEraseLiftForTesting?()
+            erase.pendingFinish = ResponsiveDeadline(after: Self.partialEraseCommitWait) { [weak self] in
+                self?.eraserStrokeDone()
+            }
             // A turn later, so the lift's own eraser samples are in the sweep.
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.highlighterErase === erase, let pending = erase.pendingFinish,
@@ -429,9 +431,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     /// The longest a highlighter-only partial erase that came near a highlight waits after the lift for PencilKit's
-    /// commit, in seconds. The commit normally ends the wait within milliseconds (EP79; 0.3 before, which a loaded
-    /// Simulator overran).
-    static let partialEraseCommitWait: TimeInterval = 2
+    /// commit, in seconds of responsive time. The commit normally ends the wait within milliseconds (EP79; 0.3 before,
+    /// which a loaded Simulator overran). 5 rather than 2 (EP89) also covers a stall of PencilKit's own draw queue
+    /// while the main thread runs on; it only ever runs out on a sweep that came near a highlight but cut nothing.
+    static let partialEraseCommitWait: TimeInterval = 5
+
+    /// Runs on a highlighter-only partial eraser's lift, before the commit wait starts; tests stall the app here.
+    var afterHighlighterEraseLiftForTesting: (() -> Void)?
 
     /// Whether a highlighter-only eraser stroke is still holding the pen ink aside, for tests.
     var highlighterErasePending: Bool { highlighterErase != nil }
@@ -1285,7 +1291,7 @@ final class HighlighterEraseStroke {
     var toolBegan = false
     /// The Pencil lifted; the ink goes back once PencilKit's partial eraser commits, or `pendingFinish` runs.
     var lifted = false
-    var pendingFinish: DispatchWorkItem?
+    var pendingFinish: ResponsiveDeadline?
     /// Where the eraser went while down, in page points, and how far either side of that it erases (EP79).
     var sweep: [CGPoint] = []
     var reach: CGFloat = 0
