@@ -74,6 +74,77 @@ final class HighlighterGoodNotesTests: XCTestCase {
         }
     }
 
+    /// EP89: the main thread stalls 2.5 s right after a highlighter-only partial erase lifts, longer than the 2 s
+    /// wall-clock wait it once had. The stall must not use up the wait for PencilKit's commit: the highlight is still
+    /// cut, the pen ink stays, and the erase is one "Erase" undo step (before, the fallback beat the late commit and
+    /// PencilKit threw the cut away).
+    func testHighlighterOnlyPartialEraseSurvivesAMainThreadStallAfterTheLift() throws {
+        let tools = makeTools()
+        let session = try makeSession(pages: 1)
+        let controller = try host(session, tools: tools)
+        let canvas = try XCTUnwrap(controller.canvases[0])
+        let window = try XCTUnwrap(canvas.window)
+        let pen1 = Self.line(y: 150, ink: PKInk(.pen, color: .black), width: 2)
+        let highlight = Self.line(y: 150, ink: PKInk(.marker, color: UIColor.yellow.withAlphaComponent(0.5)), width: 8)
+        let pen2 = Self.line(y: 250, ink: PKInk(.pen, color: .black), width: 2)
+        canvas.drawing = PKDrawing(strokes: [pen1, highlight, pen2])
+        controller.canvasViewDrawingDidChange(canvas)
+        tools.setEraseHighlighterOnly(true)
+        tools.setEraserMode(.partial)
+        tools.select(.eraser)
+        var stalled = false
+        controller.afterHighlighterEraseLiftForTesting = {
+            DispatchQueue.main.async {
+                stalled = true
+                Thread.sleep(forTimeInterval: 2.5)
+            }
+        }
+
+        let space = canvas.pageSpace
+        var stroke = PencilStroke(window: window, view: canvas,
+                                  recognizers: [canvas.drawingGestureRecognizer, controller.eraserTouch], asksDelegates: true)
+        stroke.down(at: space.convert(CGPoint(x: 306, y: 100), to: nil))
+        stroke.move(to: space.convert(CGPoint(x: 306, y: 300), to: nil))
+        stroke.lift()
+        Self.waitForEraseToFinish(controller)
+        XCTAssertTrue(stalled, "the main thread stalled after the lift")
+        XCTAssertFalse(controller.highlighterErasePending, "the erase finished")
+
+        let drawing = session.drawing(on: 0)
+        let pens = drawing.strokes.filter { $0.ink.inkType == .pen }
+        XCTAssertEqual(pens.count, 2, "every pen stroke stays")
+        XCTAssertTrue(pens.allSatisfy { $0.mask == nil }, "no pen stroke is cut")
+        let highlightLeft = drawing.strokes.filter { $0.ink.inkType == .marker }
+        XCTAssertTrue(highlightLeft.isEmpty || highlightLeft.contains { $0.mask != nil } || highlightLeft.count > 1,
+                      "the highlight is cut where the eraser crossed it")
+        XCTAssertEqual(canvas.drawing.dataRepresentation(), drawing.dataRepresentation(), "the canvas holds the whole page again")
+        XCTAssertEqual(canvas.undoManager?.undoActionName, "Erase", "one undo step")
+    }
+
+    /// EP89: the commit wait counts each tick's gap only up to `longestCountedGap`, so a stall uses up none of it.
+    func testResponsiveTimeBudgetDoesNotCountAStall() {
+        var budget = ResponsiveTimeBudget(limit: 0.45, start: 100)
+        XCTAssertFalse(budget.tick(at: 100.1))
+        XCTAssertFalse(budget.tick(at: 102.6), "a 2.5 s stall counts as one short tick")
+        XCTAssertEqual(budget.counted, 0.1 + ResponsiveTimeBudget.longestCountedGap, accuracy: 1e-9)
+        XCTAssertFalse(budget.tick(at: 102.5), "a clock that runs backwards counts nothing")
+        XCTAssertFalse(budget.tick(at: 102.6))
+        XCTAssertTrue(budget.tick(at: 102.75), "responsive time reaches the limit")
+    }
+
+    /// EP89: the deadline runs its action once, after its responsive time, and never once cancelled.
+    func testResponsiveDeadlineFiresOnceAndNeverAfterCancel() {
+        var fired = 0
+        let deadline = ResponsiveDeadline(after: 0.3) { fired += 1 }
+        var cancelledFired = 0
+        let cancelled = ResponsiveDeadline(after: 0.3) { cancelledFired += 1 }
+        cancelled.cancel()
+        PencilStroke.turn(1)
+        XCTAssertEqual(fired, 1, "fires once")
+        XCTAssertEqual(cancelledFired, 0, "a cancelled deadline never fires")
+        deadline.cancel()
+    }
+
     /// EP79: a highlighter-only partial sweep that passes clear of every highlight has nothing for PencilKit to commit,
     /// so the pen ink goes back on the next turn instead of after `partialEraseCommitWait`, and no undo step is made.
     func testHighlighterOnlyPartialSweepClearOfEveryHighlightFinishesAtOnce() throws {

@@ -118,3 +118,64 @@ private struct StrokeKey: Hashable {
         masked = stroke.maskedPathRanges.flatMap { [$0.lowerBound, $0.upperBound] }
     }
 }
+
+/// Time the app was actually running, as a 0.1 s main-thread tick sees it (EP89). Each tick counts the time since the
+/// last one, but never more than `longestCountedGap`, so a stall of the main thread or of the whole process uses up
+/// none of the budget: once it ends, work queued during it (PencilKit's partial-erase commit) runs first. Pure, so
+/// tests cover the counting without a clock.
+struct ResponsiveTimeBudget {
+    static let tick: TimeInterval = 0.1
+    static let longestCountedGap: TimeInterval = 0.15
+
+    let limit: TimeInterval
+    private(set) var counted: TimeInterval = 0
+    private var last: TimeInterval
+
+    init(limit: TimeInterval, start: TimeInterval) {
+        self.limit = limit
+        last = start
+    }
+
+    /// One tick at `now`; true once the counted time reaches the limit.
+    mutating func tick(at now: TimeInterval) -> Bool {
+        counted += min(max(now - last, 0), Self.longestCountedGap)
+        last = now
+        return counted >= limit
+    }
+}
+
+/// Runs `action` once, after `limit` seconds of `ResponsiveTimeBudget` time on the main run loop, unless cancelled
+/// first. The fallback that bounds a highlighter-only partial erase's wait for PencilKit's commit (EP89; wall-clock
+/// before, which a stall right after the lift used up, so the fallback beat the late commit and PencilKit threw the
+/// cut away).
+@MainActor
+final class ResponsiveDeadline {
+    private var timer: Timer?
+    private var action: (() -> Void)?
+
+    init(after limit: TimeInterval, clock: @escaping () -> TimeInterval = { CACurrentMediaTime() },
+         action: @escaping () -> Void) {
+        self.action = action
+        var budget = ResponsiveTimeBudget(limit: limit, start: clock())
+        let timer = Timer(timeInterval: ResponsiveTimeBudget.tick, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { return timer.invalidate() }
+                if budget.tick(at: clock()) { self.fire() }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func cancel() {
+        timer?.invalidate()
+        timer = nil
+        action = nil
+    }
+
+    private func fire() {
+        let action = action
+        cancel()
+        action?()
+    }
+}
