@@ -6,6 +6,29 @@ import SwiftUI
 // badge and primary button, exactly as design 5.7 specifies. Adopt a shared token set
 // here if one ever moves somewhere both targets can import. Do not create a second set.
 
+/// What the window says about the automatic Prepare (the Companion prepares by itself when the EMBER folder changes).
+struct CompanionAutoPrepareStatus: Equatable {
+    /// False when FSEvents refused to watch the folder; the button is then the only way to prepare.
+    var isWatching = false
+    /// A change was noticed and the Prepare waits until EMBER has been quiet for a while.
+    var isPending = false
+    var lastPreparedAt: Date?
+    var failureAt: Date?
+    var failureReason: String?
+
+    func line(time: (Date) -> String) -> String {
+        guard isWatching else { return "Not watching the EMBER folder. Click Prepare iPad library after a change." }
+        if isPending { return "Change noticed in EMBER · prepares once the changes settle" }
+        if let lastPreparedAt { return "Prepared automatically \(time(lastPreparedAt)) · watching EMBER for changes" }
+        return "Watching EMBER for changes · prepares automatically"
+    }
+
+    func failureLine(time: (Date) -> String) -> String? {
+        guard let failureAt, let failureReason else { return nil }
+        return "Automatic prepare failed \(time(failureAt)): \(failureReason)"
+    }
+}
+
 /// The menu-bar window content from design 5.7: header, the Drive EMBER source folder,
 /// subjects with document counts, the list of PDFs not read this time, the Prepare button, the iPad pairing and sync
 /// section and the renewal line. The header's status line is the sync server's (EP-23). Values in, actions out, so the window can render a synthetic snapshot
@@ -20,6 +43,7 @@ struct CompanionLibraryContent: View {
     let snapshot: LibrarySnapshot?
     let scannedAt: Date?
     let message: String?
+    var autoStatus = CompanionAutoPrepareStatus()
     let onChooseFolder: () -> Void
     let onPrepare: () -> Void
     var pairing: CompanionPairingStatus = .notPaired
@@ -118,8 +142,25 @@ struct CompanionLibraryContent: View {
             if isPreparing {
                 ProgressView().scaleEffect(0.8)
             }
+            if folder != nil, isSourceAvailable {
+                autoPrepareLine
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
+    }
+
+    /// The automatic Prepare: what it is doing, when it last ran, and why it last failed. Never a popup.
+    private var autoPrepareLine: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(autoStatus.line(time: Self.timeFormatter.string(from:)))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let failure = autoStatus.failureLine(time: Self.timeFormatter.string(from:)) {
+                Text(failure).font(.system(size: 11)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: 3. Subjects with counts

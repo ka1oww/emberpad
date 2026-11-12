@@ -40,6 +40,7 @@ struct EmberPadCompanion: App {
                 snapshot: model.snapshot,
                 scannedAt: model.scannedAt,
                 message: model.message,
+                autoStatus: model.autoStatus,
                 onChooseFolder: { model.chooseFolder() },
                 onPrepare: { model.prepare() },
                 pairing: pairing.status,
@@ -80,11 +81,19 @@ struct EmberPadCompanion: App {
 /// iPad. The paired iPad fetches the Outbox from the sync server (`CompanionSyncModel`);
 /// the nightly copy (`resign/renew.zsh`) can also take it. The read and the write run
 /// off the main thread.
+///
+/// It prepares by itself: once at launch, after the folder is changed, and whenever the
+/// watched EMBER folder changes (`LibraryAutoPrepare`: FSEvents, about 30 s after the
+/// last change, never two at once). **Prepare iPad library** runs the same Prepare now.
 @MainActor
 final class CompanionModel: ObservableObject {
     /// A folder chosen with **Choose EMBER folder…**. A new key, so a folder chosen for the
     /// earlier Ember Projects source does not replace the Drive EMBER default.
     private static let sourceFolderKey = "EmberPadCompanion.emberFolderPath"
+    /// Seconds without a change in EMBER before an automatic Prepare runs.
+    static let quietPeriod: TimeInterval = 30
+    /// The automatic Prepare at launch waits this long, so it does not compete with the app starting up.
+    static let launchDelay: TimeInterval = 3
 
     /// The chosen folder, else the discovered Drive EMBER folder. Nil when neither exists.
     @Published private(set) var folder: URL?
@@ -92,8 +101,10 @@ final class CompanionModel: ObservableObject {
     @Published private(set) var scannedAt: Date?
     @Published private(set) var isPreparing = false
     @Published private(set) var message: String?
+    @Published private(set) var autoStatus = CompanionAutoPrepareStatus()
     /// Called after a Prepare wrote the Outbox, so the sync status line recounts what it serves.
     var onPrepared: (() -> Void)?
+    private var autoPrepare: LibraryAutoPrepare?
 
     var isSourceAvailable: Bool { folder.map(isCompanionSourceDirectory) ?? false }
 
@@ -103,6 +114,17 @@ final class CompanionModel: ObservableObject {
         } else {
             folder = EmberLibrarySource.discoverDriveRoot()
         }
+        let scheduler = LibraryPrepareScheduler(quietPeriod: Self.quietPeriod) { [weak self] trigger in
+            await self?.performPrepare(trigger)
+        }
+        scheduler.onStateChange = { [weak self, weak scheduler] in
+            guard let self, let scheduler else { return }
+            self.isPreparing = scheduler.isRunning
+            self.autoStatus.isPending = scheduler.isPending
+        }
+        autoPrepare = LibraryAutoPrepare(scheduler: scheduler)
+        watchFolder()
+        scheduler.schedule(after: Self.launchDelay)
     }
 
     func chooseFolder() {
@@ -119,48 +141,53 @@ final class CompanionModel: ObservableObject {
         snapshot = nil
         scannedAt = nil
         message = nil
+        autoStatus.failureAt = nil
+        autoStatus.failureReason = nil
+        watchFolder()
+        autoPrepare?.scheduler.schedule(after: Self.launchDelay)
     }
 
+    /// **Prepare iPad library**: the same Prepare, now.
     func prepare() {
-        guard !isPreparing else { return }
-        guard isSourceAvailable, let root = folder else {
+        autoPrepare?.scheduler.prepareNow()
+    }
+
+    private func watchFolder() {
+        autoPrepare?.watch(folder)
+        autoStatus.isWatching = autoPrepare?.isWatching ?? false
+    }
+
+    /// The one Prepare, for the button and the automatic Prepare alike. An automatic Prepare that fails keeps the
+    /// previous result on screen (the old Outbox is still what the iPad gets) and says why in the auto line.
+    private func performPrepare(_ trigger: LibraryPrepareTrigger) async {
+        func notFound() {
             snapshot = nil
             scannedAt = nil
             message = "EMBER folder not found."
-            return
+            if trigger == .automatic { failed("EMBER folder not found.") }
         }
-        isPreparing = true
-        message = nil
-        Task {
-            defer { self.isPreparing = false }
-            do {
-                let (snapshot, summary) = try await Task.detached(priority: .userInitiated) {
-                    guard isCompanionSourceDirectory(root) else { throw CocoaError(.fileNoSuchFile) }
-                    let aliases = try ClassAliasTable.load()
-                    let outbox = LibraryOutbox()
-                    let snapshot = try EmberLibrarySource(root: root, aliases: aliases).read(previous: outbox.previousManifest())
-                    guard isCompanionSourceDirectory(root) else { throw CocoaError(.fileNoSuchFile) }
-                    return (snapshot, try outbox.write(snapshot))
-                }.value
-                guard isCompanionSourceDirectory(root) else {
-                    self.snapshot = nil
-                    self.scannedAt = nil
-                    self.message = "EMBER folder not found."
-                    return
-                }
-                self.snapshot = snapshot
-                self.scannedAt = Date()
-                self.message = Self.outboxMessage(summary)
-                self.onPrepared?()
-            } catch {
-                if isCompanionSourceDirectory(root) {
-                    self.message = error.localizedDescription
-                } else {
-                    self.snapshot = nil
-                    self.scannedAt = nil
-                    self.message = "EMBER folder not found."
-                }
-            }
+        func failed(_ reason: String) {
+            autoStatus.failureAt = Date()
+            autoStatus.failureReason = reason
+        }
+        guard isSourceAvailable, let root = folder else { return notFound() }
+        if trigger == .manual { message = nil }
+        do {
+            let (snapshot, summary) = try await Task.detached(priority: trigger == .manual ? .userInitiated : .utility) {
+                try LibraryOutbox().prepare(from: root, aliases: ClassAliasTable.load())
+            }.value
+            guard isCompanionSourceDirectory(root) else { return notFound() }
+            self.snapshot = snapshot
+            self.scannedAt = Date()
+            self.message = Self.outboxMessage(summary)
+            if autoPrepare?.watchedRoot == root { autoPrepare?.recordPrepared(snapshot) }
+            if trigger == .automatic { autoStatus.lastPreparedAt = scannedAt }
+            autoStatus.failureAt = nil
+            autoStatus.failureReason = nil
+            self.onPrepared?()
+        } catch {
+            guard isCompanionSourceDirectory(root) else { return notFound() }
+            if trigger == .manual { message = error.localizedDescription } else { failed(error.localizedDescription) }
         }
     }
 
