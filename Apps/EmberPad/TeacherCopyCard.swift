@@ -178,7 +178,7 @@ final class TeacherCopyCardState {
     /// The nav-bar book button's label, which always names what a tap does.
     var toggleAccessibilityLabel: String { isOpen ? "Hide Teacher copy" : "Show Teacher copy" }
 
-    /// Called once the worksheet's Teacher copy is known. Without one the panel starts closed (edge grabber only) so
+    /// Called once the worksheet's Teacher copy is known. Without one the panel starts closed (pull tab only) so
     /// an empty state never covers the page; the remembered choice is kept for the next paired worksheet.
     func worksheetOpened(hasTeacherCopy: Bool) {
         isOpen = hasTeacherCopy && Self.load(from: defaults).isOpen
