@@ -251,6 +251,9 @@ public final class SyncServer: @unchecked Sendable {
         public var sendHighWater = 524_288
         /// Accept only loopback connections. For tests; never set in the app.
         public var loopbackOnly = false
+        /// A connection that presented (EP93) and then sent nothing for this long is closed, so a link lost on the
+        /// way out of range does not hold one of `maxConnections` until TCP notices.
+        public var presentSilenceLimit: Duration = .seconds(6)
 
         public init() {}
     }
@@ -260,6 +263,8 @@ public final class SyncServer: @unchecked Sendable {
     let provider: any WireContentProvider
     /// Where version-2 PUTs (the iPad's ink backup) are kept; nil answers every PUT with `rejected`.
     let putReceiver: (any WirePutReceiver)?
+    /// Where version-4 Present updates go (EP93); nil drops them and closes the presenting connection.
+    let presentHost: PresentHost?
     private let powerGuard: (any SyncPowerGuard)?
     private let onStatus: @Sendable (SyncServerStatus) -> Void
     let queue = DispatchQueue(label: "EmberSyncKit.SyncServer")
@@ -276,12 +281,14 @@ public final class SyncServer: @unchecked Sendable {
 
     public init(
         credential: PairingCredential, provider: any WireContentProvider, putReceiver: (any WirePutReceiver)? = nil,
+        presentHost: PresentHost? = nil,
         configuration: Configuration = Configuration(), powerGuard: (any SyncPowerGuard)? = SystemSleepAssertion(),
         onStatus: @escaping @Sendable (SyncServerStatus) -> Void = { _ in }
     ) {
         self.credential = credential
         self.provider = provider
         self.putReceiver = putReceiver
+        self.presentHost = presentHost
         self.configuration = configuration
         self.powerGuard = powerGuard
         self.onStatus = onStatus
@@ -480,6 +487,9 @@ final class SyncConnection: @unchecked Sendable {
     private var finished = false
     private var servedManifest = false
     private var failedRequests = 0
+    /// Set once this connection sends its first PRESENT (EP93).
+    private var presentLink: ServerPresentLink?
+    private var lastReceived = ContinuousClock.now
 
     init(connection: NWConnection, server: SyncServer) {
         self.connection = connection
@@ -545,6 +555,7 @@ final class SyncConnection: @unchecked Sendable {
             outcome = servedManifest && failedRequests == 0 && openTransfers == 0 && cleanClose ? .synced : .ended
         }
         finished = true
+        if let presentLink { server?.presentHost?.closed(presentLink) }
         server?.connectionFinished(self, outcome: outcome)
     }
 
@@ -568,6 +579,7 @@ final class SyncConnection: @unchecked Sendable {
 
     private func feed(_ bytes: Data) {
         guard var session else { return }
+        lastReceived = .now
         var input = bytes
         repeat {
             let out = session.receive(input, now: .now)
@@ -596,6 +608,9 @@ final class SyncConnection: @unchecked Sendable {
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
             guard let self, !closing, !finished, var session else { return }
+            if presentLink != nil, ContinuousClock.now - lastReceived >= configuration.presentSilenceLimit {
+                return connection.cancel()
+            }
             let out = session.tick(now: .now)
             self.session = session
             send(out)
@@ -613,6 +628,22 @@ final class SyncConnection: @unchecked Sendable {
             server?.backupFinished(outcome)
         }
         send(out.outbound, close: out.closeTransport, puts: puts)
+        for case .present(let payload) in out.events {
+            guard let host = server?.presentHost else {
+                connection.cancel()
+                return
+            }
+            let link = presentLink ?? ServerPresentLink(connection: self, queue: queue)
+            presentLink = link
+            host.received(payload, on: link)
+        }
+    }
+
+    /// Sends one PRESENT_REPLY. Runs on the server's queue, outside `feed`, so it never interleaves a receive.
+    func sendPresentReply(_ payload: Data) {
+        guard !closing, !finished, var session, let out = try? session.presentReply(payload) else { return }
+        self.session = session
+        send(out.outbound, close: out.closeTransport)
     }
 
     private func send(_ frames: [WireMessage], close: Bool, puts: Set<WireRequestID> = []) {
@@ -661,6 +692,25 @@ final class SyncConnection: @unchecked Sendable {
             receivePaused = false
             receiveNext()
         }
+    }
+}
+
+/// One connection's Present link, as `PresentHost` answers it. Replies and closing hop to the server's queue.
+final class ServerPresentLink: PresentReplying, @unchecked Sendable {
+    private weak var connection: SyncConnection?
+    private let queue: DispatchQueue
+
+    init(connection: SyncConnection, queue: DispatchQueue) {
+        self.connection = connection
+        self.queue = queue
+    }
+
+    func reply(_ payload: Data) {
+        queue.async { [weak connection] in connection?.sendPresentReply(payload) }
+    }
+
+    func close() {
+        queue.async { [weak connection] in connection?.cancel() }
     }
 }
 

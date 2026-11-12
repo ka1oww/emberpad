@@ -74,6 +74,8 @@ public enum WireServerEvent: Equatable, Sendable {
     case ready(version: UInt16)
     /// A version-2 PUT reached its terminal frame. Never emitted for a GET or the manifest.
     case put(WireRequestID, WirePutOutcome)
+    /// Version 4: one presentation update from the iPad, opaque to the session (`PresentCodec`).
+    case present(Data)
     case closed(WireCloseReason)
 }
 
@@ -222,6 +224,16 @@ public struct WireServerSession: Sendable {
         return out
     }
 
+    /// Version 4: one PRESENT_REPLY carrying `bytes` (`PresentCodec`), sent outside any request.
+    public mutating func presentReply(_ bytes: Data) throws(WireSessionError) -> WireServerOutput {
+        guard case .ready(let version) = phase else { throw .notReady }
+        guard version >= WireProtocol.presentVersion else { throw .unsupportedByPeer }
+        guard !bytes.isEmpty, bytes.count <= Int(WireProtocol.maxPresentReplyBytes) else { throw .putTooLarge }
+        var out = WireServerOutput()
+        out.outbound.append(.presentReply(bytes))
+        return out
+    }
+
     public mutating func transportClosed() -> WireServerOutput {
         var out = WireServerOutput()
         if !isClosed { close(.transportClosed, &out) }
@@ -293,6 +305,8 @@ public struct WireServerSession: Sendable {
         case (.ready(let version), .getDigest(let id)) where version >= WireProtocol.digestVersion:
             guard accept(id, &out) else { return }
             serveDigest(id, &out)
+        case (.ready(let version), .present(let bytes)) where version >= WireProtocol.presentVersion:
+            out.events.append(.present(bytes))
         default:
             violate(.unexpectedFrame(message.type), &out)
         }

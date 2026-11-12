@@ -169,7 +169,7 @@ struct WireTransportTests {
         while finished.count < 2 {
             try await client.run { if case .completed = $0 { true } else { false } }
             for case .completed(let id, _, _) in client.events { finished.insert(id) }
-            try #require(client.session.phase == .ready(version: 3))
+            try #require(client.session.phase == .ready(version: 4))
         }
         #expect(client.files[bigID] == big)
         #expect(client.files[smallID] == small)

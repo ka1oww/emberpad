@@ -29,10 +29,13 @@ final class CompanionSyncModel: ObservableObject {
     private let backup: CompanionBackupReceiver
     private var server: SyncServer?
     private var servedPairing: PairingCredential?
+    /// Present on Mac (EP93): the server hands PRESENT frames from the paired iPad to it.
+    private let presentHost: PresentHost?
 
-    init(outbox: LibraryOutbox = LibraryOutbox(), defaults: UserDefaults = .standard) {
+    init(outbox: LibraryOutbox = LibraryOutbox(), defaults: UserDefaults = .standard, presentHost: PresentHost? = nil) {
         self.outbox = outbox
         self.defaults = defaults
+        self.presentHost = presentHost
         var folder = InkBackupStore.defaultURL
         var message: String?
         if let saved = defaults.string(forKey: Self.backupFolderKey) {
@@ -61,9 +64,11 @@ final class CompanionSyncModel: ObservableObject {
         servedPairing = credential
         guard let credential else {
             status = nil
+            presentHost?.dismiss()
             return
         }
-        let server = SyncServer(credential: credential, provider: OutboxContentProvider(outbox: outbox), putReceiver: backup) { [weak self] status in
+        let server = SyncServer(credential: credential, provider: OutboxContentProvider(outbox: outbox), putReceiver: backup,
+                                presentHost: presentHost) { [weak self] status in
             Task { @MainActor in
                 guard let self, self.servedPairing == credential else { return }
                 self.status = status
