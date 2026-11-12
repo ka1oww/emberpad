@@ -183,6 +183,7 @@
 				"PRODUCT_MODULE_NAME" = "EmberPadCompanion";
 				"PRODUCT_BUNDLE_IDENTIFIER" = "$(EMBERPAD_BUNDLE_ID).companion";
 				"INFOPLIST_FILE" = "Apps/Companion/Info.plist";
+				"ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
 				"SDKROOT" = "macosx";
 				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
 				"SUPPORTED_PLATFORMS" = "macosx";
@@ -201,6 +202,7 @@
 				"PRODUCT_MODULE_NAME" = "EmberPadCompanion";
 				"PRODUCT_BUNDLE_IDENTIFIER" = "$(EMBERPAD_BUNDLE_ID).companion";
 				"INFOPLIST_FILE" = "Apps/Companion/Info.plist";
+				"ASSETCATALOG_COMPILER_APPICON_NAME" = "AppIcon";
 				"SDKROOT" = "macosx";
 				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
 				"SUPPORTED_PLATFORMS" = "macosx";
@@ -399,7 +401,6 @@
 			"isa" = "PBXFileSystemSynchronizedBuildFileExceptionSet";
 			"membershipExceptions" = (
 				"Info.plist",
-				"Brand.Sources/CompanionBadge.source.svg",
 				"Brand.Sources/MenuBarGlyph.source.svg",
 				"Brand.Sources/generate-brand.py",
 				"Brand.Sources/README.md",
