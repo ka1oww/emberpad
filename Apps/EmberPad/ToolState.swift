@@ -72,9 +72,12 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// Draw and hold for a straight fountain-pen line, like GoodNotes' pen
     /// "Draw and Hold". On by default.
     var penDrawAndHold = true
-    /// Scribble to erase is not built yet, so it is always off and its switch
-    /// is disabled; `normalized()` keeps it off whatever was stored.
-    var scribbleToErase = false
+    /// Scribble to erase (EP82): a fountain-pen scribble over ink erases the strokes it covers
+    /// (`ScribbleErase`). On by default, as GoodNotes' Pen Gestures are.
+    var scribbleToErase = true
+    /// Whether the teacher has set the Scribble to erase switch. Builds before EP82 kept it off and its switch
+    /// disabled, so a stored value without this was never a choice and decodes to today's default instead.
+    var scribbleToEraseChosen = false
     var circleToLasso = true
     /// Eraser Phase 4: the eraser removes only highlighter strokes. Off, as in GoodNotes.
     var eraseHighlighterOnly = false
@@ -138,7 +141,11 @@ struct ToolSettings: Codable, Equatable, Sendable {
         straightHighlighter = (try? c.decodeIfPresent(Bool.self, forKey: .straightHighlighter)) ?? d.straightHighlighter
         highlighterAlwaysStraight = (try? c.decodeIfPresent(Bool.self, forKey: .highlighterAlwaysStraight)) ?? d.highlighterAlwaysStraight
         penDrawAndHold = (try? c.decodeIfPresent(Bool.self, forKey: .penDrawAndHold)) ?? d.penDrawAndHold
-        scribbleToErase = (try? c.decodeIfPresent(Bool.self, forKey: .scribbleToErase)) ?? d.scribbleToErase
+        if (try? c.decodeIfPresent(Bool.self, forKey: .scribbleToEraseChosen)) == true,
+           let stored = try? c.decodeIfPresent(Bool.self, forKey: .scribbleToErase) {
+            scribbleToErase = stored
+            scribbleToEraseChosen = true
+        }
         circleToLasso = (try? c.decodeIfPresent(Bool.self, forKey: .circleToLasso)) ?? d.circleToLasso
         eraseHighlighterOnly = (try? c.decodeIfPresent(Bool.self, forKey: .eraseHighlighterOnly)) ?? d.eraseHighlighterOnly
         eraserBackToLastTool = (try? c.decodeIfPresent(Bool.self, forKey: .eraserBackToLastTool)) ?? d.eraserBackToLastTool
@@ -157,11 +164,9 @@ struct ToolSettings: Codable, Equatable, Sendable {
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
-    /// lists, and indices past the end of their lists. Also turns off scribble
-    /// to erase, which earlier builds stored as on although it did nothing.
+    /// lists, and indices past the end of their lists.
     func normalized() -> ToolSettings {
         var s = self
-        s.scribbleToErase = false
         s.penColors = Self.cleanPresets(s.penColors, fallback: Self.defaultPenColors)
         s.highlighterColors = Self.cleanPresets(s.highlighterColors, fallback: Self.defaultHighlighterColors)
         s.penColorIndex = Self.clamp(s.penColorIndex, count: s.penColors.count)
@@ -377,6 +382,12 @@ final class ToolState {
     func setHighlighterAlwaysStraight(_ on: Bool) { update { $0.highlighterAlwaysStraight = on } }
     func setPenDrawAndHold(_ on: Bool) { update { $0.penDrawAndHold = on } }
     func setCircleToLasso(_ on: Bool) { update { $0.circleToLasso = on } }
+    func setScribbleToErase(_ on: Bool) {
+        update {
+            $0.scribbleToErase = on
+            $0.scribbleToEraseChosen = true
+        }
+    }
     func setEraseHighlighterOnly(_ on: Bool) { update { $0.eraseHighlighterOnly = on } }
     func setEraserBackToLastTool(_ on: Bool) { update { $0.eraserBackToLastTool = on } }
     func setPenTipSharpness(_ value: Double) {

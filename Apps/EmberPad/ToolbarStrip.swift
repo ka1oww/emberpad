@@ -306,18 +306,13 @@ struct ToolSettingsPopover: View {
                     Toggle("Draw and hold: straight line",
                            isOn: Binding(get: { tools.settings.penDrawAndHold }, set: tools.setPenDrawAndHold))
                     Toggle("Circle to lasso", isOn: Binding(get: { tools.settings.circleToLasso }, set: tools.setCircleToLasso))
-                    // Not built yet: always off, and the switch cannot be turned on.
-                    Toggle(isOn: .constant(false)) {
-                        TaggedLabel(title: "Scribble to erase", tag: "Coming later", stacked: true)
-                            .foregroundStyle(Theme.text3)
-                    }
-                    .disabled(true)
-                    .accessibilityLabel("Scribble to erase, coming later")
+                    Toggle("Scribble to erase",
+                           isOn: Binding(get: { tools.settings.scribbleToErase }, set: tools.setScribbleToErase))
                     TaggedRow(title: "Pencil double-tap", tag: "iPad Settings")
                 } header: {
                     Text("Pen gestures")
                 } footer: {
-                    Text("Hold the Pencil still for half a second at the end of a line and it snaps straight. Circle ink with the pen, then hold still, or lift and press the circle, to select it.")
+                    Text("Hold the Pencil still for half a second at the end of a line and it snaps straight. Circle ink with the pen, then hold still, or lift and press the circle, to select it. Scribble back and forth over ink to erase it.")
                 }
             case .highlighter:
                 colorSection(.highlighter)
@@ -489,21 +484,12 @@ private struct CheckRow: View {
 private struct TaggedLabel: View {
     let title: String
     let tag: String
-    /// Toggle rows stack the tag under the title so the switch keeps its room.
-    var stacked = false
 
     var body: some View {
-        if stacked {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                PhaseTag(text: tag)
-            }
-        } else {
-            HStack {
-                Text(title)
-                Spacer()
-                PhaseTag(text: tag).fixedSize()
-            }
+        HStack {
+            Text(title)
+            Spacer()
+            PhaseTag(text: tag).fixedSize()
         }
     }
 }
