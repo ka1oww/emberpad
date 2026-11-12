@@ -6,3 +6,4 @@ DerivedData/
 xcuserdata/
 resign/config.local.zsh
 resign/*.local.plist
+__pycache__/
