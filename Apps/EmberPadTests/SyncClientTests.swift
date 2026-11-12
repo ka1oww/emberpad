@@ -324,7 +324,14 @@ final class SyntheticMac: @unchecked Sendable {
     private var backupFolder: SyntheticBackupFolder?
     private var versionRange = WireProtocol.supportedVersions
 
+    private var manifestCount = 0
+    private var digestCount = 0
+
     var connections: Int { lock.withLock { connectionCount } }
+    /// MANIFEST frames sent, by every connection so far (EP91: a quiet check must send none).
+    var manifestsServed: Int { lock.withLock { manifestCount } }
+    /// DIGEST frames sent, by every connection so far.
+    var digestsServed: Int { lock.withLock { digestCount } }
     /// Where this Mac keeps PUT backups; nil plays a Companion with no backup folder (every PUT is refused).
     var backups: SyntheticBackupFolder? {
         get { lock.withLock { backupFolder } }
@@ -369,8 +376,21 @@ final class SyntheticMac: @unchecked Sendable {
             return (Provider(manifestValue: manifest, files: files.filter { $0.key != withheld }), backupFolder, versionRange)
         }
         let (client, server) = InMemoryWireTransport.pair()
-        Task { await Self.serve(server, provider: provider, putReceiver: receiver, versions: versions) }
+        Task {
+            await Self.serve(server, provider: provider, putReceiver: receiver, versions: versions) { [weak self] frames in
+                self?.count(frames)
+            }
+        }
         return client
+    }
+
+    private func count(_ frames: [WireMessage]) {
+        lock.withLock {
+            for frame in frames {
+                if case .manifest = frame { manifestCount += 1 }
+                if case .digest = frame { digestCount += 1 }
+            }
+        }
     }
 
     struct Provider: WireContentProvider {
@@ -386,7 +406,8 @@ final class SyntheticMac: @unchecked Sendable {
 
     /// The EP-21 server driver: answer each frame, then send DATA while any transfer has credit.
     static func serve(_ transport: any WireTransport, provider: Provider, putReceiver: (any WirePutReceiver)? = nil,
-                      versions: ClosedRange<UInt16> = WireProtocol.supportedVersions) async {
+                      versions: ClosedRange<UInt16> = WireProtocol.supportedVersions,
+                      sent: @escaping @Sendable ([WireMessage]) -> Void = { _ in }) async {
         var session = WireServerSession(provider: provider, putReceiver: putReceiver, versions: versions, now: .now)
         do {
             connection: while let bytes = try await transport.receive() {
@@ -394,7 +415,10 @@ final class SyntheticMac: @unchecked Sendable {
                 repeat {
                     let out = session.receive(input, now: .now)
                     input = Data()
-                    if !out.outbound.isEmpty { try await transport.send(out.bytes) }
+                    if !out.outbound.isEmpty {
+                        sent(out.outbound)
+                        try await transport.send(out.bytes)
+                    }
                     if out.closeTransport { break connection }
                     while session.hasPendingData { try await transport.send(session.pull(now: .now, maxFrames: 4).bytes) }
                 } while session.hasPendingInput

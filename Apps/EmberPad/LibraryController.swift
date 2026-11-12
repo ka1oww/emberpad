@@ -54,6 +54,12 @@ final class LibraryController: ObservableObject {
     @Published private(set) var lastInboxImport: Date?
     private var sessions: [UUID: DocumentSession] = [:]
     private var failedOperation: FailedOperation?
+    /// Worksheets open in the editor now, with how many times each is open (EP91).
+    private var openWorksheets: [UUID: Int] = [:]
+    /// A worksheet is open in the editor. The quiet change check (EP91) leaves the library alone meanwhile.
+    var hasOpenWorksheet: Bool { !openWorksheets.isEmpty }
+    /// Called after the last open worksheet closes and the library is refreshed (EP91).
+    var onLastWorksheetClosed: (() -> Void)?
 
     private enum FailedOperation: Equatable {
         case inbox
@@ -355,8 +361,11 @@ final class LibraryController: ObservableObject {
 
     func open(_ id: UUID) async throws -> DocumentSession {
         try await store.pinDocument(id)
-        do { return try await loadSession(id) }
-        catch {
+        do {
+            let session = try await loadSession(id)
+            openWorksheets[id, default: 0] += 1
+            return session
+        } catch {
             await store.unpinDocument(id)
             showError(error.localizedDescription)
             throw error
@@ -456,7 +465,10 @@ final class LibraryController: ObservableObject {
             throw error
         }
         await store.unpinDocument(id)
+        let wasOpen = openWorksheets[id] != nil
+        if let count = openWorksheets[id] { openWorksheets[id] = count > 1 ? count - 1 : nil }
         await refresh()
+        if wasOpen, openWorksheets.isEmpty { onLastWorksheetClosed?() }
     }
 
     func flush() async throws {

@@ -1,17 +1,21 @@
 import Foundation
 
-/// The private EmberPad sync protocol, versions 1 and 2. Frames are `type (1 byte) | payload length (4 bytes,
+/// The private EmberPad sync protocol, versions 1 to 3. Frames are `type (1 byte) | payload length (4 bytes,
 /// big-endian) | payload`, and every integer is big-endian. The client (iPad) opens with HELLO, the server (Mac)
 /// answers HELLO, then the client asks for the manifest and fetches files by SHA-256 with credit-based flow control.
 /// Version 2 adds one upward message family, PUT: the client sends a file to the server (the EP-33 ink backup) with
 /// the same credit-based flow control in the other direction. Both peers advertise a version range and use the
-/// highest they share, so a version-1 peer never sees a PUT frame. The protocol is transport-agnostic: sessions
+/// highest they share, so a version-1 peer never sees a PUT frame. Version 3 adds one small request, GET_DIGEST: the
+/// SHA-256 of the manifest the server would serve, so the iPad can ask whether the library changed for a few dozen
+/// bytes instead of the whole manifest. The protocol is transport-agnostic: sessions
 /// consume and produce bytes and never open a connection themselves.
 public enum WireProtocol {
     public static let magic: [UInt8] = Array("EMBR".utf8)
-    public static let supportedVersions: ClosedRange<UInt16> = 1...2
+    public static let supportedVersions: ClosedRange<UInt16> = 1...3
     /// The first version that carries PUT.
     public static let putVersion: UInt16 = 2
+    /// The first version that carries GET_DIGEST.
+    public static let digestVersion: UInt16 = 3
     /// The largest file one PUT may carry.
     public static let maxPutBytes: UInt64 = 268_435_456
     /// The largest PUT metadata payload (the backup item's JSON header).
@@ -104,11 +108,16 @@ public enum WireMessageType: UInt8, Sendable, CaseIterable {
     case putEnd
     /// Version 2. Server to client: the PUT is stored (or was already held), the terminal frame of a PUT.
     case putDone
+    /// Version 3. Client to server: ask for the SHA-256 of the manifest a GET_MANIFEST would return now.
+    case getDigest = 15
+    /// Version 3. Server to client: that SHA-256, the terminal frame of a GET_DIGEST.
+    case digest
 
     /// Frame types a client may send; the server accepts only these.
-    public static let clientToServer: Set<Self> = [.hello, .getManifest, .get, .window, .cancel, .error, .put, .putData, .putEnd]
+    public static let clientToServer: Set<Self> = [.hello, .getManifest, .get, .window, .cancel, .error, .put, .putData, .putEnd,
+                                                   .getDigest]
     /// Frame types a server may send; the client accepts only these.
-    public static let serverToClient: Set<Self> = [.hello, .manifest, .data, .end, .error, .putWindow, .putDone]
+    public static let serverToClient: Set<Self> = [.hello, .manifest, .data, .end, .error, .putWindow, .putDone, .digest]
     /// Frame types that exist only from version 2. A session that negotiated version 1 treats them as violations.
     public static let version2: Set<Self> = [.put, .putData, .putWindow, .putEnd, .putDone]
 }
@@ -135,6 +144,10 @@ public enum WireMessage: Equatable, Sendable {
     case putEnd(WireRequestID, totalBytes: UInt64)
     /// `alreadyHeld` is true when the server already held these exact bytes for this item and kept no new copy.
     case putDone(WireRequestID, alreadyHeld: Bool)
+    /// Version 3: ask for the SHA-256 of the manifest's `ManifestCodec` JSON, exactly the bytes a MANIFEST would carry.
+    case getDigest(WireRequestID)
+    /// Version 3: the SHA-256 of those bytes.
+    case digest(WireRequestID, sha256: ContentHash)
 
     public var type: WireMessageType {
         switch self {
@@ -152,6 +165,8 @@ public enum WireMessage: Equatable, Sendable {
         case .putWindow: .putWindow
         case .putEnd: .putEnd
         case .putDone: .putDone
+        case .getDigest: .getDigest
+        case .digest: .digest
         }
     }
 }
@@ -195,7 +210,7 @@ public enum WireRequestFailure: Error, Equatable, Sendable {
 /// Misuse of a session's API by the local caller, never caused by the peer.
 public enum WireSessionError: Error, Equatable, Sendable {
     case notReady, tooManyRequests, requestIDsExhausted, overConsumed, invalidLimits
-    /// The peer negotiated a version without this request (PUT needs version 2).
+    /// The peer negotiated a version without this request (PUT needs version 2, GET_DIGEST version 3).
     case unsupportedByPeer
     /// A PUT larger than `WireProtocol.maxPutBytes` or with metadata outside its bounds.
     case putTooLarge
