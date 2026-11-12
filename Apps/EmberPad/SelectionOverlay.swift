@@ -266,7 +266,8 @@ final class InkSelectionController {
 
     // MARK: - Toolbar lasso
 
-    private static func makeLassoPath() -> CAShapeLayer {
+    /// The toolbar lasso's line while it is drawn; scribble to erase outlines what it will erase with it (EP90).
+    static func makeLassoPath() -> CAShapeLayer {
         let path = CAShapeLayer()
         path.strokeColor = UIColor.emberAccent.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light)).cgColor
         path.fillColor = UIColor.emberAccent.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))

@@ -4,9 +4,10 @@ import PencilKit
 import EmberSyncKit
 @testable import EmberPad
 
-/// EP82 acceptance: scribble to erase. The GoodNotes scribble shapes are scribbles and handwriting is not; a
-/// scribble over ink erases the strokes it covers (whole, highlighter included) and leaves no ink, as one undo step;
-/// a scribble over empty paper, any stroke with the switch off, and anything but the fountain pen stay as ink.
+/// EP82 acceptance: scribble to erase. The GoodNotes scribble shapes are scribbles and handwriting erases nothing;
+/// a scribble over ink erases the strokes it goes through (whole, highlighter included) and leaves no ink, as one
+/// undo step; a scribble over empty paper, any stroke with the switch off, and anything but the fountain pen stay
+/// as ink. EP90's realistic fixtures and the live preview are in `ScribblePreviewTests`.
 /// Every fixture is synthetic, shaped like the GoodNotes support article's examples and real handwriting at page
 /// scale (x-height about 20 pt).
 @MainActor
@@ -39,15 +40,19 @@ final class ScribbleEraseTests: XCTestCase {
         XCTAssertEqual(ScribbleErase.passes(of: Self.backAndForth())?.count, 3)
     }
 
-    func testHandwritingIsNotAScribble() {
+    func testHandwritingErasesNothing() {
+        // EP90: a quick scrub of three passes is a scribble's shape, and so is one letter (m, n, u, w); only going
+        // through ink makes a scribble. Written over empty paper or beside a word, no letter erases anything.
         let letters: [(String, [CGPoint])] = [
             ("m", Self.letterM), ("n", Self.letterN), ("w", Self.letterW), ("z", Self.letterZ), ("u", Self.letterU),
             ("e", Self.letterE), ("l", Self.letterL), ("v", Self.letterV), ("tick", Self.tick),
         ]
+        let word = Self.word(at: CGPoint(x: 100, y: 300))
         for (name, corners) in letters {
             for scale in [CGFloat(0.6), 1, 2.5] {
-                let points = Self.dense(corners.map { CGPoint(x: 200 + $0.x * scale, y: 300 + $0.y * scale) })
-                XCTAssertNil(ScribbleErase.passes(of: points), "\(name) at \(scale)x is handwriting")
+                let points = Self.dense(corners.map { CGPoint(x: 290 + $0.x * scale, y: 300 + $0.y * scale) })
+                XCTAssertEqual(ScribbleErase.erasedIndices(scribble: points, in: []), [], "\(name) at \(scale)x on empty paper")
+                XCTAssertEqual(ScribbleErase.erasedIndices(scribble: points, in: word), [], "\(name) at \(scale)x beside a word")
             }
         }
         XCTAssertNil(ScribbleErase.passes(of: Self.strikeThrough()), "crossing out a word with one line")
