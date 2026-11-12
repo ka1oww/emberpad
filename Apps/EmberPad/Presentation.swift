@@ -61,6 +61,28 @@ struct StudentPageSnapshot {
         }
     }
 
+    /// What one frame shows in `framing`: a rect in page space, the pages placed in it and the margin around it.
+    /// The student view draws exactly this, and `PresentedView` describes exactly this, so they cannot disagree.
+    struct Framed {
+        let visibleRect: CGRect
+        let slices: [StudentPageSlice]
+        let margin: CGFloat
+    }
+
+    /// Mirror Presenter Page shows the presenter's visible rect once the worksheet has laid out; until then, and
+    /// always for Mirror Full Page, the focused page is shown whole with the 1% margin. Nil for an empty page.
+    func framed(_ framing: StudentFraming) -> Framed? {
+        if framing == .presenterPage, let visibleRect, !slices.isEmpty {
+            return Framed(visibleRect: visibleRect, slices: slices, margin: 0)
+        }
+        let displayed = page.displayedSize
+        guard displayed.width > 0, displayed.height > 0 else { return nil }
+        let whole = CGRect(origin: .zero, size: displayed)
+        return Framed(visibleRect: whole, slices: [
+            StudentPageSlice(pageIndex: pageIndex, page: page, drawing: drawing, inkRevision: inkRevision, frame: whole)
+        ], margin: MirrorGeometry.fullPageMargin)
+    }
+
     /// True when the student view would draw exactly the same frame for both, so a republish can be skipped.
     func showsSameFrame(as other: StudentPageSnapshot) -> Bool {
         sessionID == other.sessionID && documentID == other.documentID && pageIndex == other.pageIndex
@@ -337,10 +359,25 @@ struct StudentDisplayView: View {
                     StudentPageSurface(snapshot: snapshot, framing: model.framing, liveInk: model.liveInk, laser: model.laser,
                                        laserTrail: model.laserTrail)
                 case .teacherCopyPrivate: Text("Teacher copy · private").font(.largeTitle).foregroundStyle(.white)
-                case .none: Text("No worksheet selected").foregroundStyle(.white)
+                case .none: StudentIdleMark()
                 }
             }
         }.ignoresSafeArea()
+    }
+}
+
+/// What the projector shows while no worksheet is open, such as in the library (EP92): the Ember star alone on
+/// black. It draws no text at all, so no worksheet, folder or subject title can reach the class.
+struct StudentIdleMark: View {
+    var body: some View {
+        GeometryReader { proxy in
+            let height = min(proxy.size.height * 0.16, proxy.size.width * 0.16 / EmberStar.aspectRatio)
+            EmberStar()
+                .fill(EmberStar.brandRed)
+                .frame(width: height * EmberStar.aspectRatio, height: height)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -360,14 +397,6 @@ private struct StudentPageSurface: UIViewRepresentable {
 /// frames; it never rasterises a page or a drawing. Live ink is vector shape layers above the bitmaps: a Pencil move
 /// only replaces a path, and never re-rasterises the page or its committed ink.
 final class StudentPageDrawingView: UIView {
-    /// What one frame shows: a rect in page space and the pages placed in it.
-    private struct Scene {
-        struct Item { let pageIndex: Int; let page: PDFPage; let drawing: PKDrawing; let inkRevision: UInt64; let frame: CGRect }
-        let visibleRect: CGRect
-        let items: [Item]
-        let margin: CGFloat
-    }
-
     private static let light = UITraitCollection(userInterfaceStyle: .light)
     private static let clearPixel: CGImage? = {
         let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = false
@@ -439,7 +468,7 @@ final class StudentPageDrawingView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        guard let snapshot, let scene = scene(for: snapshot) else {
+        guard let snapshot, let scene = snapshot.framed(framing) else {
             viewport.isHidden = true
             placedPages = [:]
             layoutLiveInk()
@@ -451,7 +480,7 @@ final class StudentPageDrawingView: UIView {
         let local = CGRect(origin: .zero, size: target.size)
         liveLayer.frame = local
         placedPages = [:]
-        while pageLayers.count < scene.items.count {
+        while pageLayers.count < scene.slices.count {
             let page = CALayer(); page.backgroundColor = UIColor.white.cgColor
             let ink = CALayer()
             // The ink multiplies into its page, as on the iPad (EP71).
@@ -461,8 +490,8 @@ final class StudentPageDrawingView: UIView {
             pageLayers.append(page); inkLayers.append(ink)
         }
         for (index, (page, ink)) in zip(pageLayers, inkLayers).enumerated() {
-            guard index < scene.items.count else { page.isHidden = true; ink.isHidden = true; continue }
-            let item = scene.items[index]
+            guard index < scene.slices.count else { page.isHidden = true; ink.isHidden = true; continue }
+            let item = scene.slices[index]
             let frame = MirrorGeometry.map(item.frame, from: scene.visibleRect, to: local)
             page.isHidden = false; ink.isHidden = false
             page.frame = frame; ink.frame = frame
@@ -543,20 +572,6 @@ final class StudentPageDrawingView: UIView {
         LaserDotStyle.style(laserLayer, diameter: LaserDotStyle.studentDiameter(for: liveLayer.bounds.size))
         laserLayer.position = center
         laserLayer.isHidden = false
-    }
-
-    private func scene(for snapshot: StudentPageSnapshot) -> Scene? {
-        if framing == .presenterPage, let visibleRect = snapshot.visibleRect, !snapshot.slices.isEmpty {
-            return Scene(visibleRect: visibleRect, items: snapshot.slices.map {
-                .init(pageIndex: $0.pageIndex, page: $0.page, drawing: $0.drawing, inkRevision: $0.inkRevision, frame: $0.frame)
-            }, margin: 0)
-        }
-        let displayed = snapshot.page.displayedSize
-        guard displayed.width > 0, displayed.height > 0 else { return nil }
-        let whole = CGRect(origin: .zero, size: displayed)
-        return Scene(visibleRect: whole, items: [
-            .init(pageIndex: snapshot.pageIndex, page: snapshot.page, drawing: snapshot.drawing, inkRevision: snapshot.inkRevision, frame: whole)
-        ], margin: MirrorGeometry.fullPageMargin)
     }
 
     /// A white, opaque bitmap of the page's crop box at `scale` pixels per point.
