@@ -30,6 +30,8 @@ struct WireCodecTests {
             .error(requestID(6), .storageFailed),
             .getDigest(requestID(7)),
             .digest(requestID(7), sha256: hash),
+            .present(Data([1, 2, 3])),
+            .presentReply(Data([4])),
         ]
     }
 
@@ -67,7 +69,7 @@ struct WireCodecTests {
                 [6, 0, 0, 0, 8, 1, 2, 3, 4, 10, 11, 12, 13])
         #expect([UInt8](WireCodec.encode(.error(nil, .stalled))) == [9, 0, 0, 0, 6, 0, 0, 0, 0, 0, 5])
         let hello = WireCodec.encode(.hello(WireLimits.standard.hello(role: .client)))
-        #expect(hello == rawHello(role: 1))
+        #expect(hello == rawHello(role: 1, versions: (1, 4)))
         #expect([UInt8](hello.prefix(9)) == [1, 0, 0, 0, 17] + Array("EMBR".utf8))
     }
 
@@ -112,7 +114,7 @@ struct WireCodecTests {
     @Test func unknownFrameTypeIsRejectedFromItsFirstByte() {
         #expect(Self.violation(Data([0xee])) == .unknownFrameType(0xee))
         #expect(Self.violation(Data([0])) == .unknownFrameType(0))
-        #expect(Self.violation(WireCodec.encode(.cancel(requestID(1))) + Data([17])) == .unknownFrameType(17))
+        #expect(Self.violation(WireCodec.encode(.cancel(requestID(1))) + Data([19])) == .unknownFrameType(19))
     }
 
     @Test func frameTypesFromTheWrongDirectionAreRejectedBeforeTheirPayload() {

@@ -9,14 +9,14 @@ struct WireSessionTests {
 
     @Test func handshakeNegotiatesVersionOne() {
         var pair = SessionPair(provider: TestProvider())
-        #expect(pair.client.phase == .ready(version: 3))
-        #expect(pair.server.phase == .ready(version: 3))
+        #expect(pair.client.phase == .ready(version: 4))
+        #expect(pair.server.phase == .ready(version: 4))
         #expect(pair.client.start(now: wireT0).outbound.isEmpty)
     }
 
     @Test func serverRefusesAClientWithNoCommonVersion() {
         var server = WireServerSession(provider: TestProvider(), now: wireT0)
-        let out = server.receive(rawHello(role: 1, versions: (4, 5)), now: wireT0)
+        let out = server.receive(rawHello(role: 1, versions: (5, 6)), now: wireT0)
         #expect(out.outbound == [.error(nil, .unsupportedVersion)])
         #expect(out.events == [.closed(.unsupportedVersion)])
         #expect(out.closeTransport)
@@ -175,7 +175,7 @@ struct WireSessionTests {
         var pair = SessionPair(provider: TestProvider(manifestValue: manifest), clientLimits: try WireLimits(maxManifestBytes: 1_024))
         let (id, request) = try pair.client.requestManifest(now: wireT0)
         #expect(pair.toClient(pair.toServer(request)).events == [.failed(id, .manifestTooLarge)])
-        #expect(pair.client.phase == .ready(version: 3))
+        #expect(pair.client.phase == .ready(version: 4))
     }
 
     @Test func unreadableAndInvalidManifestsFailOnlyTheirRequest() throws {
@@ -186,7 +186,7 @@ struct WireSessionTests {
         let (second, _) = try pair.client.requestManifest(now: wireT0)
         let garbage = pair.client.receive(WireCodec.encode(.manifest(second, json: Data("{\"version\": 9}".utf8))), now: wireT0)
         #expect(garbage.events == [.failed(second, .invalidManifest)])
-        #expect(pair.client.phase == .ready(version: 3))
+        #expect(pair.client.phase == .ready(version: 4))
     }
 
     // MARK: - File transfer and flow control
@@ -342,7 +342,7 @@ struct WireSessionTests {
         #expect(pair.client.requestsInFlight == 0)
         let ignored = pair.toServer(cancel)
         #expect(ignored.outbound.isEmpty && ignored.events.isEmpty)
-        #expect(pair.server.phase == .ready(version: 3))
+        #expect(pair.server.phase == .ready(version: 4))
         // A WINDOW that crosses the END is ignored the same way.
         #expect(pair.server.receive(WireCodec.encode(.window(id, increment: 10)), now: wireT0).outbound.isEmpty)
     }

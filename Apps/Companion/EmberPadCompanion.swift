@@ -13,6 +13,7 @@ struct EmberPadCompanion: App {
     @StateObject private var pairing: CompanionPairingModel
     @StateObject private var sync: CompanionSyncModel
     @StateObject private var loginItem = CompanionLoginItemModel()
+    @StateObject private var present: CompanionPresentModel
 #if DEBUG
     @ObservedObject private var peerHello = CompanionPeerHelloModel.shared
 #endif
@@ -23,12 +24,14 @@ struct EmberPadCompanion: App {
 #endif
         let model = CompanionModel()
         let pairing = CompanionPairingModel()
-        let sync = CompanionSyncModel()
+        let present = CompanionPresentModel()
+        let sync = CompanionSyncModel(presentHost: present.host)
         pairing.onCredentialChange = { [weak sync] in sync?.serve($0) }
         model.onPrepared = { [weak sync] in sync?.refreshOutbox() }
         _model = StateObject(wrappedValue: model)
         _pairing = StateObject(wrappedValue: pairing)
         _sync = StateObject(wrappedValue: sync)
+        _present = StateObject(wrappedValue: present)
     }
 
     var body: some Scene {
@@ -61,6 +64,8 @@ struct EmberPadCompanion: App {
             )
             .onAppear { loginItem.reload() }
             .frame(width: 340)
+            Divider()
+            CompanionPresentSection(model: present).frame(width: 340, alignment: .leading)
 #if DEBUG
             Divider()
             CompanionPeerHelloSection(model: peerHello).frame(width: 340)

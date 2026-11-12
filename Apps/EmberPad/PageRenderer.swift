@@ -640,16 +640,20 @@ extension EditorScreen {
         .accessibilityHint(chrome.readOnly ? "Shows the tools so the pages take ink again" : "Hides the tools so the pages take no ink")
         Menu {
             WorksheetSharingRows(framing: $presentation.studentFraming)
+            PresentOnMacRows(present: presentation.present)
         } label: {
             HStack(spacing: 2) {
                 if pillState.showsHeaderPill { SharePillLabel(state: pillState, short: shortPill) }
+                // EP93: Present on Mac's light sits on the student-view icon, where the control is.
                 HeaderIcon(symbol: "airplayvideo")
+                    .overlay(alignment: .topTrailing) { PresentStatusDot(present: presentation.present).padding(6) }
             }
         }
         .accessibilityLabel("Sharing: \(pillState.accessibilityText)")
         Menu {
             pageRows
             WorksheetSharingRows(framing: $presentation.studentFraming)
+            PresentOnMacRows(present: presentation.present)
             Button {} label: {
                 HStack { Text("Record lesson"); Spacer(); PhaseTag(text: "Phase 3") }
             }.disabled(true)

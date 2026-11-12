@@ -223,5 +223,8 @@ final class CountingRelay: @unchecked Sendable {
         return lock.withLock { (upBytes, downBytes) }
     }
 
+    /// Bytes relayed so far, up and down.
+    var counts: (up: Int, down: Int) { lock.withLock { (upBytes, downBytes) } }
+
     func stop() { listener.cancel() }
 }

@@ -22,6 +22,8 @@ public enum WireClientEvent: Equatable, Sendable {
     case failed(WireRequestID, WireRequestFailure)
     /// Version 2: the server stored the PUT, or (`alreadyHeld`) already had these bytes and kept no new copy.
     case putCompleted(WireRequestID, alreadyHeld: Bool)
+    /// Version 4: one presentation answer from the Mac, opaque to the session (`PresentCodec`).
+    case presentReply(Data)
     case closed(WireCloseReason)
 }
 
@@ -179,6 +181,19 @@ public struct WireClientSession: Sendable {
 
     /// The server negotiated a version with GET_DIGEST (3 or later).
     public var supportsDigest: Bool { (version ?? 0) >= WireProtocol.digestVersion }
+
+    /// The peer negotiated version 4 or later, so it takes PRESENT.
+    public var supportsPresent: Bool { (version ?? 0) >= WireProtocol.presentVersion }
+
+    /// Version 4: one PRESENT carrying `bytes` (`PresentCodec`), sent outside any request.
+    public mutating func present(_ bytes: Data) throws(WireSessionError) -> WireClientOutput {
+        guard case .ready = phase else { throw .notReady }
+        guard supportsPresent else { throw .unsupportedByPeer }
+        guard !bytes.isEmpty, bytes.count <= Int(WireProtocol.maxPresentBytes) else { throw .putTooLarge }
+        var out = WireClientOutput()
+        out.outbound.append(.present(bytes))
+        return out
+    }
 
     /// Version 2: offer `file` to the server under `hash`, with `metadata` for its receiver. Bytes flow only as the
     /// server grants credit: call `pullPuts` whenever `hasPendingPutData`. The request ends with exactly one
@@ -350,6 +365,8 @@ public struct WireClientSession: Sendable {
             receivePutDone(id, alreadyHeld: alreadyHeld, &out)
         case (.ready(let version), .digest(let id, let hash)) where version >= WireProtocol.digestVersion:
             receiveDigest(id, hash, &out)
+        case (.ready(let version), .presentReply(let bytes)) where version >= WireProtocol.presentVersion:
+            out.events.append(.presentReply(bytes))
         default:
             violate(.unexpectedFrame(message.type), &out)
         }

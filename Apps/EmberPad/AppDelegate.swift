@@ -21,6 +21,7 @@ final class AppEnvironment {
                                     inbox: documents.appendingPathComponent("Inbox", isDirectory: true), syncFolder: syncFolder)
         let keychain = PairingKeychain()
         pairing = PairingController(keychain: keychain)
+        presentation.present.credential = { try keychain.load() }
         // What the paired Mac holds of the ink backup (EP-33), kept beside the library, never inside it.
         sync = SyncClient(library: library, folder: syncFolder, credential: { try keychain.load() },
                           backupLedger: support.appendingPathComponent("Backup/ledger.json"))
@@ -67,6 +68,8 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
     func sceneDidBecomeActive(_ scene: UIScene) {
         environment?.presentation.mainSceneActive = true
+        // EP93: a Present link closed for the lock screen or background reconnects at once.
+        environment?.presentation.present.becameActive()
         Task { await environment?.library.fileInbox() }
         // Launch and every return to the foreground (EP-24). Networking runs only while EmberPad is active.
         environment?.sync.sync()
@@ -79,7 +82,10 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
         environment?.sync.suspend()
         environment?.library.flushForBackground()
     }
-    func sceneDidEnterBackground(_ scene: UIScene) { environment?.library.flushForBackground() }
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        environment?.library.flushForBackground()
+        environment?.presentation.present.enteredBackground()
+    }
     func scene(_ scene: UIScene, openURLContexts contexts: Set<UIOpenURLContext>) { importURLs(contexts) }
     private func importURLs(_ contexts: Set<UIOpenURLContext>) {
         guard !contexts.isEmpty, let environment else { return }

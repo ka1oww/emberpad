@@ -28,6 +28,24 @@ public enum LibrarySyncConnector {
                                                       timeout: connectTimeout)
     }
 
+    /// The paired Mac's sync service, named directly (EP93). The iPad already knows the name from pairing, so there is
+    /// nothing to search for: Network.framework resolves it when a connection starts, over a shared Wi-Fi network or,
+    /// with `includePeerToPeer`, over peer-to-peer Wi-Fi with no network at all.
+    public static func pairedMac(_ credential: PairingCredential) -> NWEndpoint {
+        .service(name: credential.serviceID, type: PairingTLS.serviceType, domain: "local.", interface: nil)
+    }
+
+    /// One Present connection attempt (EP93). Even attempts dial the paired Mac by name; odd ones browse for it first,
+    /// which recovers when the name resolves to an address the Mac no longer has. Both allow peer-to-peer Wi-Fi and
+    /// use the pairing's TLS-PSK. Short timeouts, because Present retries on its own within a second or two.
+    public static func connectForPresent(_ credential: PairingCredential, attempt: Int,
+                                         timeout: Duration = .seconds(4)) async throws -> NetworkWireTransport {
+        let endpoint = attempt % 2 == 0 ? pairedMac(credential)
+            : try await findMac(serviceID: credential.serviceID, timeout: timeout)
+        return try await NetworkWireTransport.connect(to: endpoint, using: PairingTLS.parameters(for: credential, includePeerToPeer: true),
+                                                      timeout: timeout)
+    }
+
     /// The Bonjour endpoint of the Mac advertising `serviceID`, once it is seen.
     public static func findMac(serviceID: String, includePeerToPeer: Bool = true, domain: String? = nil,
                                timeout: Duration = .seconds(8)) async throws -> NWEndpoint {

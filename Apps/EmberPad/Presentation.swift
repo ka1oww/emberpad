@@ -307,6 +307,8 @@ final class StudentDisplayModel: ObservableObject {
 @MainActor
 final class PresentationState: ObservableObject {
     let student = StudentDisplayModel()
+    /// Present on Mac (EP93): streams `student` to the paired Companion while the teacher has it on.
+    lazy var present = PresentController(student: student)
     /// The main scene's screen is being captured: Screen Recording, or mirroring to another screen.
     /// Only the pairing camera preview acts on it; answers follow `otherDisplayAttached` (EP54).
     @Published var captureActive = false

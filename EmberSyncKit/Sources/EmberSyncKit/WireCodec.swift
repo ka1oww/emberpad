@@ -62,6 +62,8 @@ public enum WireCodec {
         case .digest(let id, let hash):
             payload.appendBigEndian(id.rawValue)
             payload += hash.wireBytes
+        case .present(let bytes), .presentReply(let bytes):
+            payload += bytes
         }
         precondition(payload.count <= Int(UInt32.max), "Wire payloads are bounded far below 4 GiB")
         out.append(message.type.rawValue)
@@ -235,6 +237,8 @@ public struct WireFrameDecoder: Sendable {
         case .putEnd: 12...12
         case .putDone: 5...5
         case .digest: 36...36
+        case .present: 1...WireProtocol.maxPresentBytes
+        case .presentReply: 1...WireProtocol.maxPresentReplyBytes
         }
     }
 
@@ -307,6 +311,10 @@ public struct WireFrameDecoder: Sendable {
             let id = try requestID()
             guard let hash = ContentHash(wireBytes: reader.bytes(32)) else { throw .malformedPayload(type) }
             return .digest(id, sha256: hash)
+        case .present:
+            return .present(Data(reader.rest()))
+        case .presentReply:
+            return .presentReply(Data(reader.rest()))
         }
     }
 }

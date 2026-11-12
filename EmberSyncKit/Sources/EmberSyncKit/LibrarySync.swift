@@ -330,8 +330,8 @@ public struct LibrarySyncDownloader: Sendable {
                 queue = []
                 progress(status)
                 try finish()
-            case .putCompleted, .digest:
-                // The download makes no PUT and asks for no digest.
+            case .putCompleted, .digest, .presentReply:
+                // The download makes no PUT, asks for no digest and never presents.
                 break
             }
         }
@@ -456,7 +456,7 @@ public struct LibrarySyncDownloader: Sendable {
                     backup?.report.interrupted = true
                     backup?.done = true
                 }
-            case .ready, .manifest, .digest, .chunk, .completed:
+            case .ready, .manifest, .digest, .chunk, .completed, .presentReply:
                 break
             }
         }

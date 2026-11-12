@@ -1,21 +1,29 @@
 import Foundation
 
-/// The private EmberPad sync protocol, versions 1 to 3. Frames are `type (1 byte) | payload length (4 bytes,
+/// The private EmberPad sync protocol, versions 1 to 4. Frames are `type (1 byte) | payload length (4 bytes,
 /// big-endian) | payload`, and every integer is big-endian. The client (iPad) opens with HELLO, the server (Mac)
 /// answers HELLO, then the client asks for the manifest and fetches files by SHA-256 with credit-based flow control.
 /// Version 2 adds one upward message family, PUT: the client sends a file to the server (the EP-33 ink backup) with
 /// the same credit-based flow control in the other direction. Both peers advertise a version range and use the
 /// highest they share, so a version-1 peer never sees a PUT frame. Version 3 adds one small request, GET_DIGEST: the
 /// SHA-256 of the manifest the server would serve, so the iPad can ask whether the library changed for a few dozen
-/// bytes instead of the whole manifest. The protocol is transport-agnostic: sessions
+/// bytes instead of the whole manifest. Version 4 adds Present (EP93): the iPad streams what its student view shows
+/// as PRESENT frames and the Mac answers with PRESENT_REPLY, on a connection that carries nothing else. The protocol
+/// is transport-agnostic: sessions
 /// consume and produce bytes and never open a connection themselves.
 public enum WireProtocol {
     public static let magic: [UInt8] = Array("EMBR".utf8)
-    public static let supportedVersions: ClosedRange<UInt16> = 1...3
+    public static let supportedVersions: ClosedRange<UInt16> = 1...4
     /// The first version that carries PUT.
     public static let putVersion: UInt16 = 2
     /// The first version that carries GET_DIGEST.
     public static let digestVersion: UInt16 = 3
+    /// The first version that carries PRESENT and PRESENT_REPLY.
+    public static let presentVersion: UInt16 = 4
+    /// The largest PRESENT payload: one presentation update, which may carry a page's PDF.
+    public static let maxPresentBytes: UInt32 = 16_777_216
+    /// The largest PRESENT_REPLY payload.
+    public static let maxPresentReplyBytes: UInt32 = 65_536
     /// The largest file one PUT may carry.
     public static let maxPutBytes: UInt64 = 268_435_456
     /// The largest PUT metadata payload (the backup item's JSON header).
@@ -112,12 +120,17 @@ public enum WireMessageType: UInt8, Sendable, CaseIterable {
     case getDigest = 15
     /// Version 3. Server to client: that SHA-256, the terminal frame of a GET_DIGEST.
     case digest
+    /// Version 4. Client to server: one presentation update (`PresentCodec`), outside any request.
+    case present = 17
+    /// Version 4. Server to client: the presentation's answer (`PresentCodec`), outside any request.
+    case presentReply
 
     /// Frame types a client may send; the server accepts only these.
     public static let clientToServer: Set<Self> = [.hello, .getManifest, .get, .window, .cancel, .error, .put, .putData, .putEnd,
-                                                   .getDigest]
+                                                   .getDigest, .present]
     /// Frame types a server may send; the client accepts only these.
-    public static let serverToClient: Set<Self> = [.hello, .manifest, .data, .end, .error, .putWindow, .putDone, .digest]
+    public static let serverToClient: Set<Self> = [.hello, .manifest, .data, .end, .error, .putWindow, .putDone, .digest,
+                                                   .presentReply]
     /// Frame types that exist only from version 2. A session that negotiated version 1 treats them as violations.
     public static let version2: Set<Self> = [.put, .putData, .putWindow, .putEnd, .putDone]
 }
@@ -148,6 +161,10 @@ public enum WireMessage: Equatable, Sendable {
     case getDigest(WireRequestID)
     /// Version 3: the SHA-256 of those bytes.
     case digest(WireRequestID, sha256: ContentHash)
+    /// Version 4: one opaque presentation update from the iPad.
+    case present(Data)
+    /// Version 4: one opaque presentation answer from the Mac.
+    case presentReply(Data)
 
     public var type: WireMessageType {
         switch self {
@@ -167,6 +184,8 @@ public enum WireMessage: Equatable, Sendable {
         case .putDone: .putDone
         case .getDigest: .getDigest
         case .digest: .digest
+        case .present: .present
+        case .presentReply: .presentReply
         }
     }
 }
@@ -210,7 +229,8 @@ public enum WireRequestFailure: Error, Equatable, Sendable {
 /// Misuse of a session's API by the local caller, never caused by the peer.
 public enum WireSessionError: Error, Equatable, Sendable {
     case notReady, tooManyRequests, requestIDsExhausted, overConsumed, invalidLimits
-    /// The peer negotiated a version without this request (PUT needs version 2, GET_DIGEST version 3).
+    /// The peer negotiated a version without this request (PUT needs version 2, GET_DIGEST version 3, PRESENT
+    /// version 4).
     case unsupportedByPeer
     /// A PUT larger than `WireProtocol.maxPutBytes` or with metadata outside its bounds.
     case putTooLarge
