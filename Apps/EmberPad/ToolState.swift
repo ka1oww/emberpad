@@ -72,8 +72,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// Draw and hold for a straight fountain-pen line, like GoodNotes' pen
     /// "Draw and Hold". On by default.
     var penDrawAndHold = true
-    /// Scribble to erase (EP82): a fountain-pen scribble over ink erases the strokes it covers
-    /// (`ScribbleErase`). On by default, as GoodNotes' Pen Gestures are.
+    /// Scribble to erase (EP82, EP90): a fountain-pen scribble over ink erases the strokes it goes
+    /// through (`ScribbleErase`), outlined while it is drawn. On by default, as GoodNotes' Pen Gestures are.
     var scribbleToErase = true
     /// Whether the teacher has set the Scribble to erase switch. Builds before EP82 kept it off and its switch
     /// disabled, so a stored value without this was never a choice and decodes to today's default instead.

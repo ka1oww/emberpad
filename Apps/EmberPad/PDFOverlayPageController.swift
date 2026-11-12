@@ -57,6 +57,17 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// True while EmberPad itself swaps a canvas drawing, so the change is not read as new ink.
     var isReplacingStroke = false
     private var pendingInkSwaps: [Int: Int] = [:]
+    /// EP90: the fountain-pen stroke in progress, watched as a scribble to erase, and the toolbar lasso's own line
+    /// round the ink it will erase. Internal for tests and for `ScribblePreview.swift`.
+    var scribblePreview: ScribblePreview?
+    let scribbleOutline = InkSelectionController.makeLassoPath()
+    var scribbleUpdateScheduled = false
+    var scribbleExpiry: DispatchWorkItem?
+    /// Each page's drawing revision, counted on every change to its canvas, so the page's strokes as the scribble
+    /// test reads them (`scribbleInkCache`) are read again only when they change.
+    var scribbleRevisions: [Int: Int] = [:]
+    var scribbleInkCache: ScribbleInk?
+    var scribbleInkCachePage: Int?
     /// The thin guide shown while a held highlighter stroke is about to snap straight.
     private let holdGuide = PDFOverlayPageController.makeHoldGuide()
     /// EmberPad's own ink selection, for circle to lasso and the toolbar lasso (EP-29).
@@ -207,6 +218,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         liveStroke = nil
         student.cancelLiveStroke()
         livePen.cancel()
+        clearScribblePreview()
         hideLaser(animated: false)
         clearLaserTrail()
         hideEraserCircle()
@@ -263,6 +275,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if highlighterErase?.canvas === canvas { finishHighlighterErase() }
         inkSelection.canvasWillLeave(canvas)
         livePen.remove(page: index)
+        if scribblePreview?.page == index, canvases[index] === canvas { clearScribblePreview() }
         if canvases[index] === canvas {
             canvases.removeValue(forKey: index)
             pageViews.removeValue(forKey: index)
@@ -271,6 +284,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+        if let page = canvases.first(where: { $0.value === canvasView })?.key { scribbleRevisions[page, default: 0] += 1 }
         guard !isReplacingStroke, let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
         if let erase = highlighterErase, erase.canvas === canvasView {
             // Only highlighter strokes are on the canvas; the page keeps its set-aside ink.
@@ -290,11 +304,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         session.update(canvasView.drawing, page: page)
         // Read before the snaps consume it: this change is a stroke the Pencil just drew.
         let drawn = Self.holdRecognizer(on: canvasView)?.pencilStroke ?? false
-        // The Shape tool's strokes become shapes (EP64); they are never lines to straighten or loops to lasso.
+        // The Shape tool's strokes become shapes (EP64); they are never lines to straighten or loops to lasso. A
+        // scribble goes first, held or not: the erase it previewed while drawn is the one it does (EP90).
         let taken = tools.current == .shape
             ? makeShapeIfDrawn(canvasView, page: page, previousCount: previousCount)
-            : straightenIfHeld(canvasView, page: page, previousCount: previousCount)
-                || eraseIfScribbled(canvasView, page: page, previousCount: previousCount, drawn: drawn)
+            : eraseIfScribbled(canvasView, page: page, previousCount: previousCount, drawn: drawn)
+                || straightenIfHeld(canvasView, page: page, previousCount: previousCount)
         applyPenFeel(canvasView, page: page, previousCount: previousCount, taken: taken)
     }
 
@@ -367,6 +382,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// `tools.pencilTool` when they are created.
     func apply(_ tool: any PKTool) {
         finishHighlighterErase()
+        clearScribblePreview()
         inkSelection.dismiss()
         hideEraserCircle()
         for canvas in canvases.values { canvas.tool = tool }
@@ -488,6 +504,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 showLivePen(page: page)
             }
             holdGuide.removeFromSuperlayer()
+            clearScribblePreview()
             eraserStrokeSpace = nil
             activeCanvas?.resignFirstResponder()
         }
@@ -540,6 +557,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             finishHighlighterErase()
             inkSelection.dismiss()
             hideEraserCircle()
+            clearScribblePreview()
         }
         pdfView.isUserInteractionEnabled = enabled
     }
@@ -622,6 +640,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 livePen.begin(page: liveStroke.page, color: settings.penColor, toolWidth: settings.penWidth,
                               settings: settings.penFeel, samples: samples, now: livePenClock())
                 showLivePen(page: liveStroke.page)
+                beginScribblePreview(page: liveStroke.page, samples: samples.map(\.location))
+            } else {
+                clearScribblePreview()
             }
         case .moved(let samples, let predicted):
             guard let liveStroke else { return }
@@ -630,6 +651,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 livePen.extend(samples: samples, predicted: predicted)
                 showLivePen(page: liveStroke.page)
             }
+            extendScribblePreview(samples: samples.map(\.location))
         case .ended(let samples):
             guard let liveStroke else { return }
             self.liveStroke = nil
@@ -639,10 +661,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 showLivePen(page: liveStroke.page)
                 scheduleLivePenExpiry()
             }
+            liftScribblePreview(samples: samples.map(\.location))
         case .cancelled:
             let page = liveStroke?.page
             liveStroke = nil
             student.cancelLiveStroke()
+            clearScribblePreview()
             if livePen.writing != nil {
                 livePen.cancel()
                 if let page { showLivePen(page: page) }
@@ -1033,6 +1057,7 @@ extension PDFOverlayPageController {
         }
         liveStroke = nil
         student.cancelLiveStroke()
+        clearScribblePreview()
         // The press's stroke is never committed, so it leaves the live pen too.
         livePen.cancel()
         showLivePen(page: page)
@@ -1185,21 +1210,32 @@ extension PDFOverlayPageController {
 
 extension PDFOverlayPageController {
     /// After PencilKit commits a fountain-pen stroke the Pencil just drew, with "Scribble to erase" on: when the
-    /// stroke is a scribble over ink (`ScribbleErase`), the strokes it covers and the scribble itself go, as one undo
-    /// step named "Scribble to Erase", a turn of the run loop later as the snaps (PencilKit closes its undo group
-    /// first). The scribble's ink is never on the page: PencilKit's copy is clear and the live pen draws it until
-    /// the page has drawn the erase. A scribble over no ink stays as drawn. Returns whether the stroke is taken.
+    /// stroke is a scribble over ink (`ScribbleErase`), the strokes it goes through and the scribble itself go, as one
+    /// undo step named "Scribble to Erase", a turn of the run loop later as the snaps (PencilKit closes its undo group
+    /// first). What goes is what the preview outlined as the Pencil lifted (EP90). The scribble's ink is never on the
+    /// page: PencilKit's copy is clear and the live pen draws it until the page has drawn the erase. A scribble over
+    /// no ink stays as drawn. Returns whether the stroke is taken.
     func eraseIfScribbled(_ canvas: PKCanvasView, page: Int, previousCount: Int, drawn: Bool) -> Bool {
+        guard canvas.drawing.strokes.count == previousCount + 1, let scribble = canvas.drawing.strokes.last else { return false }
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         guard drawn, !readOnly, tools.current == .pen, tools.settings.scribbleToErase,
               undoManager?.isUndoing != true, undoManager?.isRedoing != true,
-              canvas.drawing.strokes.count == previousCount + 1, let scribble = canvas.drawing.strokes.last,
-              PenFeel.isPenInk(scribble.ink.inkType) else { return false }
-        let erased = ScribbleErase.erasedIndices(scribble: scribble, in: Array(canvas.drawing.strokes.dropLast()))
+              PenFeel.isPenInk(scribble.ink.inkType) else {
+            if let preview = scribblePreview, preview.page == page, preview.matches(scribble) { clearScribblePreview() }
+            return false
+        }
+        let base = Array(canvas.drawing.strokes.dropLast())
+        let erased = finishScribblePreview(page: page, scribble: scribble, base: base)
+            ?? ScribbleErase.erasedIndices(scribble: scribble, in: base)
         guard !erased.isEmpty else { return false }
+        // The stroke is the scribble's, whatever a hold at its end would have made of it.
+        Self.holdRecognizer(on: canvas)?.consumeHold()
         let count = canvas.drawing.strokes.count
+        let preview = scribblePreview
         DispatchQueue.main.async { [weak self] in
-            self?.eraseScribble(page: page, strokeCount: count, erasing: erased, undoManager: undoManager)
+            guard let self else { return }
+            self.eraseScribble(page: page, strokeCount: count, erasing: erased, undoManager: undoManager)
+            if let preview, self.scribblePreview === preview { self.clearScribblePreview() }
         }
         return true
     }
