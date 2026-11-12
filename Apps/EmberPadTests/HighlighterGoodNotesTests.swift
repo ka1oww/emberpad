@@ -65,7 +65,7 @@ final class HighlighterGoodNotesTests: XCTestCase {
                               "the highlight is cut where the eraser crossed it")
             }
             XCTAssertEqual(canvas.drawing.dataRepresentation(), drawing.dataRepresentation(), "\(mode): the canvas holds the whole page again")
-            XCTAssertTrue(canvas.subviews.compactMap { $0 as? PKCanvasView }.allSatisfy { $0 === (canvas.superview as? PageInkView)?.livePenLayer },
+            XCTAssertTrue(canvas.subviews.compactMap { $0 as? PKCanvasView }.allSatisfy { (canvas.superview as? PageInkView)?.isLivePenLayer($0) == true },
                           "\(mode): the set-aside layer is gone")
             XCTAssertEqual(canvas.undoManager?.undoActionName, "Erase", "\(mode): one undo step")
             canvas.undoManager?.undo()

@@ -556,9 +556,7 @@ final class ShapeToolTests: XCTestCase {
 
     /// Lets the swap that waits a turn of the main queue run.
     static func settle() async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.async { continuation.resume() }
-        }
+        await InkSettle.settle()
     }
 
     static func canvas(_ controller: PDFOverlayPageController, _ session: DocumentSession) throws -> PKCanvasView {

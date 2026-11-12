@@ -541,9 +541,7 @@ final class StraightHighlighterTests: XCTestCase {
 
     /// Lets the replacement that waits a turn of the main queue run.
     private static func settle() async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.async { continuation.resume() }
-        }
+        await InkSettle.settle()
     }
 
     private static func canvas(_ controller: PDFOverlayPageController, _ session: DocumentSession, page: Int) throws -> PKCanvasView {

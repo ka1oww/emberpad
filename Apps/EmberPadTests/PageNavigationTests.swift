@@ -163,6 +163,7 @@ final class PageNavigationTests: XCTestCase {
     }
 
     private func settle() async {
+        await InkSettle.settle()
         for _ in 0..<3 {
             await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
         }
