@@ -76,12 +76,17 @@ final class LibraryController: ObservableObject {
     /// Selected subject in the sidebar. `nil` shows every subject.
     @Published var selectedSubject: String? {
         didSet {
-            if selectedSubject != oldValue { folderPath = [] }
+            if selectedSubject != oldValue { folderPath = []; folderMotion = .none }
             reconcileSelection()
         }
     }
     /// The open folder below `selectedSubject`, outermost first; empty at the subject's top level.
     @Published var folderPath: [String] = []
+    /// How the detail column last moved (EP81): `.push` after a folder card opened a folder, `.pop` after Back or a
+    /// breadcrumb, `.none` after the sidebar or a library change moved it. The view slides only for a push or a pop.
+    private(set) var folderMotion: FolderMotion = .none
+    /// After a pop, the folder the user came back out of, so the parent can bring its card into view.
+    private(set) var folderToReveal: String?
     @Published var sidebarSelection: LibrarySidebarSelection = .allSubjects {
         didSet {
             guard sidebarSelection != oldValue else { return }
@@ -91,6 +96,8 @@ final class LibraryController: ObservableObject {
             case .archived: break
             }
             folderPath = []
+            folderMotion = .none
+            folderToReveal = nil
         }
     }
     /// When true the detail column shows archived Student worksheets instead of the folders.
@@ -134,17 +141,31 @@ final class LibraryController: ObservableObject {
             selectedSubject = folder.subject
             folderPath = folder.path
         }
+        folderMotion = .push
+        folderToReveal = nil
+    }
+
+    /// The folder card a page that just arrived should bring into view, once: after a pop it is the folder the user
+    /// came back out of, so the parent shows where they were rather than its top.
+    func takeFolderToReveal() -> String? {
+        defer { folderToReveal = nil }
+        return folderToReveal
     }
 
     /// The back control: up one folder.
     func closeFolder() {
         guard !folderPath.isEmpty else { return }
-        folderPath.removeLast()
+        showFolder(depth: folderPath.count - 1)
     }
 
     /// A breadcrumb tap: the subject's top level at depth 0, or the folder `depth` levels down.
     func showFolder(depth: Int) {
         guard depth >= 0, depth < folderPath.count else { return }
+        // The folder card to bring back into view is the one on the way down from the folder shown now.
+        folderToReveal = selectedSubject.map {
+            LibraryFolderItem(subject: $0, path: Array(folderPath.prefix(depth + 1)), itemCount: 0).id
+        }
+        folderMotion = .pop
         folderPath = Array(folderPath.prefix(depth))
     }
 
@@ -162,7 +183,7 @@ final class LibraryController: ObservableObject {
         let pool = Self.browsableCards(in: documents).filter { $0.subject == subject }
         var path = folderPath
         while !path.isEmpty && LibraryFolders.documents(pool, under: path).isEmpty { path.removeLast() }
-        if path != folderPath { folderPath = path }
+        if path != folderPath { folderPath = path; folderMotion = .none; folderToReveal = nil }
     }
 
     /// Pure grouping helper: subjects with counts over the Student copies the folders show.
@@ -247,15 +268,18 @@ final class LibraryController: ObservableObject {
     }
 
     static func sortCards(_ docs: [DocumentRecord], order: LibrarySortOrder) -> [DocumentRecord] {
-        docs.sorted {
+        // Each card's own title is worked out once rather than on every comparison, which matters in a large folder.
+        let titles = order == .name ? docs.map { LibraryFolders.ownTitle(of: $0) } : []
+        return docs.indices.sorted { i, j in
+            let a = docs[i], b = docs[j]
             if order == .name {
-                let lhs = LibraryFolders.ownTitle(of: $0), rhs = LibraryFolders.ownTitle(of: $1)
+                let lhs = titles[i], rhs = titles[j]
                 if lhs != rhs { return LibraryFolders.nameOrder(lhs, rhs) }
             }
-            if $0.importedAt != $1.importedAt { return order == .oldestFirst ? $0.importedAt < $1.importedAt : $0.importedAt > $1.importedAt }
-            if $0.title != $1.title { return $0.title < $1.title }
-            return $0.id.uuidString < $1.id.uuidString
-        }
+            if a.importedAt != b.importedAt { return order == .oldestFirst ? a.importedAt < b.importedAt : a.importedAt > b.importedAt }
+            if a.title != b.title { return a.title < b.title }
+            return a.id.uuidString < b.id.uuidString
+        }.map { docs[$0] }
     }
 
     /// Long-press Archive from the card context menu. Teacher copies never reach this path
