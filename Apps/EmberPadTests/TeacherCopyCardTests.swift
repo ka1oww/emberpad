@@ -416,6 +416,215 @@ final class TeacherCopyCardTests: XCTestCase {
         }
     }
 
+    // MARK: Edge swipe (EP97): pull a hidden panel in from the worksheet's edge
+
+    private let body = CGRect(x: 0, y: 120, width: 1180, height: 700)
+
+    func testTheEdgeSwipeOnlyStartsWithinTheBandOfTheEdgeThePanelIsHiddenOff() {
+        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: 0, side: .leading, bodyMinX: 0, bodyMaxX: 1180))
+        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: 24, side: .leading, bodyMinX: 0, bodyMaxX: 1180))
+        XCTAssertFalse(TeacherCopySlide.edgeSwipeStarts(atX: 25, side: .leading, bodyMinX: 0, bodyMaxX: 1180), "Past the band is the page's")
+        XCTAssertFalse(TeacherCopySlide.edgeSwipeStarts(atX: 1170, side: .leading, bodyMinX: 0, bodyMaxX: 1180), "The other edge does nothing")
+        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: 1170, side: .trailing, bodyMinX: 0, bodyMaxX: 1180), "Mirrored on the right")
+        XCTAssertFalse(TeacherCopySlide.edgeSwipeStarts(atX: 10, side: .trailing, bodyMinX: 0, bodyMaxX: 1180))
+        // With the library sidebar shown beside the worksheet, the band is the body's own edge, not the sidebar's.
+        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: 330, side: .leading, bodyMinX: 320, bodyMaxX: 1180))
+        XCTAssertFalse(TeacherCopySlide.edgeSwipeStarts(atX: 10, side: .leading, bodyMinX: 320, bodyMaxX: 1180))
+    }
+
+    func testTheEdgeSwipeOnlyBeginsMovingInwardsAndSideways() {
+        XCTAssertNil(TeacherCopySlide.beginsEdgeSwipe(dx: 6, dy: 2, side: .leading), "Undecided inside the slop")
+        XCTAssertEqual(TeacherCopySlide.beginsEdgeSwipe(dx: 14, dy: 4, side: .leading), true, "Left edge, towards the right")
+        XCTAssertEqual(TeacherCopySlide.beginsEdgeSwipe(dx: -14, dy: 4, side: .leading), false, "Outwards is not a pull")
+        XCTAssertEqual(TeacherCopySlide.beginsEdgeSwipe(dx: 4, dy: 14, side: .leading), false, "Vertical stays the page's scroll")
+        XCTAssertEqual(TeacherCopySlide.beginsEdgeSwipe(dx: -14, dy: 4, side: .trailing), true, "Right edge, towards the left")
+        XCTAssertEqual(TeacherCopySlide.beginsEdgeSwipe(dx: 14, dy: 4, side: .trailing), false)
+    }
+
+    func testAFingerFromTheLeftEdgeTowardsTheRightRunsTheSwipeAndOpensThePanel() {
+        let (window, swipe, phases) = edgeSwipe(side: .leading)
+        defer { window.isHidden = true }
+        var finger = FingerSwipe(window: window, recognizer: swipe)
+        XCTAssertEqual(finger.down(at: CGPoint(x: 8, y: 400)), .possible)
+        XCTAssertEqual(finger.move(by: 6), .possible, "Undecided inside the slop")
+        XCTAssertEqual(finger.move(by: 60), .began)
+        XCTAssertEqual(finger.move(by: 140), .changed)
+        XCTAssertEqual(finger.lift(), .ended)
+        XCTAssertEqual(phases().first, .changed(66))
+        guard case .ended(let translation, let velocity)? = phases().last else { return XCTFail("No release") }
+        XCTAssertEqual(translation, 206)
+        XCTAssertGreaterThan(velocity, 0)
+        // That release, from the panel's hidden rest, docks it back on its side, as the tab's swipe does.
+        let size = TeacherCopyCardGeometry.size(in: landscape)
+        XCTAssertEqual(TeacherCopySlide.release(side: .leading, isOpen: false, translation: translation, velocity: 0,
+                                                panelSize: size, in: landscape), .dock(.leading))
+    }
+
+    func testTheRightEdgeMirrorsIt() {
+        let (window, swipe, phases) = edgeSwipe(side: .trailing)
+        defer { window.isHidden = true }
+        var finger = FingerSwipe(window: window, recognizer: swipe)
+        finger.down(at: CGPoint(x: 1172, y: 400))
+        XCTAssertEqual(finger.move(by: -80), .began)
+        XCTAssertEqual(finger.lift(), .ended)
+        XCTAssertEqual(phases().first, .changed(-80))
+    }
+
+    func testTouchesAwayFromTheEdgeOrMovingTheWrongWayAreLeftToThePage() {
+        for (start, dx, dy) in [(CGFloat(200), CGFloat(80), CGFloat(0)), (8, -40, 0), (8, 3, 60), (1172, 80, 0)] {
+            let (window, swipe, phases) = edgeSwipe(side: .leading)
+            var finger = FingerSwipe(window: window, recognizer: swipe)
+            let tracked = swipe.tracks(FingerTouchStub(window: window, at: CGPoint(x: start, y: 400)))
+            XCTAssertEqual(tracked, start < 100, "Only a finger landing in the band is tracked; elsewhere it fails as it lands")
+            finger.down(at: CGPoint(x: start, y: 400))
+            finger.move(by: dx, dy: dy)
+            finger.move(by: dx, dy: dy)
+            finger.lift()
+            XCTAssertTrue(phases().isEmpty, "start \(start), moved (\(dx), \(dy)): never the panel's")
+            window.isHidden = true
+        }
+        // The toolbar strip above the body is not its edge.
+        let (window, swipe, _) = edgeSwipe(side: .leading)
+        defer { window.isHidden = true }
+        var finger = FingerSwipe(window: window, recognizer: swipe)
+        XCTAssertFalse(swipe.tracks(FingerTouchStub(window: window, at: CGPoint(x: 8, y: 60))))
+        finger.down(at: CGPoint(x: 8, y: 60))
+        finger.move(by: 80)
+        XCTAssertTrue(swipe.state != .began && swipe.state != .changed)
+    }
+
+    func testTheEdgeSwipeIsFingerOnlySoAPencilStrokeFromTheEdgeStillInks() {
+        let swipe = TeacherCopyEdgeSwipeRecognizer()
+        XCTAssertEqual(swipe.allowedTouchTypes, [NSNumber(value: UITouch.TouchType.direct.rawValue)])
+        XCTAssertFalse(swipe.allowedTouchTypes.contains(NSNumber(value: UITouch.TouchType.pencil.rawValue)))
+        // Ink and the eraser are Pencil-only recognisers: they never wait for the edge swipe.
+        let ink = UIPanGestureRecognizer()
+        ink.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        XCTAssertFalse(swipe.shouldBeRequiredToFail(by: ink))
+        XCTAssertFalse(swipe.shouldBeRequiredToFail(by: UITapGestureRecognizer()))
+    }
+
+    func testAtTheEdgeItWinsOverThePagesScrollTheBackSwipeAndTheSidebar() {
+        let swipe = TeacherCopyEdgeSwipeRecognizer()
+        XCTAssertTrue(swipe.shouldBeRequiredToFail(by: UIScrollView().panGestureRecognizer), "The page's finger scroll waits")
+        XCTAssertTrue(swipe.shouldBeRequiredToFail(by: UIScreenEdgePanGestureRecognizer()), "The interactive pop waits")
+        XCTAssertTrue(swipe.shouldBeRequiredToFail(by: UIPanGestureRecognizer()))
+        // A finger on the pull tab is the tab's own swipe, so the two never drive the panel together.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1180, height: 820))
+        let tabView = UIView(frame: CGRect(x: 0, y: 300, width: 34, height: 150)), label = UIView()
+        tabView.addSubview(label)
+        window.addSubview(tabView)
+        let tab = SlideOverSwipeRecognizer()
+        tabView.addGestureRecognizer(tab)
+        XCTAssertFalse(swipe.shouldBeRequiredToFail(by: tab))
+        swipe.body = { window.bounds }
+        XCTAssertFalse(swipe.tracks(FingerTouchStub(window: window, view: label, at: CGPoint(x: 8, y: 380))), "The tab's")
+        XCTAssertTrue(swipe.tracks(FingerTouchStub(window: window, at: CGPoint(x: 8, y: 600))), "The edge below the tab")
+    }
+
+    /// The worksheet's real navigation shape (a split view whose detail stack pushes the editor with its bar hidden,
+    /// sidebar hidden as when a worksheet opens). Lists every finger pan in the window as of now and checks that each
+    /// one waits for the edge swipe. The list goes to `EP97_SHOTS_DIR/edge-owners.txt` for the PR.
+    func testEveryFingerPanThatCouldOwnTheLeftEdgeWaitsForTheEdgeSwipe() throws {
+        let card = TeacherCopyCardState(defaults: freshDefaults())
+        card.dock(.leading)
+        card.close()
+        let probe = EdgeOwnersProbe(card: card)
+        let (window, controller) = host(probe, size: landscape, scheme: .light)
+        defer { window.isHidden = true }
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 1.2))
+        let edge = try XCTUnwrap(window.gestureRecognizers?.compactMap { $0 as? TeacherCopyEdgeSwipeRecognizer }.first,
+                                 "The edge swipe sits on the window")
+        XCTAssertTrue(edge.isEnabled, "Hidden, the edge swipe is live")
+        let all = allRecognizers(in: window)
+        let pans = all.filter { $0 is UIPanGestureRecognizer && !($0 is SlideOverSwipeRecognizer) }
+        var lines = ["Finger-capable pans in the worksheet window (landscape \(Int(landscape.width))x\(Int(landscape.height)), sidebar hidden):"]
+        for pan in pans {
+            let fingers = TeacherCopyEdgeSwipeRecognizer.takesFingers(pan)
+            let waits = edge.shouldBeRequiredToFail(by: pan)
+            lines.append("- \(type(of: pan)) on \(pan.view.map { String(describing: type(of: $0)) } ?? "nil"), enabled \(pan.isEnabled), fingers \(fingers), waits for edge swipe \(waits)")
+            if fingers { XCTAssertTrue(waits, "\(type(of: pan)) would take the edge from the Teacher copy") }
+        }
+        XCTAssertTrue(pans.contains { $0.view is UIScrollView }, "The page's scroll is among them")
+        let directory = ProcessInfo.processInfo.environment["EP97_SHOTS_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.temporaryDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try lines.joined(separator: "\n").write(to: directory.appendingPathComponent("edge-owners.txt"), atomically: true, encoding: .utf8)
+        _ = controller
+    }
+
+    /// Drives the real overlay over a synthetic worksheet: the panel is hidden off the left edge, the edge swipe on the
+    /// window is live, and a finger swipe in from the left edge brings the panel out with the finger and docks it.
+    /// Opened, the edge swipe stands down. Frames go to `EP97_SHOTS_DIR` (`TEST_RUNNER_EP97_SHOTS_DIR`), else tmp.
+    func testSwipingInFromTheLeftEdgeBringsTheHiddenPanelOutWithTheFinger() throws {
+        let url = try writeSyntheticTeacherPDF()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let card = TeacherCopyCardState(defaults: freshDefaults())
+        card.dock(.leading)
+        card.close()
+        let worksheet = SyntheticWorksheetBody(content: .pdf(url), title: "Synthetic Worksheet 1", card: card)
+            .frame(width: landscape.width, height: landscape.height)
+        let (window, controller) = host(worksheet, size: landscape, scheme: .light)
+        defer { window.isHidden = true }
+        var frames: [UIImage] = []
+        func frame(after seconds: TimeInterval = 0.04) {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: seconds))
+            frames.append(snapshot(of: controller.view))
+        }
+        let edge = try XCTUnwrap(window.gestureRecognizers?.compactMap { $0 as? TeacherCopyEdgeSwipeRecognizer }.first)
+        XCTAssertTrue(edge.isEnabled)
+        XCTAssertEqual(edge.side, .leading)
+        XCTAssertEqual(edge.body().width, landscape.width, "The band is measured against the body's own frame")
+        XCTAssertFalse(findPDFView(in: controller.view))
+
+        frame()
+        // A real finger at the left edge, moving right, is taken by the edge swipe.
+        var finger = FingerSwipe(window: window, recognizer: edge)
+        XCTAssertEqual(finger.down(at: CGPoint(x: 6, y: 600)), .possible)
+        XCTAssertEqual(finger.move(by: 40, steps: 4), .changed, "The finger is the panel's")
+        XCTAssertEqual(edge.translation, 40)
+        frame()
+        XCTAssertTrue(findPDFView(in: controller.view), "The panel follows the finger out of the edge")
+        // The rest of the swipe goes straight to its callback: iOS resets a recogniser fed stand-in touches once the
+        // run loop turns with no real touch down, so the frames are driven the way the EP95 strip drives them.
+        for translation in [120, 200, 280] as [CGFloat] {
+            edge.onSwipe(.changed(translation))
+            frame()
+        }
+        edge.onSwipe(.ended(280, velocity: 700))
+        for _ in 0..<6 { frame() }
+        frame(after: 0.8)
+        XCTAssertTrue(card.isOpen, "Swiping in from the left edge opens it")
+        XCTAssertEqual(card.side, .leading)
+        XCTAssertFalse(edge.isEnabled, "Open, the edge belongs to the page again")
+
+        let directory = ProcessInfo.processInfo.environment["EP97_SHOTS_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.temporaryDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for (index, image) in frames.enumerated() {
+            try XCTUnwrap(image.pngData()).write(to: directory.appendingPathComponent(String(format: "edge-%02d.png", index)))
+        }
+    }
+
+    /// An edge swipe on a bare window whose whole bounds below a 120 pt bar are the body.
+    private func edgeSwipe(side: TeacherCopyPanelSide) -> (UIWindow, TeacherCopyEdgeSwipeRecognizer, () -> [SlideOverSwipeRecognizer.Phase]) {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1180, height: 820))
+        window.rootViewController = UIViewController()
+        window.makeKeyAndVisible()
+        let swipe = TeacherCopyEdgeSwipeRecognizer()
+        swipe.side = side
+        let body = self.body
+        swipe.body = { body }
+        window.addGestureRecognizer(swipe)
+        let box = PhaseBox()
+        swipe.onSwipe = { box.phases.append($0) }
+        return (window, swipe, { box.phases })
+    }
+
+    private func allRecognizers(in view: UIView) -> [UIGestureRecognizer] {
+        (view.gestureRecognizers ?? []) + view.subviews.flatMap { allRecognizers(in: $0) }
+    }
+
     // MARK: Helpers
 
     private func swipeRecognizers(in view: UIView) -> [SlideOverSwipeRecognizer] {
@@ -565,6 +774,100 @@ private struct SyntheticWorksheetBody: View {
             .background(Color.white)
             .frame(maxWidth: .infinity)
             TeacherCopyCardOverlay(content: content, documentTitle: title, card: card)
+        }
+    }
+}
+
+private final class PhaseBox { var phases: [SlideOverSwipeRecognizer.Phase] = [] }
+
+/// A stand-in finger touch (the Pencil stub's counterpart): reports its own location, time and a direct type.
+private final class FingerTouchStub: UITouch {
+    private weak var stubWindow: UIWindow?
+    private weak var stubView: UIView?
+    var point: CGPoint
+    var time = ProcessInfo.processInfo.systemUptime
+    init(window: UIWindow, view: UIView? = nil, at point: CGPoint) {
+        stubWindow = window; stubView = view ?? window; self.point = point; super.init()
+    }
+    override var window: UIWindow? { stubWindow }
+    override var view: UIView? { stubView }
+    override var timestamp: TimeInterval { time }
+    override var type: UITouch.TouchType { .direct }
+    override func location(in view: UIView?) -> CGPoint { (view ?? stubWindow)?.convert(point, from: nil) ?? point }
+}
+
+/// One finger fed straight to a recogniser, in window coordinates, turning the run loop between samples.
+@MainActor
+private struct FingerSwipe {
+    let window: UIWindow
+    let recognizer: UIGestureRecognizer
+    private var touch: FingerTouchStub?
+
+    init(window: UIWindow, recognizer: UIGestureRecognizer) { self.window = window; self.recognizer = recognizer }
+
+    /// Each call returns the recogniser's state as the touch left it, before the run loop turns (UIKit resets a
+    /// failed or ended recogniser to possible on the next turn).
+    @discardableResult
+    mutating func down(at point: CGPoint) -> UIGestureRecognizer.State {
+        let touch = FingerTouchStub(window: window, at: point)
+        self.touch = touch
+        recognizer.touchesBegan([touch], with: UIEvent())
+        return turn()
+    }
+
+    @discardableResult
+    func move(by dx: CGFloat, dy: CGFloat = 0, steps: Int = 1) -> UIGestureRecognizer.State {
+        guard let touch else { return recognizer.state }
+        var state = recognizer.state
+        for _ in 0..<steps {
+            touch.point.x += dx / CGFloat(steps)
+            touch.point.y += dy / CGFloat(steps)
+            touch.time = ProcessInfo.processInfo.systemUptime
+            recognizer.touchesMoved([touch], with: UIEvent())
+            state = turn()
+        }
+        return state
+    }
+
+    @discardableResult
+    mutating func lift() -> UIGestureRecognizer.State {
+        guard let touch else { return recognizer.state }
+        touch.time = ProcessInfo.processInfo.systemUptime
+        recognizer.touchesEnded([touch], with: UIEvent())
+        self.touch = nil
+        return turn()
+    }
+
+    private func turn() -> UIGestureRecognizer.State {
+        let state = recognizer.state
+        RunLoop.main.run(until: Date().addingTimeInterval(0.016))
+        return state
+    }
+}
+
+/// The worksheet's navigation shape from `LibraryView`: a split view (sidebar hidden, as when a worksheet opens) whose
+/// detail stack has pushed an editor with its navigation bar hidden, a scrolling page and the Teacher copy overlay.
+private struct EdgeOwnersProbe: View {
+    let card: TeacherCopyCardState
+    @State private var visibility = NavigationSplitViewVisibility.detailOnly
+    @State private var pushed = true
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $visibility) {
+            List { Text("Synthetic Subject") }
+        } detail: {
+            NavigationStack {
+                Text("Synthetic library")
+                    .navigationDestination(isPresented: $pushed) {
+                        ZStack {
+                            ScrollView([.vertical, .horizontal]) {
+                                Color.white.frame(width: 1600, height: 2400)
+                            }
+                            TeacherCopyCardOverlay(content: .noTeacherCopy, documentTitle: "Synthetic Worksheet 1", card: card)
+                        }
+                        .toolbar(.hidden, for: .navigationBar)
+                    }
+            }
         }
     }
 }
