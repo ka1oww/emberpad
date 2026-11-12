@@ -27,9 +27,9 @@ Needs Pillow and NumPy (``pip install pillow numpy``). Run:
 from __future__ import annotations
 
 import importlib.util
-import sys
 import json
 import pathlib
+import sys
 import xml.etree.ElementTree as ET
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
@@ -177,7 +177,7 @@ def write_badge(big_art: dict[bool, Image.Image]) -> None:
 def glyph_geometry():
     """Star silhouette and nib cut-outs in 18 pt glyph coordinates, from the
     small rendition (its bolder nib reads better at menu-bar size)."""
-    star, (sx, sy, sw, sh), (vx, vy, vr) = star_and_nib(SMALL_SRC)
+    star, (sx, sy, sw, _sh), (vx, vy, vr) = star_and_nib(SMALL_SRC)
     ys = [y for _, y in star]
     xs = [x for x, _ in star]
     k = GLYPH_STAR_PT / (max(ys) - min(ys))
