@@ -288,10 +288,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let previousCount = session.drawing(on: page).strokes.count
         inkSelection.pageDidChange(page)
         session.update(canvasView.drawing, page: page)
+        // Read before the snaps consume it: this change is a stroke the Pencil just drew.
+        let drawn = Self.holdRecognizer(on: canvasView)?.pencilStroke ?? false
         // The Shape tool's strokes become shapes (EP64); they are never lines to straighten or loops to lasso.
         let taken = tools.current == .shape
             ? makeShapeIfDrawn(canvasView, page: page, previousCount: previousCount)
             : straightenIfHeld(canvasView, page: page, previousCount: previousCount)
+                || eraseIfScribbled(canvasView, page: page, previousCount: previousCount, drawn: drawn)
         applyPenFeel(canvasView, page: page, previousCount: previousCount, taken: taken)
     }
 
@@ -1169,6 +1172,66 @@ extension PDFOverlayPageController {
             isReplacingStroke = false
         }
         session.update(drawing, page: page)
+    }
+}
+
+// MARK: - Scribble to erase (EP82)
+
+extension PDFOverlayPageController {
+    /// After PencilKit commits a fountain-pen stroke the Pencil just drew, with "Scribble to erase" on: when the
+    /// stroke is a scribble over ink (`ScribbleErase`), the strokes it covers and the scribble itself go, as one undo
+    /// step named "Scribble to Erase", a turn of the run loop later as the snaps (PencilKit closes its undo group
+    /// first). The scribble's ink is never on the page: PencilKit's copy is clear and the live pen draws it until
+    /// the page has drawn the erase. A scribble over no ink stays as drawn. Returns whether the stroke is taken.
+    func eraseIfScribbled(_ canvas: PKCanvasView, page: Int, previousCount: Int, drawn: Bool) -> Bool {
+        let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
+        guard drawn, !readOnly, tools.current == .pen, tools.settings.scribbleToErase,
+              undoManager?.isUndoing != true, undoManager?.isRedoing != true,
+              canvas.drawing.strokes.count == previousCount + 1, let scribble = canvas.drawing.strokes.last,
+              PenFeel.isPenInk(scribble.ink.inkType) else { return false }
+        let erased = ScribbleErase.erasedIndices(scribble: scribble, in: Array(canvas.drawing.strokes.dropLast()))
+        guard !erased.isEmpty else { return false }
+        let count = canvas.drawing.strokes.count
+        DispatchQueue.main.async { [weak self] in
+            self?.eraseScribble(page: page, strokeCount: count, erasing: erased, undoManager: undoManager)
+        }
+        return true
+    }
+
+    /// Takes the newest stroke on `page` (the scribble) and the strokes at `indices` off the page as one undo step:
+    /// PencilKit's own undo action for the scribble is popped first, then one action swaps between the page before
+    /// the scribble and the page after the erase, so undo brings the erased ink back without the scribble and redo
+    /// erases it again. Does nothing if the page has moved on since the scribble was committed, or the top undo step
+    /// is not the scribble; the scribble then stays as ink.
+    @discardableResult
+    func eraseScribble(page: Int, strokeCount: Int, erasing indices: [Int], undoManager: UndoManager?) -> Bool {
+        guard let canvas = canvases[page], canvas.drawing.strokes.count == strokeCount, strokeCount > 0,
+              undoManager?.isUndoing != true, undoManager?.isRedoing != true else { return false }
+        isReplacingStroke = true
+        defer { isReplacingStroke = false }
+        if let undoManager, undoManager.canUndo {
+            undoManager.undo()
+            guard canvas.drawing.strokes.count == strokeCount - 1 else {
+                // The top undo step was not the scribble: put it back and leave the ink as drawn.
+                undoManager.redo()
+                return false
+            }
+        } else {
+            canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes.dropLast())
+        }
+        let before = canvas.drawing
+        let erased = Set(indices)
+        let after = PKDrawing(strokes: before.strokes.indices.filter { !erased.contains($0) }.map { before.strokes[$0] })
+        canvas.drawing = after
+        inkSelection.pageDidChange(page)
+        session.update(after, page: page)
+        if let undoManager {
+            undoManager.beginUndoGrouping()
+            registerDrawingSwap(on: undoManager, page: page, restoring: before, then: after)
+            undoManager.setActionName("Scribble to Erase")
+            undoManager.endUndoGrouping()
+        }
+        return true
     }
 }
 

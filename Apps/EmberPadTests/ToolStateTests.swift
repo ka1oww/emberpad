@@ -39,7 +39,7 @@ final class ToolStateTests: XCTestCase {
         XCTAssertTrue(s.straightHighlighter)
         XCTAssertTrue(s.highlighterAlwaysStraight, "GoodNotes' Draw in Straight Line is on")
         XCTAssertTrue(s.penDrawAndHold, "GoodNotes' pen Draw and Hold is on")
-        XCTAssertFalse(s.scribbleToErase, "scribble to erase is off until it ships")
+        XCTAssertTrue(s.scribbleToErase, "GoodNotes' Scribble to Erase is on by default (EP82)")
         XCTAssertTrue(s.circleToLasso)
     }
 
@@ -89,6 +89,7 @@ final class ToolStateTests: XCTestCase {
         tools.setHighlighterAlwaysStraight(false)
         tools.setPenDrawAndHold(false)
         tools.setCircleToLasso(false)
+        tools.setScribbleToErase(false)
 
         let relaunched = ToolState(defaults: defaults)
         XCTAssertEqual(relaunched.settings, tools.settings)
@@ -107,14 +108,17 @@ final class ToolStateTests: XCTestCase {
         XCTAssertFalse(s.highlighterAlwaysStraight)
         XCTAssertFalse(s.penDrawAndHold)
         XCTAssertFalse(s.circleToLasso)
+        XCTAssertFalse(s.scribbleToErase, "the teacher's choice to turn it off is kept")
     }
 
-    func testScribbleToEraseStoredOnByEarlierBuildsComesBackOff() {
-        // Earlier builds stored scribble to erase as on although nothing implemented it.
-        let stored = #"{"current":"pen","scribbleToErase":true,"straightHighlighter":false}"#
-        defaults.set(Data(stored.utf8), forKey: ToolState.defaultsKey)
+    func testScribbleToEraseStoredByEarlierBuildsTakesTheDefault() {
+        // Builds before EP82 stored it on (before EP38) or off (its switch disabled), never by the teacher's choice.
+        for stored in [true, false] {
+            let json = #"{"current":"pen","scribbleToErase":\#(stored),"straightHighlighter":false}"#
+            defaults.set(Data(json.utf8), forKey: ToolState.defaultsKey)
+            XCTAssertTrue(ToolState(defaults: defaults).settings.scribbleToErase, "stored \(stored) before EP82 comes back on")
+        }
         let s = ToolState(defaults: defaults).settings
-        XCTAssertFalse(s.scribbleToErase)
         XCTAssertFalse(s.straightHighlighter, "other stored switches are kept")
         XCTAssertTrue(s.highlighterAlwaysStraight, "a switch earlier builds never stored takes its default")
         XCTAssertTrue(s.penDrawAndHold)
