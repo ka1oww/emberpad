@@ -281,9 +281,7 @@ final class EraserPhase4Tests: XCTestCase {
     }
 
     private func settle() async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.async { continuation.resume() }
-        }
+        await InkSettle.settle()
     }
 
     private func canvas(_ controller: PDFOverlayPageController, _ session: DocumentSession, page: Int = 0) throws -> PKCanvasView {

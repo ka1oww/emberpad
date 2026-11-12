@@ -439,6 +439,8 @@ final class InkSelectionController {
         guard let host, let canvas = host.canvases[page],
               let data = pasteboard.data(forPasteboardType: Self.pasteboardType),
               let clip = try? PKDrawing(data: data), !clip.strokes.isEmpty else { return false }
+        // Ink still waiting to land goes first, so the paste is its own undo step on top of it (EP94).
+        host.landInkEdits()
         let before = canvas.drawing
         let (after, indices) = SelectionEdit.pasted(clip, into: before, at: point, page: canvas.pageSpace.bounds)
         dismiss()

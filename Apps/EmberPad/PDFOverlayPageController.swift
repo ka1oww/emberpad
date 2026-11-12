@@ -56,7 +56,27 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var inkScaleWork: DispatchWorkItem?
     /// True while EmberPad itself swaps a canvas drawing, so the change is not read as new ink.
     var isReplacingStroke = false
-    private var pendingInkSwaps: [Int: Int] = [:]
+    /// EP94: the strokes PencilKit has begun and not yet committed, the Pencil touch now on the glass, and the ink
+    /// edits (pen feel, straight line, shape, scribble erase, circle lasso) waiting for both to clear before they
+    /// change a page's drawing. Internal for tests.
+    var inkFlights = InkFlights()
+    weak var pencilTouch: UITouch?
+    private(set) var pendingInkEdits: [PendingInkEdit] = []
+    /// Pen strokes PencilKit threw away, whose live pen copies go on the page when the edits land.
+    private(set) var recoveredInk: [RecoveredInk] = []
+    /// Pages whose undo or redo may have brought back PencilKit's clear copy of a stroke, to make visible.
+    private var clearInkPages: Set<Int> = []
+    /// When the latest lift and commit were, which decide when the queued changes may land.
+    var inkTiming = InkLandingTiming()
+    /// The display frame the queued changes wait for, the pause they wait out, and the check for strokes that never
+    /// commit.
+    private var inkLandingFrame: CADisplayLink?
+    private var inkPauseWait: Timer?
+    private var inkFlightCheck: ResponsiveDeadline?
+    /// The live pen's stroke for the touch whose commit is being handled, while its edits are queued.
+    private var committingLiveID: UInt64?
+    /// Every controller that has queued ink changes, for tests to wait on.
+    static let inkWorkers = NSHashTable<PDFOverlayPageController>.weakObjects()
     /// EP90: the fountain-pen stroke in progress, watched as a scribble to erase, and the toolbar lasso's own line
     /// round the ink it will erase. Internal for tests and for `ScribblePreview.swift`.
     var scribblePreview: ScribblePreview?
@@ -211,6 +231,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        landInkEdits()
+        cancelInkLandingWaits()
         publishing = false
         inkScaleWork?.cancel()
         finishHighlighterErase()
@@ -272,6 +294,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         guard let canvas = (overlayView as? PageInkView)?.canvas else { return }
         // Saving already happened through the model delegate; this callback only releases views.
         let index = session.pdf.index(for: page)
+        if canvases[index] === canvas { landInkEdits() }
+        inkFlights.remove(canvas: ObjectIdentifier(canvas))
         if highlighterErase?.canvas === canvas { finishHighlighterErase() }
         inkSelection.canvasWillLeave(canvas)
         livePen.remove(page: index)
@@ -284,13 +308,19 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-        if let page = canvases.first(where: { $0.value === canvasView })?.key { scribbleRevisions[page, default: 0] += 1 }
-        guard !isReplacingStroke, let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
+        guard let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
+        scribbleRevisions[page, default: 0] += 1
+        guard !isReplacingStroke else { return }
+        // EP94: a change to the drawing lands only on a later display frame than this.
+        inkTiming.lastCommit = CACurrentMediaTime()
+        // EP94: the drawing is read once for the whole change. Every read of `canvas.drawing` copies each stroke on
+        // the page, and the checks below used to make seven to ten of them per stroke.
+        let drawing = canvasView.drawing
         if let erase = highlighterErase, erase.canvas === canvasView {
             // Only highlighter strokes are on the canvas; the page keeps its set-aside ink.
             erase.changed = true
             inkSelection.pageDidChange(page)
-            session.update(HighlighterOnlyErase.merge(before: erase.before, erased: canvasView.drawing), page: page)
+            session.update(HighlighterOnlyErase.merge(before: erase.before, erased: drawing), page: page)
             if erase.lifted {
                 // The partial eraser's cut, committed after the lift: the pen ink can go back now.
                 erase.pendingFinish?.cancel()
@@ -299,64 +329,54 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             }
             return
         }
+        let strokes = drawing.strokes
         let previousCount = session.drawing(on: page).strokes.count
         inkSelection.pageDidChange(page)
-        session.update(canvasView.drawing, page: page)
+        let undoManager = inkSelection.undoManagerOverride ?? canvasView.undoManager
+        let replaying = undoManager?.isUndoing == true || undoManager?.isRedoing == true
+        defer { committingLiveID = nil }
+        if !replaying, strokes.count == previousCount + 1, let stroke = strokes.last {
+            // PencilKit committed a new stroke: it no longer holds it.
+            committingLiveID = inkFlights.committed(canvas: ObjectIdentifier(canvasView),
+                                                    creationDate: stroke.path.creationDate)?.liveID
+        }
         // Read before the snaps consume it: this change is a stroke the Pencil just drew.
         let drawn = Self.holdRecognizer(on: canvasView)?.pencilStroke ?? false
         // The Shape tool's strokes become shapes (EP64); they are never lines to straighten or loops to lasso. A
         // scribble goes first, held or not: the erase it previewed while drawn is the one it does (EP90).
         let taken = tools.current == .shape
-            ? makeShapeIfDrawn(canvasView, page: page, previousCount: previousCount)
-            : eraseIfScribbled(canvasView, page: page, previousCount: previousCount, drawn: drawn)
-                || straightenIfHeld(canvasView, page: page, previousCount: previousCount)
-        applyPenFeel(canvasView, page: page, previousCount: previousCount, taken: taken)
+            ? makeShapeIfDrawn(canvasView, page: page, previousCount: previousCount, strokes: strokes)
+            : eraseIfScribbled(canvasView, page: page, previousCount: previousCount, drawn: drawn, strokes: strokes)
+                || straightenIfHeld(canvasView, page: page, previousCount: previousCount, strokes: strokes)
+        applyPenFeel(canvasView, page: page, previousCount: previousCount, taken: taken, strokes: strokes)
+        session.update(savedDrawing(drawing, strokes: strokes, page: page), page: page)
+        if replaying, strokes.count > previousCount {
+            // Undo and redo bring strokes back exactly as they were, never tapered twice; a clear one is made visible.
+            clearInkPages.insert(page)
+        }
+        // Anything still queued may land once this commit's frame is past.
+        scheduleInkLanding()
     }
 
-    /// After PencilKit commits a new pen stroke, swaps it, as one undo step named "Ink", for the stroke the live pen
-    /// drew from the same Pencil samples (`LivePen`), now with its end tip; the same way the straight highlighter swaps
-    /// its line. PencilKit's own ink for it was never seen. Without live samples for it, the committed points take the
-    /// pen feel instead (`PenFeel.reshaped`). A stroke already `taken` (snapped straight or turned into a lasso)
-    /// only leaves the live pen once the page has drawn it.
-    private func applyPenFeel(_ canvas: PKCanvasView, page: Int, previousCount: Int, taken: Bool) {
-        guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
+    /// After PencilKit commits a new pen stroke, queues its swap, as one undo step named "Ink", for the stroke the
+    /// live pen drew from the same Pencil samples (`LivePen`), now with its end tip; the same way the straight
+    /// highlighter swaps its line. PencilKit's own ink for it was never seen. Without live samples for it, the
+    /// committed points take the pen feel instead (`PenFeel.reshaped`). A stroke already `taken` (snapped straight,
+    /// a scribble or a lasso) has its own edit queued, which the live pen waits for in the same way.
+    private func applyPenFeel(_ canvas: PKCanvasView, page: Int, previousCount: Int, taken: Bool, strokes: [PKStroke]) {
+        guard !taken, strokes.count == previousCount + 1, let stroke = strokes.last,
               PenFeel.isPenInk(stroke.ink.inkType) else { return }
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         // Undo and redo bring strokes back exactly as they were, never tapered twice.
-        guard undoManager?.isUndoing != true, undoManager?.isRedoing != true else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, (self.pendingInkSwaps[page] ?? 0) == 0, let canvas = self.canvases[page] else { return }
-                self.restoreClearInk(on: canvas, page: page)
-            }
-            return
-        }
-        let count = canvas.drawing.strokes.count
+        guard undoManager?.isUndoing != true, undoManager?.isRedoing != true else { return }
         let settings = tools.settings
-        pendingInkSwaps[page, default: 0] += 1
-        // A turn of the run loop later, as the snaps: PencilKit closes its undo group first, and the live pen has
-        // seen the lift, which can reach it just after the commit.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.pendingInkSwaps[page, default: 1] -= 1
-            let live = self.livePen.commit(page: page, now: self.livePenClock())
-            self.scheduleLivePenExpiry()
-            if !taken {
-                let replacement = live?.stroke(lifted: true, creationDate: stroke.path.creationDate)
-                    ?? PenFeel.reshaped(stroke, settings: settings.penFeel, toolWidth: settings.penWidth,
-                                        color: settings.penColor)
-                if let replacement {
-                    self.replaceNewestStroke(page: page, strokeCount: count, with: replacement,
-                                             undoManager: undoManager, actionName: "Ink")
-                }
-            }
-            if (self.pendingInkSwaps[page] ?? 0) == 0, let canvas = self.canvases[page] {
-                self.restoreClearInk(on: canvas, page: page)
-            }
-        }
+        enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke,
+                       kind: .penFeel(settings.penFeel, toolWidth: settings.penWidth, color: settings.penColor))
     }
 
     /// Whatever the swap left behind, PencilKit's clear copy of a pen stroke, takes the pen colour back, so written
-    /// ink is never invisible. Not an undo step: the stroke is the one the page already has.
+    /// ink is never invisible. Not an undo step: the stroke is the one the page already has. Only for a canvas just
+    /// made, which holds no stroke in flight; later clear ink is made visible as edits land (EP94).
     private func restoreClearInk(on canvas: PKCanvasView, page: Int) {
         guard let restored = PenFeel.restoringClearInk(in: canvas.drawing) else { return }
         isReplacingStroke = true
@@ -373,14 +393,23 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         showLivePen(page: page)
     }
 
-    func undo() { if !readOnly { activeCanvas?.undoManager?.undo() } }
-    func redo() { if !readOnly { activeCanvas?.undoManager?.redo() } }
+    func undo() {
+        guard !readOnly else { return }
+        landInkEdits()
+        activeCanvas?.undoManager?.undo()
+    }
+    func redo() {
+        guard !readOnly else { return }
+        landInkEdits()
+        activeCanvas?.undoManager?.redo()
+    }
     @objc private func undoGesture() { undo() }
     @objc private func redoGesture() { redo() }
 
     /// The single tool path: every live canvas gets the tool; new canvases take
     /// `tools.pencilTool` when they are created.
     func apply(_ tool: any PKTool) {
+        landInkEdits()
         finishHighlighterErase()
         clearScribblePreview()
         inkSelection.dismiss()
@@ -416,6 +445,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// eraser for the whole stroke, which is how it erased nothing before EP71.
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
         if let erase = highlighterErase, erase.canvas === canvasView { erase.toolBegan = true }
+        // EP94: an inking stroke PencilKit will commit; nothing may change this page's drawing until it has.
+        if canvasView.tool is PKInkingTool, let page = canvases.first(where: { $0.value === canvasView })?.key {
+            // The live pen's stroke for the same touch, if it began first, so a loss of this one is known to be it.
+            let liveID = tools.current == .pen ? livePen.bindNewest(page: page, now: livePenClock()) : nil
+            inkFlights.began(canvas: ObjectIdentifier(canvasView), at: Date(), liveID: liveID)
+        }
     }
 
     /// The eraser lifted. Waits a turn of the run loop, like the straight-line snap, so PencilKit commits the erase
@@ -427,6 +462,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// bounds a wait for a commit that never comes, and counts only time the app was running (`ResponsiveDeadline`),
     /// so a stall right after the lift cannot use it up before PencilKit's commit lands (EP89).
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+        inkFlights.ended(canvas: ObjectIdentifier(canvasView), cancelled: pencilTouch?.phase == .cancelled)
+        inkTiming.lastLift = CACurrentMediaTime()
+        // A stroke PencilKit never commits is found by checking again while nothing else happens.
+        if !inkFlights.isEmpty { armInkFlightCheck() }
         guard tools.current == .eraser else { return }
         if let erase = highlighterErase, erase.canvas === canvasView, tools.settings.eraserMode == .partial {
             erase.lifted = true
@@ -493,6 +532,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// selection closes. The undo history is kept for when editing comes back.
     func setReadOnly(_ readOnly: Bool) {
         guard readOnly != self.readOnly else { return }
+        if readOnly { landInkEdits() }
         self.readOnly = readOnly
         if readOnly {
             finishHighlighterErase()
@@ -554,6 +594,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     func setPageInput(_ enabled: Bool) {
         if !enabled {
+            landInkEdits()
             finishHighlighterErase()
             inkSelection.dismiss()
             hideEraserCircle()
@@ -563,6 +604,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     func retire() {
+        landInkEdits()
+        cancelInkLandingWaits()
         setPageInput(false)
         publishing = false
         for canvas in canvases.values { canvas.undoManager?.removeAllActions() }
@@ -639,6 +682,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 let settings = tools.settings
                 livePen.begin(page: liveStroke.page, color: settings.penColor, toolWidth: settings.penWidth,
                               settings: settings.penFeel, samples: samples, now: livePenClock())
+                // EP94: PencilKit may have begun its stroke for this touch first.
+                if let id = livePen.writing?.id, let canvas = canvases[liveStroke.page],
+                   inkFlights.bind(canvas: ObjectIdentifier(canvas), liveID: id) {
+                    livePen.bind(id: id)
+                }
                 showLivePen(page: liveStroke.page)
                 beginScribblePreview(page: liveStroke.page, samples: samples.map(\.location))
             } else {
@@ -662,6 +710,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 scheduleLivePenExpiry()
             }
             liftScribblePreview(samples: samples.map(\.location))
+            inkTiming.lastLift = CACurrentMediaTime()
+            scheduleInkLanding()
         case .cancelled:
             let page = liveStroke?.page
             liveStroke = nil
@@ -671,12 +721,18 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 livePen.cancel()
                 if let page { showLivePen(page: page) }
             }
+            // PencilKit will most likely never commit the stroke it began for this touch.
+            if let canvas = page.flatMap({ canvases[$0] }) { inkFlights.cancelNewest(canvas: ObjectIdentifier(canvas)) }
+            inkTiming.lastLift = CACurrentMediaTime()
+            scheduleInkLanding()
         }
     }
 
     /// Draws the live pen's strokes on `page` above its committed ink.
     private func showLivePen(page: Int) {
-        (canvases[page]?.superview as? PageInkView)?.showLivePen(livePen.drawing(page: page))
+        guard let view = canvases[page]?.superview as? PageInkView else { return }
+        view.showLivePen(liftedIDs: livePen.liftedIDs(page: page), lifted: { self.livePen.liftedDrawing(page: page) },
+                         writing: livePen.writingDrawing(page: page))
     }
 
     /// Clears live strokes whose commit or page drawing never came, once they are due.
@@ -686,7 +742,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             let pages = self.livePen.pages
-            self.livePen.expire(now: self.livePenClock())
+            // While PencilKit holds a stroke it has not committed, any lifted live stroke may be it (EP94).
+            self.livePen.expire(now: self.livePenClock(), keepingLifted: !self.inkFlights.isEmpty)
             pages.forEach { self.showLivePen(page: $0) }
             self.scheduleLivePenExpiry()
         }
@@ -731,6 +788,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// included, so the eraser's touch-down sets the pen ink aside here (EP71). `eraserStrokeTarget` does the same for
     /// a touch handed straight to the recogniser.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // EP94: from this moment PencilKit has the touch, before it says it began a stroke (up to 8 ms later).
+        if gestureRecognizer === liveInk, Self.isPencil(touch) { pencilTouch = touch }
         if gestureRecognizer === eraserTouch, Self.isPencil(touch),
            let page = pageLocation(of: touch.preciseLocation(in: pdfView))?.page, let canvas = canvases[page] {
             prepareHighlighterErase(on: canvas)
@@ -750,6 +809,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             guard erase.lifted || erase.canvas !== canvas else { return }
             finishHighlighterErase()
         }
+        landInkEdits()
         beginHighlighterErase(on: canvas, undoManager: canvas.undoManager)
     }
 
@@ -1060,6 +1120,9 @@ extension PDFOverlayPageController {
         clearScribblePreview()
         // The press's stroke is never committed, so it leaves the live pen too.
         livePen.cancel()
+        inkFlights.cancelNewest(canvas: ObjectIdentifier(canvas))
+        // The loop's own pen-feel swap lands first, so the loop is the page's newest stroke and its top undo step.
+        landInkEdits()
         showLivePen(page: page)
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         return inkSelection.lassoNewestStroke(page: page, strokeCount: count, undoManager: undoManager)
@@ -1072,35 +1135,34 @@ extension PDFOverlayPageController {
     /// After PencilKit commits a stroke, swap it for a straight one when it
     /// is a line-like highlighter stroke with "Always straight" on, or a highlighter or
     /// pen stroke held still at its end with its draw-and-hold switch on. A
-    /// held closed pen loop is circle to lasso instead. The swap waits a turn
-    /// of the run loop so PencilKit finishes its commit and closes its undo
-    /// group first; the ink was already drawn, so nothing here can delay it.
-    /// Returns whether the stroke is taken (a selection, a snap, or an undo or
-    /// redo), so the pen's tip sharpness leaves it alone.
+    /// held closed pen loop is circle to lasso instead. The swap waits, queued,
+    /// until PencilKit has committed every stroke it holds (EP94); the ink was
+    /// already drawn, so nothing here can delay it. `strokes` is the page as
+    /// PencilKit committed it. Returns whether the stroke is taken (a
+    /// selection, a snap, or an undo or redo), so the pen's tip sharpness
+    /// leaves it alone.
     @discardableResult
-    private func straightenIfHeld(_ canvas: PKCanvasView, page: Int, previousCount: Int) -> Bool {
+    private func straightenIfHeld(_ canvas: PKCanvasView, page: Int, previousCount: Int, strokes: [PKStroke]) -> Bool {
         guard let hold = Self.holdRecognizer(on: canvas) else { return false }
         let held = hold.heldAtEnd
-        if !held, canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last {
+        let newStroke = strokes.count == previousCount + 1 ? strokes.last : nil
+        if !held, let stroke = newStroke {
             // Lifted without a hold: a closed loop can still be long-pressed into a selection.
-            inkSelection.noteLiftedStroke(stroke, page: page, strokeCount: canvas.drawing.strokes.count)
+            inkSelection.noteLiftedStroke(stroke, page: page, strokeCount: strokes.count)
         }
         guard held || hold.pencilStroke else { return false }
         let lineLike = hold.lineLikeAtHold
         // A hold or stroke applies to the one drawing change it ended, whatever that change was.
         hold.consumeHold()
         // Undo and redo bring strokes back exactly as they were.
-        if let undoManager = canvas.undoManager, undoManager.isUndoing || undoManager.isRedoing { return true }
-        if held, canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last, inkSelection.isLassoLoop(stroke) {
+        let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
+        if let undoManager, undoManager.isUndoing || undoManager.isRedoing { return true }
+        if held, let stroke = newStroke, inkSelection.isLassoLoop(stroke) {
             // Circle to lasso (EP-29): the same wait for PencilKit's commit as the snap below.
-            let count = canvas.drawing.strokes.count
-            let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
-            DispatchQueue.main.async { [weak self] in
-                self?.inkSelection.lassoNewestStroke(page: page, strokeCount: count, undoManager: undoManager)
-            }
+            enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke, kind: .keep(lasso: true))
             return true
         }
-        guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last else { return false }
+        guard let stroke = newStroke else { return false }
         let replacement = snapsStraight(stroke, held: held, lineLike: lineLike)
             ? StrokeSnap.straightened(stroke, level: stroke.ink.inkType == .marker ? .highlighter : .pen) : nil
         guard var straight = replacement else { return false }
@@ -1109,12 +1171,8 @@ extension PDFOverlayPageController {
             straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth,
                                         color: tools.settings.penColor) ?? straight
         }
-        let count = canvas.drawing.strokes.count
-        let undoManager = canvas.undoManager
-        DispatchQueue.main.async { [weak self] in
-            self?.replaceNewestStroke(page: page, strokeCount: count, with: straight, undoManager: undoManager,
-                                      actionName: "Straight Line")
-        }
+        enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke,
+                       kind: .replace([straight], actionName: "Straight Line"))
         return true
     }
 
@@ -1195,6 +1253,35 @@ extension PDFOverlayPageController {
 
     /// Sets a page's drawing from EmberPad's own undo and redo, whether or
     /// not its canvas is still on screen.
+    /// EP94: the undo step for `added`, strokes put on the end of `page`: undo takes them off again and redo puts
+    /// them back. It holds only those strokes, where a swap of whole drawings (`registerDrawingSwap`) holds two
+    /// copies of the page, which for every stroke written grew memory with the page's size.
+    func registerInkAppend(on undoManager: UndoManager, page: Int, strokes added: [PKStroke]) {
+        undoManager.registerUndo(withTarget: self) { controller in
+            MainActor.assumeIsolated {
+                let strokes = controller.currentDrawing(page: page).strokes
+                controller.setDrawing(PKDrawing(strokes: InkEditReplay.removing(added, from: strokes)), page: page)
+                controller.registerInkRemoval(on: undoManager, page: page, strokes: added)
+            }
+        }
+    }
+
+    /// The redo of `registerInkAppend`: puts `removed` back on the end of `page`.
+    private func registerInkRemoval(on undoManager: UndoManager, page: Int, strokes removed: [PKStroke]) {
+        undoManager.registerUndo(withTarget: self) { controller in
+            MainActor.assumeIsolated {
+                let strokes = controller.currentDrawing(page: page).strokes
+                controller.setDrawing(PKDrawing(strokes: strokes + removed), page: page)
+                controller.registerInkAppend(on: undoManager, page: page, strokes: removed)
+            }
+        }
+    }
+
+    /// The page's drawing as it is now: its canvas's while it is on screen, else the saved one.
+    private func currentDrawing(page: Int) -> PKDrawing {
+        canvases[page]?.drawing ?? session.drawing(on: page)
+    }
+
     private func setDrawing(_ drawing: PKDrawing, page: Int) {
         inkSelection.pageDidChange(page)
         if let canvas = canvases[page] {
@@ -1206,17 +1293,329 @@ extension PDFOverlayPageController {
     }
 }
 
+// MARK: - Ink edits wait for PencilKit (EP94)
+
+/// Calls the controller on a display frame without the display link keeping the controller alive.
+private final class InkFrameTarget: NSObject {
+    weak var controller: PDFOverlayPageController?
+    init(_ controller: PDFOverlayPageController) { self.controller = controller }
+    @objc func frame(_ link: CADisplayLink) {
+        MainActor.assumeIsolated {
+            guard let controller else { return link.invalidate() }
+            controller.inkLandingFrameDidFire(link)
+        }
+    }
+}
+
+extension PDFOverlayPageController {
+    /// Whether a Pencil touch is on the glass. PencilKit has it from touch-down, before it reports beginning a stroke.
+    var pencilIsDown: Bool {
+        guard let touch = pencilTouch else { return false }
+        return touch.phase != .ended && touch.phase != .cancelled
+    }
+
+    /// Whether a queued ink edit may change a page's drawing now: PencilKit holds no stroke it has not committed and
+    /// no Pencil touch is down. Setting the drawing, or popping the undo stack, at any other moment makes PencilKit
+    /// silently throw its stroke away: the ink that vanished in class (EP94).
+    var inkEditsMayLand: Bool {
+        !pencilIsDown && inkFlights.isEmpty && highlighterErase == nil && !isReplacingStroke
+    }
+
+    /// Whether any ink change is queued.
+    var hasPendingInk: Bool { !pendingInkEdits.isEmpty || !recoveredInk.isEmpty || !clearInkPages.isEmpty }
+
+    /// Queues `kind` for the stroke PencilKit just committed at `index` on `page`, whose live pen copy, if PencilKit
+    /// began it for a touch the pen drew, is `liveID`. It lands at the next safe moment (`scheduleInkLanding`).
+    func enqueueInkEdit(page: Int, index: Int, stroke: PKStroke, kind: PendingInkEdit.Kind,
+                        scribblePreview: ScribblePreview? = nil) {
+        pendingInkEdits.append(PendingInkEdit(page: page, index: index, stroke: stroke, kind: kind,
+                                              claimsLive: PenFeel.isPenInk(stroke.ink.inkType), liveID: committingLiveID,
+                                              scribblePreview: scribblePreview))
+        scheduleInkLanding()
+    }
+
+    /// The drawing to save for `page`, from the canvas's `drawing`: PencilKit's clear copy of each stroke whose edit
+    /// is still queued is saved visible, so the student view and the file never show a gap while it waits.
+    func savedDrawing(_ drawing: PKDrawing, strokes: [PKStroke], page: Int) -> PKDrawing {
+        var saved = strokes
+        var changed = false
+        for edit in pendingInkEdits where edit.page == page && edit.index < saved.count {
+            let stroke = saved[edit.index]
+            guard PenFeel.isClearInk(stroke), InkStrokeID(stroke) == InkStrokeID(edit.stroke) else { continue }
+            saved[edit.index] = PenFeel.visible(stroke)
+            changed = true
+        }
+        return changed ? PKDrawing(strokes: saved) : drawing
+    }
+
+    /// PencilKit threw these strokes away: each one the pen drew, from a touch that was not cancelled, goes on the
+    /// page from the live pen's copy, which stays drawn until it has.
+    func recoverDiscarded(_ flights: [InkFlights.Flight]) {
+        for flight in flights where flight.ended && !flight.cancelled {
+            guard let liveID = flight.liveID,
+                  let page = canvases.first(where: { ObjectIdentifier($0.value) == flight.canvas })?.key,
+                  livePen.owe(id: liveID) else { continue }
+            recoveredInk.append(RecoveredInk(page: page, liveID: liveID, began: flight.began))
+        }
+        if !recoveredInk.isEmpty { scheduleInkLanding() }
+    }
+
+    /// Asks for the queued changes to land at the next safe moment: on a display frame after PencilKit's latest
+    /// commit, while it holds no stroke and the Pencil is up, and, for the pen's own swaps, once the writing has
+    /// paused (`InkLandingTiming`). Meanwhile the live pen keeps drawing each waiting pen stroke.
+    func scheduleInkLanding() {
+        guard hasPendingInk else { return }
+        claimLivePen(final: false)
+        Self.inkWorkers.add(self)
+        guard inkLandingFrame == nil else { return }
+        let link = CADisplayLink(target: InkFrameTarget(self), selector: #selector(InkFrameTarget.frame(_:)))
+        link.add(to: .main, forMode: .common)
+        inkLandingFrame = link
+    }
+
+    /// A display frame: lands the queued changes if this frame comes after PencilKit's latest commit.
+    fileprivate func inkLandingFrameDidFire(_ link: CADisplayLink) {
+        guard inkTiming.frameIsAfterCommit(link.timestamp) else { return }
+        link.invalidate()
+        inkLandingFrame = nil
+        landInkEdits(force: false)
+    }
+
+    /// Stops waiting for a frame, a pause or a commit: the controller is leaving.
+    func cancelInkLandingWaits() {
+        inkLandingFrame?.invalidate()
+        inkLandingFrame = nil
+        inkPauseWait?.invalidate()
+        inkPauseWait = nil
+        inkFlightCheck?.cancel()
+        inkFlightCheck = nil
+    }
+
+    /// Lands every queued ink change. `force` lands them even while PencilKit holds a stroke: only from an action that
+    /// changes the drawing anyway (undo, a tool change, clearing the page, a page leaving the screen). Without it,
+    /// nothing lands until PencilKit is idle and, unless a visible edit waits, the writing has paused.
+    func landInkEdits(force: Bool = true) {
+        guard hasPendingInk else { return }
+        if !force {
+            guard inkEditsMayLand else { return armInkFlightCheck() }
+            if clearInkPages.isEmpty, !pendingInkEdits.contains(where: \.landsAtOnce) {
+                let wait = inkTiming.pauseRemaining(at: CACurrentMediaTime(), waiting: pendingInkEdits.count)
+                if wait > 0 { return armInkPause(wait) }
+            }
+        }
+        claimLivePen(final: true)
+        inkPauseWait?.invalidate()
+        inkPauseWait = nil
+        let edits = pendingInkEdits
+        let recovered = recoveredInk
+        let restore = clearInkPages
+        pendingInkEdits = []
+        recoveredInk = []
+        clearInkPages = []
+        Self.inkWorkers.remove(self)
+        let now = livePenClock()
+        let pages = Set(edits.map(\.page)).union(recovered.map(\.page)).union(restore)
+        for page in pages.sorted() {
+            land(edits.filter { $0.page == page }, recovered: recovered.filter { $0.page == page }, page: page,
+                 restoringClearInk: restore.contains(page))
+            for id in edits.lazy.filter({ $0.page == page }).compactMap(\.liveID) { livePen.landed(id: id, now: now) }
+            for item in recovered where item.page == page { livePen.landed(id: item.liveID, now: now) }
+            showLivePen(page: page)
+        }
+        for edit in edits {
+            if let preview = edit.scribblePreview, scribblePreview === preview { clearScribblePreview() }
+        }
+        scheduleLivePenExpiry()
+    }
+
+    /// Takes the live pen's stroke for every queued pen edit that has none yet, so it stays drawn until its edit
+    /// lands, and works out the pen feel from it: the stroke drawn for the same touch, or else the oldest lifted one
+    /// that starts where the committed stroke does. Until the edit lands (`final`), one not found yet is looked for
+    /// again later, as the live pen may not have seen the lift; then the committed points take the pen feel.
+    private func claimLivePen(final: Bool) {
+        for index in pendingInkEdits.indices where pendingInkEdits[index].claimsLive {
+            let edit = pendingInkEdits[index]
+            let start = edit.stroke.path.first.map { $0.location.applying(edit.stroke.transform) }
+            if !final, let bound = edit.liveID.flatMap(livePen.stroke(id:)), !bound.isLifted { continue }
+            let live = edit.liveID.flatMap { livePen.claim(id: $0, startingNear: start) }
+                ?? livePen.claim(page: edit.page, startingNear: start)
+            guard live != nil || final else { continue }
+            pendingInkEdits[index].claimsLive = false
+            pendingInkEdits[index].liveID = live?.id
+            guard case .penFeel(let settings, let toolWidth, let color) = edit.kind else { continue }
+            let replacement = live?.stroke(lifted: true, creationDate: edit.stroke.path.creationDate)
+                ?? PenFeel.reshaped(edit.stroke, settings: settings, toolWidth: toolWidth, color: color)
+            pendingInkEdits[index].kind = replacement.map { .replace([$0], actionName: PendingInkEdit.inkActionName) }
+                ?? .keep(lasso: false)
+        }
+        scheduleLivePenExpiry()
+    }
+
+    /// While edits wait for PencilKit, checks again every `InkFlights.checkInterval` of running time, and gives up on
+    /// a flight PencilKit never commits, so edits can never wait for ever. One that was not cancelled was thrown away,
+    /// and the live pen's copy of it goes on the page.
+    private func armInkFlightCheck() {
+        guard inkFlightCheck == nil else { return }
+        inkFlightCheck = ResponsiveDeadline(after: InkFlights.checkInterval) { [weak self] in
+            guard let self else { return }
+            self.inkFlightCheck = nil
+            if !self.pencilIsDown { self.recoverDiscarded(self.inkFlights.quietCheck()) }
+            self.scheduleInkLanding()
+            if !self.inkFlights.isEmpty {
+                self.armInkFlightCheck()
+                self.scheduleLivePenExpiry()
+            }
+        }
+    }
+
+    /// The pen's swaps wait out the rest of the pause in the writing, then ask for a frame again.
+    private func armInkPause(_ wait: TimeInterval) {
+        inkPauseWait?.invalidate()
+        let timer = Timer(timeInterval: wait, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.inkPauseWait = nil
+                self.scheduleInkLanding()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        inkPauseWait = timer
+    }
+
+    /// Lands `edits` (all on `page`, in commit order) and `recovered` strokes in one drawing change. PencilKit's own
+    /// undo steps for the strokes from the earliest edited one on are popped, checking each pop takes only strokes
+    /// off the end of the page, and those strokes are put back in order, each with its edit and as its own undo step;
+    /// the recovered strokes follow, one step each. If anything does not match (the page changed some other way), no edit
+    /// is applied and the strokes are only made visible, so no ink is ever lost for a cosmetic edit. With
+    /// `restoringClearInk` (an undo or redo brought strokes back), every stroke on the page is made visible too.
+    private func land(_ edits: [PendingInkEdit], recovered lost: [RecoveredInk], page: Int, restoringClearInk: Bool) {
+        guard let canvas = canvases[page] else {
+            // The canvas left the screen: what is saved has every waiting stroke visible already (`savedDrawing`).
+            let saved = session.drawing(on: page).strokes
+            let recovered = recoveredStrokes(lost, missingFrom: saved)
+            if !recovered.isEmpty { session.update(PKDrawing(strokes: saved + recovered.map(PenFeel.visible)), page: page) }
+            return
+        }
+        let strokes = canvas.drawing.strokes
+        let recovered = recoveredStrokes(lost, missingFrom: strokes)
+        let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
+        var byIndex: [Int: PendingInkEdit.Kind] = [:]
+        var matched = true
+        for edit in edits {
+            guard edit.index < strokes.count, byIndex[edit.index] == nil,
+                  InkStrokeID(strokes[edit.index]) == InkStrokeID(edit.stroke) else { matched = false; break }
+            byIndex[edit.index] = edit.kind
+        }
+        if !matched { byIndex = [:] }
+        var start = byIndex.keys.min() ?? strokes.count
+        guard !byIndex.isEmpty || !recovered.isEmpty else {
+            return showClearInk(on: canvas, page: page, strokes: strokes)
+        }
+        // Undo pops only a closed group, or the one PencilKit's commit opened this turn; never inside another's.
+        guard undoManager?.isUndoing != true, undoManager?.isRedoing != true, (undoManager?.groupingLevel ?? 0) <= 1 else {
+            return showClearInk(on: canvas, page: page, strokes: strokes)
+        }
+        // The strokes' undo steps are replaced one for one. With none to pop (none was registered for them), the
+        // edits apply straight to the drawing and register none either. A recovered stroke always has its own step.
+        let mayPop = start < strokes.count && undoManager?.canUndo == true
+        if let undoManager, mayPop {
+            guard let end = pop(undoManager, on: canvas, from: strokes, to: start) else {
+                return showClearInk(on: canvas, page: page, strokes: strokes)
+            }
+            start = end
+        }
+        let replay = InkEditReplay.replay(strokes, from: start, edits: byIndex, recovered: recovered)
+        let registered = replay.steps.count - recovered.count
+        if let undoManager, mayPop || !recovered.isEmpty {
+            // Several strokes landing in one turn are still one undo step each; grouping by event would merge them.
+            let byEvent = undoManager.groupsByEvent
+            if replay.steps.count > 1, undoManager.groupingLevel == 0 { undoManager.groupsByEvent = false }
+            for (number, step) in replay.steps.enumerated() where mayPop || number >= registered {
+                undoManager.beginUndoGrouping()
+                switch step.change {
+                case .append(let added):
+                    registerInkAppend(on: undoManager, page: page, strokes: added)
+                case .replaceAll(let before, let after):
+                    registerDrawingSwap(on: undoManager, page: page, restoring: PKDrawing(strokes: before),
+                                        then: PKDrawing(strokes: after))
+                }
+                undoManager.setActionName(step.actionName)
+                undoManager.endUndoGrouping()
+            }
+            undoManager.groupsByEvent = byEvent
+        }
+        var after = PKDrawing(strokes: replay.strokes)
+        if restoringClearInk || !matched, let restored = PenFeel.restoringClearInk(in: after) { after = restored }
+        isReplacingStroke = true
+        canvas.drawing = after
+        isReplacingStroke = false
+        inkSelection.pageDidChange(page)
+        session.update(after, page: page)
+        if replay.lassoNewest {
+            inkSelection.lassoNewestStroke(page: page, strokeCount: after.strokes.count, undoManager: undoManager)
+        }
+    }
+
+    /// The live pen's copies of the `lost` strokes, leaving out any PencilKit did commit after all (a stroke on the
+    /// page created when it began), so a stroke is never doubled.
+    private func recoveredStrokes(_ lost: [RecoveredInk], missingFrom strokes: [PKStroke]) -> [PKStroke] {
+        guard !lost.isEmpty else { return [] }
+        let created = strokes.suffix(64).map(\.path.creationDate)
+        return lost.filter { item in
+            !created.contains { abs($0.timeIntervalSince(item.began)) <= InkFlights.matchTolerance }
+        }.compactMap { livePen.landingStroke(id: $0.liveID) }
+    }
+
+    /// Pops PencilKit's undo steps for `strokes[start...]`, newest first. Each must take strokes off the end of the
+    /// page and change nothing else. PencilKit makes the strokes it commits in one turn of the run loop one undo step,
+    /// so a step can take several, and the last can reach below `start`: returns where the page ends after the pops
+    /// (at most `start`), or nil, with every pop put back, if a step changes the page any other way.
+    private func pop(_ undoManager: UndoManager, on canvas: PKCanvasView, from strokes: [PKStroke], to start: Int) -> Int? {
+        var popped = 0
+        var end = strokes.count
+        var matches = true
+        defer { isReplacingStroke = false }
+        while end > start {
+            guard undoManager.canUndo else { matches = false; break }
+            // Set again on every pop: an undo step of EmberPad's own clears it as it sets the drawing.
+            isReplacingStroke = true
+            undoManager.undo()
+            isReplacingStroke = true
+            popped += 1
+            let now = canvas.drawing.strokes
+            guard now.count < end, now.isEmpty || InkStrokeID(now[now.count - 1]) == InkStrokeID(strokes[now.count - 1])
+            else { matches = false; break }
+            end = now.count
+        }
+        guard !matches else { return end }
+        for _ in 0..<popped where undoManager.canRedo {
+            undoManager.redo()
+            isReplacingStroke = true
+        }
+        return nil
+    }
+
+    /// Makes PencilKit's clear copies of pen strokes on `page` visible in place, with no undo step.
+    private func showClearInk(on canvas: PKCanvasView, page: Int, strokes: [PKStroke]) {
+        guard let restored = PenFeel.restoringClearInk(in: PKDrawing(strokes: strokes)) else { return }
+        isReplacingStroke = true
+        canvas.drawing = restored
+        isReplacingStroke = false
+        session.update(restored, page: page)
+    }
+}
+
 // MARK: - Scribble to erase (EP82)
 
 extension PDFOverlayPageController {
     /// After PencilKit commits a fountain-pen stroke the Pencil just drew, with "Scribble to erase" on: when the
     /// stroke is a scribble over ink (`ScribbleErase`), the strokes it goes through and the scribble itself go, as one
-    /// undo step named "Scribble to Erase", a turn of the run loop later as the snaps (PencilKit closes its undo group
-    /// first). What goes is what the preview outlined as the Pencil lifted (EP90). The scribble's ink is never on the
+    /// undo step named "Scribble to Erase", once PencilKit has committed every stroke it holds, as the snaps (EP94).
+    /// What goes is what the preview outlined as the Pencil lifted (EP90). The scribble's ink is never on the
     /// page: PencilKit's copy is clear and the live pen draws it until the page has drawn the erase. A scribble over
-    /// no ink stays as drawn. Returns whether the stroke is taken.
-    func eraseIfScribbled(_ canvas: PKCanvasView, page: Int, previousCount: Int, drawn: Bool) -> Bool {
-        guard canvas.drawing.strokes.count == previousCount + 1, let scribble = canvas.drawing.strokes.last else { return false }
+    /// no ink stays as drawn. `strokes` is the page as PencilKit committed it. Returns whether the stroke is taken.
+    func eraseIfScribbled(_ canvas: PKCanvasView, page: Int, previousCount: Int, drawn: Bool, strokes: [PKStroke]) -> Bool {
+        guard strokes.count == previousCount + 1, let scribble = strokes.last else { return false }
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         guard drawn, !readOnly, tools.current == .pen, tools.settings.scribbleToErase,
               undoManager?.isUndoing != true, undoManager?.isRedoing != true,
@@ -1224,19 +1623,14 @@ extension PDFOverlayPageController {
             if let preview = scribblePreview, preview.page == page, preview.matches(scribble) { clearScribblePreview() }
             return false
         }
-        let base = Array(canvas.drawing.strokes.dropLast())
+        let base = Array(strokes.dropLast())
         let erased = finishScribblePreview(page: page, scribble: scribble, base: base)
             ?? ScribbleErase.erasedIndices(scribble: scribble, in: base)
         guard !erased.isEmpty else { return false }
         // The stroke is the scribble's, whatever a hold at its end would have made of it.
         Self.holdRecognizer(on: canvas)?.consumeHold()
-        let count = canvas.drawing.strokes.count
-        let preview = scribblePreview
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.eraseScribble(page: page, strokeCount: count, erasing: erased, undoManager: undoManager)
-            if let preview, self.scribblePreview === preview { self.clearScribblePreview() }
-        }
+        enqueueInkEdit(page: page, index: strokes.count - 1, stroke: scribble, kind: .scribble(erasing: erased),
+                       scribblePreview: scribblePreview)
         return true
     }
 
@@ -1286,27 +1680,26 @@ extension PDFOverlayPageController {
     /// as the straight-line snap does, so PencilKit closes its undo group first. A stroke that is no shape stays as
     /// drawn. Returns whether the stroke is taken (a shape, or an undo or redo), which it always is once seen here.
     @discardableResult
-    func makeShapeIfDrawn(_ canvas: PKCanvasView, page: Int, previousCount: Int) -> Bool {
+    func makeShapeIfDrawn(_ canvas: PKCanvasView, page: Int, previousCount: Int, strokes: [PKStroke]? = nil) -> Bool {
         guard let hold = Self.holdRecognizer(on: canvas) else { return false }
         let drawn = hold.pencilStroke
         // A stroke applies to the one drawing change it ended, whatever that change was.
         hold.consumeHold()
         guard drawn, !readOnly else { return false }
         // Undo and redo bring strokes back exactly as they were.
-        if let undoManager = canvas.undoManager, undoManager.isUndoing || undoManager.isRedoing { return true }
-        guard canvas.drawing.strokes.count == previousCount + 1, let stroke = canvas.drawing.strokes.last,
+        let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
+        if let undoManager, undoManager.isUndoing || undoManager.isRedoing { return true }
+        let committed = strokes ?? canvas.drawing.strokes
+        guard committed.count == previousCount + 1, let stroke = committed.last,
               stroke.ink.inkType == ShapeInk.inkType, stroke.mask == nil,
               var shape = ShapeRecognizer.recognize(stroke.path.map { $0.location.applying(stroke.transform) }) else { return false }
         let settings = tools.settings
-        if settings.shapeSnap { shape = shape.snapped(to: ShapeInk.snapTargets(in: canvas.drawing.strokes.dropLast())) }
-        let strokes = ShapeInk.strokes(for: shape, color: stroke.ink.color, penWidth: settings.penWidth, fill: settings.shapeFill,
-                                       creationDate: stroke.path.creationDate, randomSeed: stroke.randomSeed)
-        let count = canvas.drawing.strokes.count
-        let undoManager = canvas.undoManager
-        DispatchQueue.main.async { [weak self] in
-            self?.replaceNewestStroke(page: page, strokeCount: count, with: strokes, undoManager: undoManager,
-                                      actionName: shape.kind.title)
-        }
+        if settings.shapeSnap { shape = shape.snapped(to: ShapeInk.snapTargets(in: committed.dropLast())) }
+        let replacements = ShapeInk.strokes(for: shape, color: stroke.ink.color, penWidth: settings.penWidth,
+                                            fill: settings.shapeFill, creationDate: stroke.path.creationDate,
+                                            randomSeed: stroke.randomSeed)
+        enqueueInkEdit(page: page, index: committed.count - 1, stroke: stroke,
+                       kind: .replace(replacements, actionName: shape.kind.title))
         return true
     }
 }
@@ -1386,11 +1779,13 @@ extension PDFOverlayPageController {
         registerDrawingSwap(on: undoManager, page: erase.page, restoring: erase.before, then: merged)
         undoManager.setActionName("Erase")
         undoManager.endUndoGrouping()
+        scheduleInkLanding()
     }
 
     /// Clear Page: removes all ink on the focused page as one undo step.
     func clearPage(undoManager: UndoManager? = nil) {
         guard !readOnly else { return }
+        landInkEdits()
         finishHighlighterErase()
         let page = activeCanvas.flatMap { canvas in canvases.first(where: { $0.value === canvas })?.key } ?? currentPage
         let before = session.drawing(on: page)

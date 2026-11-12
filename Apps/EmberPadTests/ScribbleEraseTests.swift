@@ -240,7 +240,7 @@ final class ScribbleEraseTests: XCTestCase {
         controller.liveInk.onStroke?(.began(Array(samples.prefix(1))))
         controller.liveInk.onStroke?(.moved(Array(samples.dropFirst().dropLast()), predicted: []))
         controller.liveInk.onStroke?(.ended(Array(samples.suffix(1))))
-        XCTAssertEqual(pageView.livePenLayer?.drawing.strokes.count, 1, "the scribble is drawn live while written")
+        XCTAssertEqual(pageView.livePenStrokes.count, 1, "the scribble is drawn live while written")
 
         // PencilKit commits its own, clear, copy of the scribble.
         let pencilKit = PKStroke(ink: PKInk(PenFeel.liveInkType, color: .clear),
@@ -248,11 +248,12 @@ final class ScribbleEraseTests: XCTestCase {
         Self.commit(word + [pencilKit], on: canvas, controller, undo: undo, drawn: true)
         await Self.settle()
         XCTAssertTrue(canvas.drawing.strokes.isEmpty, "the word is erased and the scribble never committed as ink")
-        XCTAssertEqual(pageView.livePenLayer?.drawing.strokes.count, 1,
+        XCTAssertEqual(pageView.livePenStrokes.count, 1,
                        "the live scribble stays until the page has drawn the erase, so the two go together")
         controller.canvasViewDidFinishRendering(canvas)
-        XCTAssertEqual(pageView.livePenLayer?.drawing.strokes.count, 0)
-        XCTAssertEqual(pageView.livePenLayer?.isHidden, true)
+        XCTAssertEqual(pageView.livePenStrokes.count, 0)
+        XCTAssertNotEqual(pageView.livePenLayer?.isHidden, false)
+        XCTAssertNotEqual(pageView.liftedPenLayer?.isHidden, false)
         XCTAssertTrue(session.drawing(on: 0).strokes.isEmpty)
         XCTAssertEqual(undo.undoActionName, "Scribble to Erase")
     }
@@ -452,6 +453,7 @@ final class ScribbleEraseTests: XCTestCase {
     }
 
     private static func settle() async {
+        await InkSettle.settle()
         for _ in 0..<2 {
             await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
         }

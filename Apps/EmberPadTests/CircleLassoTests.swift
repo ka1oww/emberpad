@@ -1011,9 +1011,7 @@ final class CircleLassoTests: XCTestCase {
     }
 
     private static func settle() async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.async { continuation.resume() }
-        }
+        await InkSettle.settle()
     }
 
     /// `inScene` puts the window in the host app's scene and makes it key, which the edit menu needs to show.

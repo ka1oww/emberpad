@@ -63,25 +63,53 @@ final class PageInkView: UIView {
     }
 
     /// Adds a passive ink layer above the canvas's own ink (Erase highlighter only), drawn at the same zoom.
-    func addSetAsideInk(_ layer: PKCanvasView) {
+    func addSetAsideInk(_ layer: PKCanvasView, below other: UIView? = nil) {
         layer.autoresizingMask = []
-        canvas.addSubview(layer)
+        if let other, other.superview === canvas {
+            canvas.insertSubview(layer, belowSubview: other)
+        } else {
+            canvas.addSubview(layer)
+        }
         fitSetAsideInk()
     }
 
-    /// The pen's strokes while they are written (EP56), drawn by PencilKit at the canvas's zoom above its own ink, so
-    /// they look exactly as the committed ink will. Created on first use; never takes touches.
+    /// The pen's stroke while it is written (EP56), drawn by PencilKit at the canvas's zoom above its own ink, so it
+    /// looks exactly as the committed ink will. Created on first use; never takes touches.
     private(set) var livePenLayer: PKCanvasView?
+    /// The pen's lifted strokes still waiting to be on the page itself (EP94), under the one being written. Redrawn
+    /// only when they change, so a long burst of writing does not redraw every waiting stroke on every Pencil move.
+    private(set) var liftedPenLayer: PKCanvasView?
+    /// The live strokes `liftedPenLayer` shows, by `LivePenStrokes` id.
+    private var liftedPenIDs: [UInt64] = []
 
-    /// Shows `drawing` as the pen's live ink, or hides the layer when it is empty.
-    func showLivePen(_ drawing: PKDrawing) {
-        if drawing.strokes.isEmpty, livePenLayer == nil { return }
-        let layer = livePenLayer ?? makeLivePenLayer()
-        layer.drawing = drawing
-        layer.isHidden = drawing.strokes.isEmpty
+    /// Every live pen stroke shown, lifted ones first.
+    var livePenStrokes: [PKStroke] {
+        (liftedPenLayer.map { $0.isHidden ? [] : $0.drawing.strokes } ?? [])
+            + (livePenLayer.map { $0.isHidden ? [] : $0.drawing.strokes } ?? [])
     }
 
-    private func makeLivePenLayer() -> PKCanvasView {
+    /// Whether `view` is one of the live pen's layers.
+    func isLivePenLayer(_ view: UIView) -> Bool { view === livePenLayer || view === liftedPenLayer }
+
+    /// Shows the pen's live ink: `writing`, and the lifted strokes `liftedIDs`, drawn by `lifted` only when they
+    /// differ from the ones shown. A layer with nothing to show is hidden.
+    func showLivePen(liftedIDs: [UInt64], lifted: () -> PKDrawing, writing: PKDrawing) {
+        if liftedIDs != liftedPenIDs {
+            liftedPenIDs = liftedIDs
+            let drawing = lifted()
+            if !drawing.strokes.isEmpty || liftedPenLayer != nil {
+                let layer = liftedPenLayer ?? makeLivePenLayer(lifted: true)
+                layer.drawing = drawing
+                layer.isHidden = drawing.strokes.isEmpty
+            }
+        }
+        if writing.strokes.isEmpty, livePenLayer == nil { return }
+        let layer = livePenLayer ?? makeLivePenLayer(lifted: false)
+        layer.drawing = writing
+        layer.isHidden = writing.strokes.isEmpty
+    }
+
+    private func makeLivePenLayer(lifted: Bool) -> PKCanvasView {
         let layer = PKCanvasView(frame: canvas.bounds)
         layer.overrideUserInterfaceStyle = .light
         layer.backgroundColor = .clear
@@ -92,8 +120,13 @@ final class PageInkView: UIView {
         layer.isScrollEnabled = false
         layer.drawingGestureRecognizer.isEnabled = false
         layer.maximumSupportedContentVersion = .latest
-        livePenLayer = layer
-        addSetAsideInk(layer)
+        if lifted {
+            liftedPenLayer = layer
+            addSetAsideInk(layer, below: livePenLayer)
+        } else {
+            livePenLayer = layer
+            addSetAsideInk(layer)
+        }
         return layer
     }
 

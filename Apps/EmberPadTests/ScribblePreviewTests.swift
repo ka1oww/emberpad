@@ -406,6 +406,7 @@ final class ScribblePreviewTests: XCTestCase {
     }
 
     static func settle() async {
+        await InkSettle.settle()
         for _ in 0..<2 {
             await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
         }

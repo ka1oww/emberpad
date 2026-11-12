@@ -63,14 +63,28 @@ enum PenFeel {
     static func restoringClearInk(in drawing: PKDrawing) -> PKDrawing? {
         var changed = false
         let strokes = drawing.strokes.map { stroke -> PKStroke in
-            var alpha: CGFloat = 1
-            stroke.ink.color.getRed(nil, green: nil, blue: nil, alpha: &alpha)
-            guard stroke.ink.inkType == liveInkType, alpha == 0 else { return stroke }
+            guard isClearInk(stroke) else { return stroke }
             changed = true
-            return PKStroke(ink: PKInk(liveInkType, color: stroke.ink.color.withAlphaComponent(1)), path: stroke.path,
-                            transform: stroke.transform, mask: stroke.mask, randomSeed: stroke.randomSeed)
+            return visible(stroke)
         }
         return changed ? PKDrawing(strokes: strokes) : nil
+    }
+
+    /// Whether `stroke` is PencilKit's clear copy of a live pen stroke. Saved and opened again, the live ink comes
+    /// back as `.pen` (PencilKit stores `.monoline` that way, measured on iOS 26.5), so a clear `.pen` stroke is one
+    /// too; EmberPad never writes clear ink otherwise (EP94).
+    static func isClearInk(_ stroke: PKStroke) -> Bool {
+        guard stroke.ink.inkType == liveInkType || stroke.ink.inkType == .pen else { return false }
+        var alpha: CGFloat = 1
+        stroke.ink.color.getRed(nil, green: nil, blue: nil, alpha: &alpha)
+        return alpha == 0
+    }
+
+    /// `stroke`, or, if it is clear live ink (`isClearInk`), the same stroke in its colour at full alpha.
+    static func visible(_ stroke: PKStroke) -> PKStroke {
+        guard isClearInk(stroke) else { return stroke }
+        return PKStroke(ink: PKInk(stroke.ink.inkType, color: stroke.ink.color.withAlphaComponent(1)), path: stroke.path,
+                        transform: stroke.transform, mask: stroke.mask, randomSeed: stroke.randomSeed)
     }
 
     // MARK: Width

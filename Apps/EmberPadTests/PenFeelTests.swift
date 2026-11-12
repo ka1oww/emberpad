@@ -364,19 +364,21 @@ final class PenFeelTests: XCTestCase {
         XCTAssertEqual(undo.undoActionName, "Ink")
     }
 
-    func testAStrokeAlreadyFollowedByAnotherIsNotSwapped() async throws {
+    func testAStrokeAlreadyFollowedByAnotherIsStillSwappedAndKept() async throws {
         let (controller, session) = try await Self.makeController()
         let canvas = try Self.canvas(controller, session)
         let first = Self.line(length: 300, size: 6, y: 100)
         let second = Self.line(length: 300, size: 6, y: 160)
         canvas.drawing = PKDrawing(strokes: [first])
         controller.canvasViewDrawingDidChange(canvas)
-        // The next change lands before the deferred swap runs.
+        // The next stroke commits before the first one's swap lands (EP94): both swaps land together, in order.
         canvas.drawing = PKDrawing(strokes: [first, second])
         controller.canvasViewDrawingDidChange(canvas)
         await Self.settle()
-        XCTAssertEqual(canvas.drawing.strokes.count, 2)
-        XCTAssertEqual(canvas.drawing.strokes[0].path.first?.size.width, 6, "a stale swap leaves the ink alone")
+        XCTAssertEqual(canvas.drawing.strokes.count, 2, "neither stroke is lost")
+        XCTAssertEqual(canvas.drawing.strokes[0].path.first?.location.y, 100)
+        XCTAssertEqual(canvas.drawing.strokes[1].path.first?.location.y, 160)
+        XCTAssertLessThan(try XCTUnwrap(canvas.drawing.strokes[0].path.first).size.width, 2.5, "the first is swapped too")
         XCTAssertLessThan(try XCTUnwrap(canvas.drawing.strokes[1].path.first).size.width, 2.5)
     }
 
@@ -469,9 +471,7 @@ final class PenFeelTests: XCTestCase {
 
     /// Lets the swap that waits a turn of the main queue run.
     private static func settle() async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.async { continuation.resume() }
-        }
+        await InkSettle.settle()
     }
 
     static func canvas(_ controller: PDFOverlayPageController, _ session: DocumentSession) throws -> PKCanvasView {
