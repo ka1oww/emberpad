@@ -17,6 +17,7 @@ struct LibraryView: View {
     @ObservedObject var presentation: PresentationState
     @ObservedObject var pairing: PairingController
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var thumbnails: ThumbnailCache
     private let signingExpiryDate: Date?
     @State private var columns = LibraryColumnState()
@@ -173,8 +174,86 @@ struct LibraryView: View {
 
     // MARK: - Detail
 
+    /// The detail column: a stable frame that holds the toolbar, search and refresh, with one page inside it per
+    /// folder. Opening a folder or going back swaps the page with the folder transition (EP81, `FolderTransition`);
+    /// a sidebar change swaps it instantly. The frame clips the slide, so a page never draws over the sidebar.
     private var detail: some View {
-        ScrollView {
+        ZStack {
+            page
+                .id(pageKey)
+                .transition(.folderPage(library))
+                .zIndex(FolderTransition.layer(subject: library.selectedSubject, path: library.folderPath))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+        .animation(FolderTransition.animation(for: library.folderMotion, reduceMotion: reduceMotion), value: pageKey)
+        .background(Theme.bg)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            // The system sidebar toggle is the only one; Import from Files lives only here (P2).
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Menu(library.sortOrder.label) {
+                    ForEach(LibrarySortOrder.allCases, id: \.self) { order in
+                        Button(order.label) { library.sortOrder = order }
+                    }
+                }
+                .disabled(library.isImporting)
+                // Tap files the Inbox; the menu also holds pairing (design 5.6: the iPad scans from this menu).
+                Menu {
+                    Button("File Inbox", systemImage: "tray") { Task { await library.fileInbox() } }
+                        .disabled(library.isImporting)
+                    if pairing.paired != nil {
+                        Button("Sync now", systemImage: "arrow.triangle.2.circlepath") { sync.sync() }
+                            .disabled(sync.isSyncing)
+                    }
+                    if pairing.paired == nil {
+                        Button("Pair with Mac…", systemImage: "qrcode.viewfinder") { showPairing = true }
+                    } else {
+                        Button("Pair with a different Mac…", systemImage: "qrcode.viewfinder") { showPairing = true }
+                        Button("Forget Mac…", systemImage: "xmark.circle", role: .destructive) { confirmForget = true }
+                    }
+                } label: {
+                    Label("File Inbox", systemImage: "tray")
+                } primaryAction: {
+                    guard !library.isImporting else { return }
+                    Task { await library.fileInbox() }
+                }
+                if library.isImporting {
+                    ProgressView()
+                } else {
+                    Button("Import from Files", systemImage: "square.and.arrow.down") { showImport = true }
+                }
+            }
+        }
+        .searchable(text: $library.searchText, placement: .toolbar, prompt: searchPrompt)
+        .task { await library.refresh() }
+    }
+
+    /// Which page the detail column shows. A new key is a new page, which arrives with the folder transition.
+    private var pageKey: LibraryPageKey {
+        LibraryPageKey(sidebar: library.sidebarSelection, subject: library.selectedSubject, path: library.folderPath)
+    }
+
+    /// One folder's page: its header, banners and grid.
+    private var page: some View {
+        ScrollViewReader { proxy in
+            pageScroll
+                .onAppear {
+                    // After Back or a breadcrumb, the parent starts with the folder the user came out of in view.
+                    guard let folder = library.takeFolderToReveal() else { return }
+                    var instant = Transaction()
+                    instant.disablesAnimations = true
+                    withTransaction(instant) { proxy.scrollTo(folder) }
+                }
+        }
+        .background(Theme.bg)
+        .refreshable { await library.fileInbox() }
+    }
+
+    private var pageScroll: some View {
+        // Worked out once per page: it walks every document, so a large library pays for it once, not per use.
+        let listing = library.listing
+        return ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     if !library.showingArchived && !library.folderPath.isEmpty {
@@ -198,7 +277,7 @@ struct LibraryView: View {
                             .foregroundStyle(Theme.text)
                             .lineLimit(2)
                     }
-                    Text(detailSubline)
+                    Text(detailSubline(listing))
                         .font(.system(size: 15))
                         .foregroundStyle(Theme.text2)
                 }
@@ -264,6 +343,7 @@ struct LibraryView: View {
                         ForEach(listing.folders) { folder in
                             Button { library.openFolder(folder) } label: { FolderCard(folder: folder) }
                                 .buttonStyle(.plain)
+                                .id(folder.id)
                         }
                         ForEach(listing.worksheets) { record in
                             LibraryCardCell(record: record, library: library, presentation: presentation,
@@ -278,50 +358,7 @@ struct LibraryView: View {
                 }
             }
         }
-        .background(Theme.bg)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            // The system sidebar toggle is the only one; Import from Files lives only here (P2).
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                Menu(library.sortOrder.label) {
-                    ForEach(LibrarySortOrder.allCases, id: \.self) { order in
-                        Button(order.label) { library.sortOrder = order }
-                    }
-                }
-                .disabled(library.isImporting)
-                // Tap files the Inbox; the menu also holds pairing (design 5.6: the iPad scans from this menu).
-                Menu {
-                    Button("File Inbox", systemImage: "tray") { Task { await library.fileInbox() } }
-                        .disabled(library.isImporting)
-                    if pairing.paired != nil {
-                        Button("Sync now", systemImage: "arrow.triangle.2.circlepath") { sync.sync() }
-                            .disabled(sync.isSyncing)
-                    }
-                    if pairing.paired == nil {
-                        Button("Pair with Mac…", systemImage: "qrcode.viewfinder") { showPairing = true }
-                    } else {
-                        Button("Pair with a different Mac…", systemImage: "qrcode.viewfinder") { showPairing = true }
-                        Button("Forget Mac…", systemImage: "xmark.circle", role: .destructive) { confirmForget = true }
-                    }
-                } label: {
-                    Label("File Inbox", systemImage: "tray")
-                } primaryAction: {
-                    guard !library.isImporting else { return }
-                    Task { await library.fileInbox() }
-                }
-                if library.isImporting {
-                    ProgressView()
-                } else {
-                    Button("Import from Files", systemImage: "square.and.arrow.down") { showImport = true }
-                }
-            }
-        }
-        .searchable(text: $library.searchText, placement: .toolbar, prompt: searchPrompt)
-        .refreshable { await library.fileInbox() }
-        .task { await library.refresh() }
     }
-
-    private var listing: LibraryListing { library.listing }
 
     private var detailTitle: String {
         if library.showingArchived { return "Archived" }
@@ -333,7 +370,7 @@ struct LibraryView: View {
         library.folderPath.dropLast().last ?? library.selectedSubject ?? "All subjects"
     }
 
-    private var detailSubline: String {
+    private func detailSubline(_ listing: LibraryListing) -> String {
         let order = library.sortOrder.sublineLabel
         let count = listing.worksheets.count
         if library.isSearching {
@@ -762,4 +799,11 @@ private struct SigningDetailBanner: View {
             }
         }
     }
+}
+
+/// What the library's detail column is showing; a change is a page change for the folder transition (EP81).
+struct LibraryPageKey: Hashable {
+    var sidebar: LibrarySidebarSelection
+    var subject: String?
+    var path: [String]
 }
