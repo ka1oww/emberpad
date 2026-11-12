@@ -233,6 +233,62 @@ struct PresentTests {
         try await presentWait { host.status == .off }
     }
 
+    /// A first snapshot that takes several silence limits to drain is progress, not silence: it completes on one connection.
+    @Test(.timeLimit(.minutes(1))) func aSlowFirstSnapshotCompletesOnOneConnection() async throws {
+        let host = PresentHost()
+        let servers = LoopbackServers(host: host)
+        servers.sendDelay = .milliseconds(100)
+        var timing = PresentLink.Timing()
+        timing.tickInterval = .milliseconds(20)
+        timing.silenceLimit = .milliseconds(400)
+        let sender = PresentSender(connect: { _ in try await servers.connect() }, timing: timing)
+        let worksheet = FakeWorksheet(paperBytes: 1_000_000)
+        let pump = Pump(sender: sender, worksheet: worksheet)
+        sender.start()
+        defer { pump.stop() }
+        let began = ContinuousClock.now
+        pump.start()
+        try await presentWait(seconds: 30) { host.status == .connected && host.current.frame != nil }
+        #expect(ContinuousClock.now - began > .milliseconds(400))
+        #expect(servers.connections == 1)
+        await pump.stopSending()
+    }
+
+    /// After a link closes, an open arriving under the same identity (as a reused address would) is tracked anew,
+    /// so dismiss still closes it.
+    @Test func aLinkOpeningAfterTheSameIdentityClosedIsTrackedAndDismissed() throws {
+        let host = PresentHost()
+        var update = PresentUpdate(seq: 1)
+        update.open = true
+        let open = try PresentCodec.encode(update)
+        let link = RecordingLink()
+        host.received(open, on: link)
+        host.closed(link)
+        host.received(open, on: link)
+        host.dismiss()
+        #expect(link.closeCount == 1)
+        #expect(host.stats.links == 2)
+    }
+
+    /// A start right behind a stop waits for the old runner to finish, then connects once and ends up connected.
+    @Test(.timeLimit(.minutes(1))) func startingRightAfterStopRunsOneConnectionAndStaysOn() async throws {
+        let host = PresentHost()
+        let servers = LoopbackServers(host: host)
+        var timing = PresentLink.Timing()
+        timing.tickInterval = .milliseconds(20)
+        let sender = PresentSender(connect: { _ in try await servers.connect() }, timing: timing)
+        sender.start()
+        try await presentWait { servers.connections == 1 }
+        let stopping = Task { await sender.link.stop() }
+        try await Task.sleep(for: .milliseconds(1))
+        sender.start()
+        await stopping.value
+        try await presentWait { servers.connections == 2 }
+        #expect(sender.link.state != .off)
+        await sender.link.stop()
+        #expect(sender.link.state == .off)
+    }
+
     // MARK: Real server, real sockets
 #if os(macOS)
 
@@ -299,10 +355,10 @@ final class FakeWorksheet: @unchecked Sendable {
     private let realisticInk: Bool
     var liveStrokes: [PresentedView.LiveStroke] = []
 
-    init(realisticInk: Bool = false) {
+    init(realisticInk: Bool = false, paperBytes: Int? = nil) {
         self.realisticInk = realisticInk
         // About the size of a one-page worksheet PDF.
-        paper = PresentAsset(kind: .pdf, bytes: syntheticBytes(realisticInk ? 60_000 : 64, seed: 3))
+        paper = PresentAsset(kind: .pdf, bytes: syntheticBytes(paperBytes ?? (realisticInk ? 60_000 : 64), seed: 3))
     }
 
     func view(page: Int, live: [PresentedView.LiveStroke] = [], laser: PresentedView.Laser? = nil,
@@ -436,6 +492,8 @@ final class LoopbackServers: @unchecked Sendable {
     private var open: [InMemoryWireTransport] = []
     private var count = 0
 
+    var sendDelay: Duration?
+
     init(host: PresentHost) { self.host = host }
 
     var connections: Int { lock.withLock { count } }
@@ -448,6 +506,7 @@ final class LoopbackServers: @unchecked Sendable {
         }
         let host = self.host
         Task { await Self.serve(server, host: host) }
+        if let sendDelay { return SlowTransport(client, delay: sendDelay) }
         return client
     }
 
@@ -495,6 +554,21 @@ final class LoopbackServers: @unchecked Sendable {
         continuation.finish()
         await writer.value
     }
+}
+
+struct SlowTransport: WireTransport {
+    let inner: any WireTransport
+    let delay: Duration
+    init(_ inner: any WireTransport, delay: Duration) {
+        self.inner = inner
+        self.delay = delay
+    }
+    func send(_ bytes: Data) async throws {
+        try await Task.sleep(for: delay)
+        try await inner.send(bytes)
+    }
+    func receive() async throws -> Data? { try await inner.receive() }
+    func close() async { await inner.close() }
 }
 
 final class StateLog: @unchecked Sendable {
@@ -545,3 +619,11 @@ extension RunningServer {
     }
 }
 #endif
+
+final class RecordingLink: PresentReplying, @unchecked Sendable {
+    private let lock = NSLock()
+    private var closes = 0
+    var closeCount: Int { lock.withLock { closes } }
+    func reply(_ payload: Data) {}
+    func close() { lock.withLock { closes += 1 } }
+}

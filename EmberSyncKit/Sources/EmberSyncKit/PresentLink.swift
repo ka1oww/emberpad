@@ -51,6 +51,7 @@ public final class PresentLink: @unchecked Sendable {
     private let onReply: @Sendable (_ reply: PresentReply, _ generation: Int) -> Void
     private let lock = NSLock()
     private var runner: Task<Void, Never>?
+    private var retiring: Task<Void, Never>?
     private var outbox: AsyncStream<Outgoing>.Continuation?
     private var currentState = State.off
     private var currentGeneration = 0
@@ -81,7 +82,12 @@ public final class PresentLink: @unchecked Sendable {
     public func start() {
         lock.withLock {
             guard runner == nil else { return }
-            runner = Task { [weak self] in await self?.run() }
+            let previous = retiring
+            runner = Task { [weak self] in
+                await previous?.value
+                guard !Task.isCancelled else { return }
+                await self?.run()
+            }
         }
     }
 
@@ -94,7 +100,7 @@ public final class PresentLink: @unchecked Sendable {
         }
         task?.cancel()
         await task?.value
-        setState(.off)
+        if lock.withLock({ runner == nil }) { setState(.off) }
     }
 
     private func takeRunner() -> (Task<Void, Never>?, Bool) {
@@ -102,6 +108,7 @@ public final class PresentLink: @unchecked Sendable {
         defer { lock.unlock() }
         let task = runner
         runner = nil
+        retiring = task
         return (task, accepting)
     }
 
@@ -167,6 +174,7 @@ public final class PresentLink: @unchecked Sendable {
         case bytes(Data)
         case closed
         case tick
+        case progress
     }
 
     /// One frame waiting for the writer. `payload` counts toward `queuedBytes` until the transport takes it.
@@ -192,7 +200,15 @@ public final class PresentLink: @unchecked Sendable {
         let (frames, writerInput) = AsyncStream.makeStream(of: Outgoing.self)
         let writer = Task<Void, Never> { [weak self] in
             for await item in frames {
-                do { try await transport.send(item.frame) } catch {
+                do {
+                    var start = item.frame.startIndex
+                    while start < item.frame.endIndex {
+                        let end = item.frame.index(start, offsetBy: 65_536, limitedBy: item.frame.endIndex) ?? item.frame.endIndex
+                        try await transport.send(item.frame[start..<end])
+                        input.yield(.progress)
+                        start = end
+                    }
+                } catch {
                     input.yield(.closed)
                     return
                 }
@@ -224,6 +240,9 @@ public final class PresentLink: @unchecked Sendable {
             if Task.isCancelled { break }
             var output: WireClientOutput
             switch item {
+            case .progress:
+                lastHeard = clock.now
+                continue
             case .bytes(let bytes):
                 lock.withLock { currentStats.receivedBytes += bytes.count }
                 output = session.receive(bytes, now: .now)
@@ -510,6 +529,7 @@ public final class PresentHost: @unchecked Sendable {
         var changed: (PresentScene, Status)?
         lock.lock()
         if active == ObjectIdentifier(link) {
+            active = nil
             activeLink = nil
             if currentStatus != .off, !scene.stopped {
                 currentStatus = .reconnecting
