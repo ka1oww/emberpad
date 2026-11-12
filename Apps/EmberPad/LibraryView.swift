@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 import EmberSyncKit
@@ -20,13 +21,12 @@ struct LibraryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var thumbnails: ThumbnailCache
     private let signingExpiryDate: Date?
-    @State private var columns = LibraryColumnState()
     @ObservedObject var sync: SyncClient
     @State private var showImport = false
     @State private var showPairing = false
     @State private var confirmForget = false
-    /// The worksheet launch reopens (left open when EmberPad last quit); nil once Back returns to the library.
-    @State private var reopenedWorksheet: UUID?
+    /// The open worksheet and the column visibility around it, with the document transition (EP87).
+    @State private var navigator: WorksheetNavigator
     @State private var checkedLastWorksheet = false
     private let lastWorksheet: LastWorksheet
 
@@ -44,8 +44,9 @@ struct LibraryView: View {
 
     init(library: LibraryController, presentation: PresentationState, pairing: PairingController,
          sync: SyncClient, signingExpiryDate: Date?, thumbnailCache: ThumbnailCache?,
-         lastWorksheet: LastWorksheet = LastWorksheet()) {
+         lastWorksheet: LastWorksheet = LastWorksheet(), navigator: WorksheetNavigator? = nil) {
         self.library = library
+        _navigator = State(initialValue: navigator ?? WorksheetNavigator())
         self.lastWorksheet = lastWorksheet
         self.sync = sync
         self.presentation = presentation
@@ -60,19 +61,22 @@ struct LibraryView: View {
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columns.visibility) {
+        NavigationSplitView(columnVisibility: $navigator.columns.visibility) {
             sidebar
         } detail: {
             NavigationStack {
                 detail
-                    .navigationDestination(item: $reopenedWorksheet) { id in
+                    .navigationDestination(item: $navigator.openWorksheet) { id in
                         EditorScreen(documentID: id, library: library, presentation: presentation,
-                                     toggleSidebar: { columns.toggleSidebar() })
-                            .onAppear { columns.worksheetOpened() }
-                            .onDisappear { columns.worksheetClosed() }
+                                     toggleSidebar: { navigator.columns.toggleSidebar() },
+                                     animatesEntrance: navigator.openedFromCard,
+                                     onClose: { pageFrame in navigator.close(pageFrame: pageFrame, reduceMotion: reduceMotion) })
+                            .onAppear { navigator.columns.worksheetOpened() }
+                            .onDisappear { navigator.columns.worksheetClosed() }
                     }
             }
         }
+        .background(DocumentTransitionWindowReader(cover: navigator.cover))
         .tint(Theme.tint)
         .sheet(isPresented: $showImport) { ImportWorksheetView(library: library, isPresented: $showImport) }
         .sheet(isPresented: $showPairing) { PairingScannerSheet(pairing: pairing, presentation: presentation) }
@@ -85,8 +89,8 @@ struct LibraryView: View {
             await library.refresh()
             reopenLastWorksheet()
         }
-        .onAppear { columns.sizeClassChanged(to: horizontalSizeClass) }
-        .onChange(of: horizontalSizeClass) { _, sizeClass in columns.sizeClassChanged(to: sizeClass) }
+        .onAppear { navigator.columns.sizeClassChanged(to: horizontalSizeClass) }
+        .onChange(of: horizontalSizeClass) { _, sizeClass in navigator.columns.sizeClassChanged(to: sizeClass) }
     }
 
     // MARK: - Sidebar
@@ -346,11 +350,9 @@ struct LibraryView: View {
                                 .id(folder.id)
                         }
                         ForEach(listing.worksheets) { record in
-                            LibraryCardCell(record: record, library: library, presentation: presentation,
-                                            thumbnails: thumbnails, location: cardLocation(for: record),
-                                            onWorksheetOpen: { columns.worksheetOpened() },
-                                            onWorksheetClose: { columns.worksheetClosed() },
-                                            onToggleSidebar: { columns.toggleSidebar() })
+                            LibraryCardCell(record: record, library: library, thumbnails: thumbnails,
+                                            location: cardLocation(for: record),
+                                            onOpen: { navigator.openFromCard(record.id, reduceMotion: reduceMotion) })
                         }
                     }
                     .padding(.horizontal, 24)
@@ -486,10 +488,67 @@ struct LibraryView: View {
     private func reopenLastWorksheet() {
         guard !checkedLastWorksheet else { return }
         checkedLastWorksheet = true
-        reopenedWorksheet = LastWorksheet.documentToReopen(storedID: lastWorksheet.storedID,
-                                                           documents: library.documents)
+        navigator.reopen(LastWorksheet.documentToReopen(storedID: lastWorksheet.storedID,
+                                                        documents: library.documents))
     }
 
+}
+
+/// Which worksheet is open over the library, and the move between them (EP87). A card tap opens with the GoodNotes zoom
+/// (`DocumentTransition`); a launch reopen just appears; Back closes with the page shrinking and fading over the
+/// library. The worksheet stays on the library's navigation stack, so the folder and its scroll position are untouched
+/// underneath; only the system slide is replaced.
+/// Observable (not ObservableObject) because the split view and the navigation stack write their bindings into it
+/// during view updates.
+@MainActor @Observable
+final class WorksheetNavigator {
+    var openWorksheet: UUID?
+    /// Whether the open worksheet came from a card tap, and so zooms in. A launch reopen does not.
+    private(set) var openedFromCard = false
+    var columns = LibraryColumnState()
+    /// Covers the leaving screen while the transition plays.
+    @ObservationIgnored let cover = DocumentTransitionCover()
+
+    /// A card tap. The editor is pushed in this same update, without the slide, so it starts loading exactly as soon
+    /// as a push did.
+    func openFromCard(_ id: UUID, reduceMotion: Bool) {
+        guard openWorksheet == nil else { return }
+        cover.coverOpening(reduceMotion: reduceMotion)
+        switchInstantly {
+            openedFromCard = true
+            // Hide the sidebar now, under the cover, so it does not slide away over the zooming page.
+            columns.worksheetOpened()
+            openWorksheet = id
+        }
+    }
+
+    /// The worksheet left open when EmberPad last quit.
+    func reopen(_ id: UUID?) {
+        openedFromCard = false
+        openWorksheet = id
+    }
+
+    /// Back from the worksheet: the library returns at once under the closing editor, which fades and shrinks away.
+    /// `pageFrame` is the editor's page area in window coordinates.
+    func close(pageFrame: CGRect, reduceMotion: Bool) {
+        guard openWorksheet != nil else { return }
+        cover.coverClosing(pageFrame: pageFrame, reduceMotion: reduceMotion)
+        switchInstantly {
+            columns.worksheetClosed()
+            openWorksheet = nil
+        }
+    }
+
+    /// Makes `change` without the navigation slide or the sidebar's slide. SwiftUI's `disablesAnimations` alone does
+    /// not reach the UIKit navigation controller every time, so UIKit animations are also off until the change has
+    /// been applied. The covers' fades were added before, so they still run.
+    private func switchInstantly(_ change: () -> Void) {
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        UIView.setAnimationsEnabled(false)
+        withTransaction(instant, change)
+        DispatchQueue.main.async { UIView.setAnimationsEnabled(true) }
+    }
 }
 
 /// The library split view's column visibility (P2: the worksheet gets the whole screen).
@@ -660,23 +719,16 @@ private struct SidebarSelectRow: View {
 private struct LibraryCardCell: View {
     let record: DocumentRecord
     @ObservedObject var library: LibraryController
-    @ObservedObject var presentation: PresentationState
     @ObservedObject var thumbnails: ThumbnailCache
     var location: String? = nil
-    var onWorksheetOpen: () -> Void = {}
-    var onWorksheetClose: () -> Void = {}
-    var onToggleSidebar: () -> Void = {}
+    /// Opens the worksheet with the document transition (EP87).
+    var onOpen: () -> Void = {}
     @StateObject private var flattenedExport = FlattenedExportModel()
 
     var body: some View {
         // Subscribes the card to thumbnail arrivals for this document version.
         let _ = thumbnails.revision(for: record.id)
-        NavigationLink {
-            EditorScreen(documentID: record.id, library: library, presentation: presentation,
-                         toggleSidebar: onToggleSidebar)
-                .onAppear(perform: onWorksheetOpen)
-                .onDisappear(perform: onWorksheetClose)
-        } label: {
+        Button(action: onOpen) {
             WorksheetCard(record: record, thumbnail: thumbnails.cachedImage(for: record), location: location)
         }
         .buttonStyle(.plain)

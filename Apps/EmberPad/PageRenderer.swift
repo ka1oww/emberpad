@@ -244,15 +244,23 @@ struct EditorScreen: View {
     @ObservedObject var presentation: PresentationState
     /// Shows or hides the library sidebar beside the worksheet; nil where there is no sidebar.
     let toggleSidebar: (() -> Void)?
+    /// True when the worksheet was opened from a library card: the page zooms in (EP87).
+    let animatesEntrance: Bool
+    /// Back, when the library runs the close transition itself; it gets the page area in window coordinates. Nil pops.
+    let onClose: ((CGRect) -> Void)?
 
     /// `chrome` and `search` are injectable so a test can open the Pages and Search popovers the way a tap does.
     @MainActor
     init(documentID: UUID, library: LibraryController, presentation: PresentationState,
-         chrome: PageChromeState? = nil, search: WorksheetSearchModel? = nil, toggleSidebar: (() -> Void)? = nil) {
+         chrome: PageChromeState? = nil, search: WorksheetSearchModel? = nil, toggleSidebar: (() -> Void)? = nil,
+         animatesEntrance: Bool = false, onClose: ((CGRect) -> Void)? = nil) {
         self.documentID = documentID
         self.library = library
         self.presentation = presentation
         self.toggleSidebar = toggleSidebar
+        self.animatesEntrance = animatesEntrance
+        self.onClose = onClose
+        _pageEntered = State(initialValue: !animatesEntrance)
         _chrome = StateObject(wrappedValue: chrome ?? PageChromeState())
         _search = StateObject(wrappedValue: search ?? WorksheetSearchModel())
     }
@@ -278,6 +286,40 @@ struct EditorScreen: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// False until the page has zoomed in on an animated open (EP87; see `DocumentTransition`). The page starts once
+    /// it is there to zoom, or just appears if it is slow, as GoodNotes' does.
+    @State private var pageEntered: Bool
+    /// When the editor appeared, so a page that loads later zooms over what is left of the entrance; 0 until then.
+    @State private var entranceStartedAt: CFTimeInterval = 0
+    /// The page area in window coordinates, for the close transition.
+    @State private var pageAreaFrame: CGRect = .zero
+
+    private var entrance: DocumentTransition.Entrance {
+        DocumentTransition.entrance(pageEntered: pageEntered, reduceMotion: reduceMotion)
+    }
+
+    /// Whether the page area has its content (the page, or why it cannot show), so the zoom has something to grow.
+    private var pageContentReady: Bool { renderer != nil || errorMessage != nil }
+
+    /// Starts the page's zoom. A hosted page that arrives after the zoom started would land settled, so the zoom waits
+    /// for it, but still ends when it would have; a page too slow for that just appears when it is ready.
+    private func enterPage() {
+        guard !pageEntered else { return }
+        let elapsed = CACurrentMediaTime() - entranceStartedAt
+        if let animation = DocumentTransition.pageAnimation(elapsed: elapsed, reduceMotion: reduceMotion) {
+            withAnimation(animation) { pageEntered = true }
+        } else {
+            var instant = Transaction()
+            instant.disablesAnimations = true
+            withTransaction(instant) { pageEntered = true }
+        }
+    }
+
+    /// Back: the library's close transition when it runs one, else a plain pop.
+    private func close() {
+        if let onClose { onClose(pageAreaFrame) } else { dismiss() }
+    }
 
     private var pillState: SharePillState {
         SharePillState.current(otherDisplayAttached: presentation.otherDisplayAttached,
@@ -311,17 +353,23 @@ struct EditorScreen: View {
             if !chrome.readOnly { ToolbarStrip(tools: tools) }
             if let session { InkSaveBanner(session: session) }
             ZStack(alignment: .topLeading) {
-                if let renderer, let session {
-                    if presentation.policy.rendersOnMainScreen(session.record) {
-                        // A page edit opens a new session and renderer; the id swaps the hosted controller with it.
-                        PageRendererHost(renderer: renderer).id(session.instanceID)
-                    }
-                    else {
-                        // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
-                        PrivatePlaceholder(text: "Teacher copy · private. Hidden while another screen shows this iPad, or while inactive.")
-                    }
-                } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
-                else { ProgressView("Opening worksheet") }
+                Group {
+                    if let renderer, let session {
+                        if presentation.policy.rendersOnMainScreen(session.record) {
+                            // A page edit opens a new session and renderer; the id swaps the hosted controller with it.
+                            PageRendererHost(renderer: renderer).id(session.instanceID)
+                        }
+                        else {
+                            // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
+                            PrivatePlaceholder(text: "Teacher copy · private. Hidden while another screen shows this iPad, or while inactive.")
+                        }
+                    } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
+                    else { ProgressView("Opening worksheet") }
+                }
+                // EP87: the page grows from the centre while it fades in. Only a transform and an opacity change, and
+                // only on the way in; settled, both are identity.
+                .scaleEffect(entrance.pageScale)
+                .opacity(entrance.pageOpacity)
                 if chrome.pagePillVisible, let session, session.pdf.pageCount > 0 {
                     PagePill(current: chrome.currentPage, total: session.pdf.pageCount,
                              showsPages: chrome.isShowingPages(from: .pill)) {
@@ -341,7 +389,19 @@ struct EditorScreen: View {
                 }
             }
             .overlay(alignment: .top) { ToolToastOverlay(toast: tools.toast) }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { pageAreaFrame = $0 }
         }
+        // Not in onAppear: that runs inside the library's no-animation push, which would settle the page at once.
+        .task {
+            guard !pageEntered else { return }
+            entranceStartedAt = CACurrentMediaTime()
+            if pageContentReady { enterPage(); return }
+            // A page still loading when the entrance would have ended shows its progress as it always did.
+            try? await Task.sleep(for: .seconds(reduceMotion ? DocumentTransition.reduceMotionDuration
+                                                           : DocumentTransition.openPageDuration))
+            enterPage()
+        }
+        .onChange(of: pageContentReady) { _, ready in if ready, entranceStartedAt > 0 { enterPage() } }
         // The worksheet header replaces the system nav bar (EP54, laid out like GoodNotes).
         .toolbar(.hidden, for: .navigationBar)
         .flattenedExportSheet(flattenedExport)
@@ -504,7 +564,7 @@ extension EditorScreen {
 
     @ViewBuilder
     private var leadingActions: some View {
-        Button { dismiss() } label: { HeaderIcon(symbol: "chevron.left") }
+        Button { close() } label: { HeaderIcon(symbol: "chevron.left") }
             .accessibilityLabel("Back")
         if let toggleSidebar {
             Button { withAnimation { toggleSidebar() } } label: { HeaderIcon(symbol: "sidebar.left") }
