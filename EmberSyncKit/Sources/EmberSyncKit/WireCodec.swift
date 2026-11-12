@@ -19,7 +19,7 @@ public enum WireCodec {
             payload.append(hello.role.rawValue)
             payload.appendBigEndian(hello.maxChunkBytes)
             payload.appendBigEndian(hello.maxManifestBytes)
-        case .getManifest(let id), .cancel(let id):
+        case .getManifest(let id), .cancel(let id), .getDigest(let id):
             payload.appendBigEndian(id.rawValue)
         case .manifest(let id, let json):
             payload.appendBigEndian(id.rawValue)
@@ -59,6 +59,9 @@ public enum WireCodec {
         case .putDone(let id, let alreadyHeld):
             payload.appendBigEndian(id.rawValue)
             payload.append(alreadyHeld ? 1 : 0)
+        case .digest(let id, let hash):
+            payload.appendBigEndian(id.rawValue)
+            payload += hash.wireBytes
         }
         precondition(payload.count <= Int(UInt32.max), "Wire payloads are bounded far below 4 GiB")
         out.append(message.type.rawValue)
@@ -219,7 +222,7 @@ public struct WireFrameDecoder: Sendable {
     private func payloadBounds(_ type: WireMessageType) -> ClosedRange<UInt32> {
         switch type {
         case .hello: 17...17
-        case .getManifest, .cancel: 4...4
+        case .getManifest, .cancel, .getDigest: 4...4
         case .manifest: 5...(4 + maxManifestBytes)
         case .get: 40...40
         case .data: 13...(12 + maxChunkBytes)
@@ -231,6 +234,7 @@ public struct WireFrameDecoder: Sendable {
         case .putWindow: 8...8
         case .putEnd: 12...12
         case .putDone: 5...5
+        case .digest: 36...36
         }
     }
 
@@ -297,6 +301,12 @@ public struct WireFrameDecoder: Sendable {
             case 1: return .putDone(id, alreadyHeld: true)
             default: throw .malformedPayload(type)
             }
+        case .getDigest:
+            return try .getDigest(requestID())
+        case .digest:
+            let id = try requestID()
+            guard let hash = ContentHash(wireBytes: reader.bytes(32)) else { throw .malformedPayload(type) }
+            return .digest(id, sha256: hash)
         }
     }
 }

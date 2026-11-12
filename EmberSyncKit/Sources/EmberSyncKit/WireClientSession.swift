@@ -13,6 +13,8 @@ public struct WireClientOutput: Sendable {
 public enum WireClientEvent: Equatable, Sendable {
     case ready(version: UInt16)
     case manifest(WireRequestID, Manifest)
+    /// Version 3: the SHA-256 of the manifest the server would serve now.
+    case digest(WireRequestID, ContentHash)
     /// Bytes of a file transfer, in order. Report them with `consumed` once written, which reopens credit.
     case chunk(WireRequestID, offset: UInt64, bytes: Data)
     /// Every byte arrived, the size matched and the SHA-256 matched the requested hash.
@@ -60,6 +62,7 @@ public struct WireClientSession: Sendable {
 
     private enum Kind {
         case manifest
+        case digest
         case file(FileTransfer)
         case upload(Upload)
     }
@@ -73,7 +76,7 @@ public struct WireClientSession: Sendable {
 
         var waitingOnPeer: Bool {
             switch kind {
-            case .manifest: true
+            case .manifest, .digest: true
             case .file(let file): file.granted > file.received
             case .upload(let upload): !upload.hasWork
             }
@@ -135,6 +138,19 @@ public struct WireClientSession: Sendable {
         return (id, out)
     }
 
+    /// Version 3: ask for the SHA-256 of the manifest the server would serve now, which ends with exactly one `digest`
+    /// or `failed` event. Throws `unsupportedByPeer` when the server negotiated an older version, so an older Mac is
+    /// never sent a frame it does not know.
+    public mutating func requestDigest(now: Instant) throws(WireSessionError) -> (WireRequestID, WireClientOutput) {
+        guard case .ready = phase else { throw .notReady }
+        guard supportsDigest else { throw .unsupportedByPeer }
+        let id = try nextRequestID()
+        requests[id] = Request(kind: .digest, lastProgress: now)
+        var out = WireClientOutput()
+        out.outbound.append(.getDigest(id))
+        return (id, out)
+    }
+
     public mutating func requestFile(
         _ hash: ContentHash, expectedSize: UInt64,
         now: Instant
@@ -160,6 +176,9 @@ public struct WireClientSession: Sendable {
 
     /// The server negotiated a version with PUT (2 or later).
     public var supportsPut: Bool { (version ?? 0) >= WireProtocol.putVersion }
+
+    /// The server negotiated a version with GET_DIGEST (3 or later).
+    public var supportsDigest: Bool { (version ?? 0) >= WireProtocol.digestVersion }
 
     /// Version 2: offer `file` to the server under `hash`, with `metadata` for its receiver. Bytes flow only as the
     /// server grants credit: call `pullPuts` whenever `hasPendingPutData`. The request ends with exactly one
@@ -329,6 +348,8 @@ public struct WireClientSession: Sendable {
             receivePutWindow(id, increment: increment, now: now, &out)
         case (.ready(let version), .putDone(let id, let alreadyHeld)) where version >= WireProtocol.putVersion:
             receivePutDone(id, alreadyHeld: alreadyHeld, &out)
+        case (.ready(let version), .digest(let id, let hash)) where version >= WireProtocol.digestVersion:
+            receiveDigest(id, hash, &out)
         default:
             violate(.unexpectedFrame(message.type), &out)
         }
@@ -344,6 +365,14 @@ public struct WireClientSession: Sendable {
         } else {
             out.events.append(.failed(id, .invalidManifest))
         }
+    }
+
+    private mutating func receiveDigest(_ id: WireRequestID, _ hash: ContentHash, _ out: inout WireClientOutput) {
+        guard let request = requests[id] else { return violate(.unknownRequest(id), &out) }
+        guard case .digest = request.kind else { return violate(.unexpectedFrame(.digest), &out) }
+        requests[id] = nil
+        guard request.drainingSince == nil else { return }
+        out.events.append(.digest(id, hash))
     }
 
     private mutating func receiveData(_ id: WireRequestID, offset: UInt64, bytes: Data, now: Instant, _ out: inout WireClientOutput) {

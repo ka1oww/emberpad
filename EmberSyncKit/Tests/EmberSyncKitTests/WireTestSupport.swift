@@ -53,7 +53,7 @@ func be64(_ value: UInt64) -> [UInt8] { withUnsafeBytes(of: value.bigEndian, Arr
 /// A raw frame with a correct length header, for hand-built bad payloads.
 func rawFrame(_ type: UInt8, _ payload: [UInt8]) -> Data { Data([type] + be32(UInt32(payload.count)) + payload) }
 
-func rawHello(role: UInt8, versions: (UInt16, UInt16) = (1, 2), chunk: UInt32 = 65_536, manifest: UInt32 = 8_388_608,
+func rawHello(role: UInt8, versions: (UInt16, UInt16) = (1, 3), chunk: UInt32 = 65_536, manifest: UInt32 = 8_388_608,
               magic: [UInt8] = WireProtocol.magic) -> Data {
     rawFrame(WireMessageType.hello.rawValue, magic + be16(versions.0) + be16(versions.1) + [role] + be32(chunk) + be32(manifest))
 }

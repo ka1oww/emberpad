@@ -115,7 +115,7 @@ struct InkBackupTests {
         let (id, offer) = try pair.client.requestPut(WireDataFile(bytes), hash: .digest(bytes), metadata: Data("{}".utf8), now: wireT0)
         #expect(pair.drivePut(offer) == [.failed(id, .storageFailed)])
         #expect(receiver.stored.isEmpty && receiver.aborted == 1)
-        #expect(pair.server.phase == .ready(version: 2) && pair.client.phase == .ready(version: 2))
+        #expect(pair.server.phase == .ready(version: 3) && pair.client.phase == .ready(version: 3))
         let (manifestID, request) = try pair.client.requestManifest(now: wireT0)
         #expect(pair.toClient(pair.toServer(request)).events == [.manifest(manifestID, manifest)])
     }

@@ -9,6 +9,8 @@ final class AppEnvironment {
     let presentation = PresentationState()
     let pairing: PairingController
     let sync: SyncClient
+    /// EP91: the quiet once-a-minute check for a changed Mac library while EmberPad is active.
+    let changeMonitor: LibraryChangeMonitor
     private init() throws {
         let files = FileManager.default
         let support = try files.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
@@ -22,6 +24,15 @@ final class AppEnvironment {
         // What the paired Mac holds of the ink backup (EP-33), kept beside the library, never inside it.
         sync = SyncClient(library: library, folder: syncFolder, credential: { try keychain.load() },
                           backupLedger: support.appendingPathComponent("Backup/ledger.json"))
+        let sync = self.sync
+        let library = self.library
+        changeMonitor = LibraryChangeMonitor(check: { await sync.checkForChanges() },
+                                             isWorksheetOpen: { library.hasOpenWorksheet })
+        let monitor = changeMonitor
+        library.onLastWorksheetClosed = {
+            sync.worksheetClosed()
+            monitor.worksheetClosed()
+        }
     }
 }
 
@@ -59,9 +70,12 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
         Task { await environment?.library.fileInbox() }
         // Launch and every return to the foreground (EP-24). Networking runs only while EmberPad is active.
         environment?.sync.sync()
+        // EP91: then a quiet check about once a minute while EmberPad stays active.
+        environment?.changeMonitor.start()
     }
     func sceneWillResignActive(_ scene: UIScene) {
         environment?.presentation.mainSceneActive = false
+        environment?.changeMonitor.stop()
         environment?.sync.suspend()
         environment?.library.flushForBackground()
     }

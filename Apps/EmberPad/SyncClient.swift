@@ -12,6 +12,11 @@ import EmberSyncKit
 /// the Mac: every Student copy whose ink changed since the Mac last confirmed it, as its `.emberink` package and a
 /// flattened PDF (EP-32's export). The backup only reads saved ink. Its outcome has its own notice and time; it can
 /// never fail, undo or delay the library sync it follows, and whatever did not reach the Mac is sent next sync.
+///
+/// EP91: `checkForChanges` is the quiet check `LibraryChangeMonitor` runs about once a minute while EmberPad is in
+/// the foreground. It asks the Mac only for the SHA-256 of its prepared manifest (protocol version 3) and runs the
+/// sync above only when that differs from the manifest the library last filed. It shares the one sync slot, so a
+/// check and a sync never overlap, and it shows nothing: no phase, no notice, unless it starts a sync.
 @MainActor
 final class SyncClient: ObservableObject {
     enum Phase: Equatable {
@@ -45,8 +50,14 @@ final class SyncClient: ObservableObject {
     private let defaults: UserDefaults
     /// Where the iPad remembers what the paired Mac has confirmed, outside the library. Nil turns the backup off.
     private let backupLedger: URL?
-    private var task: Task<Void, Never>? { didSet { isSyncing = task != nil } }
+    private var task: Task<Void, Never>? { didSet { updateSyncing() } }
+    /// What `task` is doing: a quiet change check never counts as syncing, so **Sync now** stays enabled.
+    private var taskIsCheck = false { didSet { updateSyncing() } }
     private var runID = 0
+    /// A Mac manifest a change check already synced for, completely, without the library ending up holding it: for
+    /// example an open worksheet kept it from being filed, or the Inbox holds a newer one. The check does not sync
+    /// for it again until a worksheet closes or the app returns to the foreground.
+    private var settledDigest: ContentHash?
 
     static let lastSyncedKey = "EmberPad.sync.lastSynced"
     static let lastBackedUpKey = "EmberPad.sync.lastBackedUp"
@@ -94,24 +105,106 @@ final class SyncClient: ObservableObject {
 
     @Published private(set) var isSyncing = false
 
-    /// Starts a sync unless one is already running. Does nothing while the iPad is not paired.
+    private func updateSyncing() { isSyncing = task != nil && !taskIsCheck }
+
+    /// Starts a sync unless one is already running. Does nothing while the iPad is not paired. A quiet change check
+    /// in progress is cancelled and the sync runs straight after it.
     func sync() {
-        if let task, !task.isCancelled { return }
+        if let task, !task.isCancelled, !taskIsCheck { return }
         let previous = task
+        if taskIsCheck { previous?.cancel() }
         runID += 1
         let id = runID
+        taskIsCheck = false
         task = Task { [weak self] in
             await previous?.value
-            if !Task.isCancelled { await self?.run(id) }
+            if !Task.isCancelled { _ = await self?.run(id) }
             guard let self, self.runID == id else { return }
             self.task = nil
         }
     }
 
-    /// Stops the sync in progress when the app leaves the foreground. Verified PDFs stay for the next sync.
+    /// Stops the sync or check in progress when the app leaves the foreground. Verified PDFs stay for the next sync.
     func suspend() {
         task?.cancel()
         phase = .idle
+        settledDigest = nil
+    }
+
+    /// A worksheet closed: a Mac library that could not all be filed while it was open may be filed now, so the
+    /// next change check syncs for it again.
+    func worksheetClosed() { settledDigest = nil }
+
+    /// What one change check found (EP91).
+    enum ChangeCheck: Equatable {
+        /// The library already holds the Mac's manifest, the Mac has none prepared, or a sync for it already ran.
+        case unchanged
+        /// The Mac's library changed and the sync it started finished.
+        case synced
+        /// The Mac's library changed but the sync it started did not finish (a PDF did not arrive, or it failed).
+        case syncFailed
+        /// The Mac was not found, or the connection failed, before it answered. Nothing was shown.
+        case unreachable
+        /// The Companion is from before the check (protocol version 3); only launch, foreground and Sync now sync.
+        case unsupported
+        /// Not paired, a sync or check already running, or cancelled. Nothing was asked.
+        case skipped
+    }
+
+    /// Asks the paired Mac whether its prepared library changed, by its manifest's SHA-256 only, and runs the usual
+    /// sync on this same slot only when it did. Never runs while a sync or another check is running. Shows nothing
+    /// unless it starts a sync, which shows its progress as any sync does.
+    func checkForChanges() async -> ChangeCheck {
+        guard task == nil else { return .skipped }
+        runID += 1
+        let id = runID
+        taskIsCheck = true
+        let work = Task { [weak self] () -> ChangeCheck in
+            guard let self else { return .skipped }
+            return await self.check(id)
+        }
+        // The slot: cancelling it (leaving the foreground, or Sync now replacing the check) cancels the check.
+        task = Task { await withTaskCancellationHandler { _ = await work.value } onCancel: { work.cancel() } }
+        let result = await work.value
+        if runID == id {
+            task = nil
+            taskIsCheck = false
+        }
+        return result
+    }
+
+    private func check(_ id: Int) async -> ChangeCheck {
+        guard let credential = try? self.credential() else { return .skipped }
+        let answer: LibraryChangeAnswer
+        do {
+            answer = try await LibraryChangeProbe().ask(over: try await connect(credential))
+        } catch {
+            return Task.isCancelled || runID != id ? .skipped : .unreachable
+        }
+        guard !Task.isCancelled, runID == id else { return .skipped }
+        let digest: ContentHash
+        switch answer {
+        case .unsupported: return .unsupported
+        case .noLibrary: return .unchanged
+        case .digest(let value): digest = value
+        }
+        let filed = try? await library.store.appliedDelivery()?.manifestSHA256
+        guard filed != digest, settledDigest != digest else { return .unchanged }
+        guard !Task.isCancelled, runID == id else { return .skipped }
+        // The Mac changed: this check becomes a sync, which Sync now no longer replaces.
+        taskIsCheck = false
+        switch await run(id) {
+        case .synced:
+            settledDigest = nil
+            return .synced
+        case .unfiled:
+            settledDigest = digest
+            return .synced
+        case .incomplete, .failed:
+            return .syncFailed
+        case .cancelled, .notPaired:
+            return .skipped
+        }
     }
 
     /// Waits for the sync in progress, if any, to end. For tests.
@@ -122,14 +215,26 @@ final class SyncClient: ObservableObject {
         }
     }
 
-    private func run(_ id: Int) async {
+    /// How one sync run ended.
+    private enum RunResult {
+        /// Every PDF arrived and the library now holds the manifest.
+        case synced
+        /// Every PDF arrived but not everything could be filed yet (an open worksheet waits).
+        case unfiled
+        /// Some PDFs did not arrive.
+        case incomplete
+        case failed, cancelled, notPaired
+    }
+
+    @discardableResult
+    private func run(_ id: Int) async -> RunResult {
         let credential: PairingCredential
         do {
-            guard let paired = try self.credential() else { return }
+            guard let paired = try self.credential() else { return .notPaired }
             credential = paired
         } catch {
             notice = Self.notice(for: error)
-            return
+            return .failed
         }
         phase = .connecting
         // A run cancelled by `suspend` must not reset the phase of the run that replaced it.
@@ -155,12 +260,19 @@ final class SyncClient: ObservableObject {
                 })
             try Task.checkCancellation()
             if let backup, let report = download.backup { await record(report, skipped: backup.skipped) }
+            if !download.isComplete { return .incomplete }
+            return filedRun == id ? .synced : .unfiled
         } catch is CancellationError {
             // Left the foreground; the next foreground syncs again.
+            return .cancelled
         } catch {
             if runID == id { notice = Self.notice(for: error) }
+            return .failed
         }
     }
+
+    /// The last run whose download the library filed completely.
+    private var filedRun = 0
 
     /// Files the download and records the sync. False when the run was cancelled first (left the foreground).
     private func file(_ download: LibrarySyncDownload, run id: Int) async -> Bool {
@@ -175,6 +287,7 @@ final class SyncClient: ObservableObject {
             lastSynced = now
             defaults.set(now, forKey: Self.lastSyncedKey)
             notice = nil
+            filedRun = id
         } else if !download.isComplete {
             notice = "\(download.failed.count) worksheet(s) did not arrive from the Mac. Nothing was archived; Sync now to finish."
         } else {

@@ -80,7 +80,7 @@ public enum WireServerEvent: Equatable, Sendable {
 /// The Mac side of the sync protocol as a pure state machine. `receive` emits at most one frame per call; after
 /// sending it, a driver should resume with `receive(Data(), now:)` while `hasPendingInput` before reading more
 /// transport bytes. File bytes are produced only by `pull`, never more than the client has granted. Every request
-/// gets exactly one terminal frame: MANIFEST, END or a request ERROR.
+/// gets exactly one terminal frame: MANIFEST, DIGEST, END or a request ERROR.
 public struct WireServerSession: Sendable {
     public typealias Instant = ContinuousClock.Instant
 
@@ -290,6 +290,9 @@ public struct WireServerSession: Sendable {
             receiveUploadData(id, offset: offset, bytes: bytes, now: now, &out)
         case (.ready(let version), .putEnd(let id, let totalBytes)) where version >= WireProtocol.putVersion:
             finishUpload(id, totalBytes: totalBytes, &out)
+        case (.ready(let version), .getDigest(let id)) where version >= WireProtocol.digestVersion:
+            guard accept(id, &out) else { return }
+            serveDigest(id, &out)
         default:
             violate(.unexpectedFrame(message.type), &out)
         }
@@ -310,6 +313,15 @@ public struct WireServerSession: Sendable {
         }
         guard json.count <= Int(peerMaxManifestBytes) else { return out.outbound.append(.error(id, .manifestTooLarge)) }
         out.outbound.append(.manifest(id, json: json))
+    }
+
+    /// The SHA-256 of exactly the bytes `serveManifest` would send now. The manifest is read afresh, as for
+    /// GET_MANIFEST, so a new Prepare changes the answer at once.
+    private func serveDigest(_ id: WireRequestID, _ out: inout WireServerOutput) {
+        guard let json = try? ManifestCodec.encode(provider.manifest()) else {
+            return out.outbound.append(.error(id, .unavailable))
+        }
+        out.outbound.append(.digest(id, sha256: .digest(json)))
     }
 
     private mutating func startTransfer(
