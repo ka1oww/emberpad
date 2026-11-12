@@ -109,6 +109,25 @@ enum TeacherCopySlide {
         return abs(dx) > abs(dy)
     }
 
+    /// EP97: how far in from the worksheet body's edge a finger may touch down and still swipe a hidden panel back
+    /// out of that edge, like pulling a Slide Over window in from the side of the screen.
+    static let edgeBand: CGFloat = 24
+
+    /// Whether a finger touching down at `x` (window coordinates) is at the edge the panel is hidden off. `bodyMinX`
+    /// and `bodyMaxX` are the worksheet body's left and right edges, which are the screen's while the library sidebar
+    /// is hidden, as it is whenever a worksheet opens.
+    static func edgeSwipeStarts(atX x: CGFloat, side: TeacherCopyPanelSide, bodyMinX: CGFloat, bodyMaxX: CGFloat) -> Bool {
+        guard bodyMaxX - bodyMinX > 2 * edgeBand else { return false }
+        return side == .leading ? x >= bodyMinX && x <= bodyMinX + edgeBand : x <= bodyMaxX && x >= bodyMaxX - edgeBand
+    }
+
+    /// Whether a finger that touched down at the hidden panel's edge and has moved (dx, dy) is pulling the panel in:
+    /// past the slop, more sideways than up or down, and away from that edge. Anything else is left to the page.
+    static func beginsEdgeSwipe(dx: CGFloat, dy: CGFloat, side: TeacherCopyPanelSide) -> Bool? {
+        guard let sideways = beginsSlide(dx: dx, dy: dy) else { return nil }
+        return sideways && dx * side.outward < 0
+    }
+
     /// Whether a scroll view (a zoomed-in PDF) can still scroll its content the way the finger moves, in which case
     /// the swipe is the PDF's, not the panel's. `minX`/`maxX` are its content-offset limits.
     static func scrollViewTakesSwipe(dx: CGFloat, offsetX: CGFloat, minX: CGFloat, maxX: CGFloat) -> Bool {
@@ -251,7 +270,7 @@ enum TeacherCopyAnswerPage {
 
 /// The panel plus the pull tab that stands in for it when it is hidden, like iPadOS Slide Over (EP95): swipe the
 /// panel sideways with a finger anywhere on it to slide it off its edge or across to the other side, and tap or swipe
-/// the tab to slide it back. Fills the worksheet body, below the toolbar strip, and only hit-tests where the panel or
+/// the tab, or swipe in from that edge of the worksheet (EP97), to slide it back. Fills the worksheet body, below the toolbar strip, and only hit-tests where the panel or
 /// the tab is.
 struct TeacherCopyCardOverlay: View {
     let content: TeacherCopyCardContent
@@ -302,6 +321,10 @@ struct TeacherCopyCardOverlay: View {
                 }
             }
             .frame(width: container.width, height: container.height, alignment: .topLeading)
+            // EP97: while the panel is hidden, a finger swipe in from that edge of the body brings it out, as the tab does.
+            .background(TeacherCopyEdgeSwipe(side: side, isEnabled: !card.isOpen,
+                                             onChanged: { drag = $0 },
+                                             onEnded: { settle(translation: $0, velocity: $1, panelSize: panelSize, in: container) }))
             // Nothing slides out over whatever sits beside the worksheet body.
             .clipped()
             // A hide from the book toggle animates outside this view, so the panel leaves once it has surely settled.
@@ -385,7 +408,7 @@ struct SlideOverSurface<Content: View>: UIViewRepresentable {
 /// decides after `TeacherCopySlide.slop`: sideways begins the swipe, anything else fails it at once, and so does a
 /// second finger (a pinch on the PDF). The panel's own scroll views wait for it to fail, so a sideways swipe never
 /// nudges the answers vertically, and it yields to a zoomed-in PDF that can still scroll that way.
-final class SlideOverSwipeRecognizer: UIGestureRecognizer {
+class SlideOverSwipeRecognizer: UIGestureRecognizer {
     static let fingerOnly = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
 
     enum Phase: Equatable {
@@ -417,7 +440,7 @@ final class SlideOverSwipeRecognizer: UIGestureRecognizer {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard touch == nil, touches.count == 1, let first = touches.first else {
+        guard touch == nil, touches.count == 1, let first = touches.first, tracks(first) else {
             if state == .possible { state = .failed }
             return
         }
@@ -434,7 +457,7 @@ final class SlideOverSwipeRecognizer: UIGestureRecognizer {
         translation = point.x - start.x
         switch state {
         case .possible:
-            guard let sideways = TeacherCopySlide.beginsSlide(dx: translation, dy: point.y - start.y) else { return }
+            guard let sideways = begins(dx: translation, dy: point.y - start.y) else { return }
             state = sideways && !scrollViewTakesSwipe(touch) ? .began : .failed
             if state == .began { onSwipe(.changed(translation)) }
         case .began, .changed:
@@ -466,6 +489,12 @@ final class SlideOverSwipeRecognizer: UIGestureRecognizer {
         samples = []
     }
 
+    /// Whether this finger, as it touches down, may become the swipe at all.
+    func tracks(_ touch: UITouch) -> Bool { true }
+
+    /// Whether the finger's travel so far makes it the swipe (true), not (false), or is undecided (nil).
+    func begins(dx: CGFloat, dy: CGFloat) -> Bool? { TeacherCopySlide.beginsSlide(dx: dx, dy: dy) }
+
     /// Scrolling inside the panel (the answers) waits for this swipe to fail; nothing outside the panel does.
     override func shouldBeRequiredToFail(by other: UIGestureRecognizer) -> Bool {
         guard other is UIPanGestureRecognizer, let view, let otherView = other.view else { return false }
@@ -486,6 +515,101 @@ final class SlideOverSwipeRecognizer: UIGestureRecognizer {
             candidate = current.superview
         }
         return false
+    }
+}
+
+/// EP97: the hidden panel's edge swipe. It sits on the window, so it sees a finger wherever it lands, and it only
+/// tracks one that touches down within `TeacherCopySlide.edgeBand` of the worksheet body's edge the panel is hidden
+/// off; every other touch fails it at once, so nothing elsewhere waits for it. Finger only, as the panel's own swipe:
+/// Apple Pencil never reaches it, so a stroke that starts at the edge still draws ink.
+///
+/// At that edge it must win over what already owns it there: the page's finger scroll (PDFView's scroll view), the
+/// navigation stack's interactive pop (which would go Back to the library) and the split view's sidebar pan. All of
+/// those are pans, so every finger pan waits for this one to fail; it fails within the slop unless the finger moves
+/// inwards more than up or down, and then cancels them. Pencil-only recognisers (ink, eraser) never wait. A finger
+/// that lands on the pull tab is left to the tab's own swipe, so the two never move the panel together.
+final class TeacherCopyEdgeSwipeRecognizer: SlideOverSwipeRecognizer {
+    var side = TeacherCopyPanelSide.leading
+    /// The worksheet body's frame in window coordinates.
+    var body: () -> CGRect = { .null }
+
+    override func tracks(_ touch: UITouch) -> Bool {
+        guard !Self.landsOnPanelOrTab(touch) else { return false }
+        let frame = body()
+        guard !frame.isNull, !frame.isEmpty else { return false }
+        let point = touch.location(in: nil)
+        guard point.y >= frame.minY, point.y <= frame.maxY else { return false }
+        return TeacherCopySlide.edgeSwipeStarts(atX: point.x, side: side, bodyMinX: frame.minX, bodyMaxX: frame.maxX)
+    }
+
+    override func begins(dx: CGFloat, dy: CGFloat) -> Bool? {
+        TeacherCopySlide.beginsEdgeSwipe(dx: dx, dy: dy, side: side)
+    }
+
+    /// Every finger pan in the window waits for the edge swipe: the page's scroll, the interactive pop, the sidebar's.
+    override func shouldBeRequiredToFail(by other: UIGestureRecognizer) -> Bool {
+        guard other !== self, other is UIPanGestureRecognizer, !(other is SlideOverSwipeRecognizer) else { return false }
+        return Self.takesFingers(other)
+    }
+
+    /// A finger on the pull tab (or the panel) is that surface's own swipe, so the two never drive the panel together.
+    static func landsOnPanelOrTab(_ touch: UITouch) -> Bool {
+        sequence(first: touch.view, next: { $0?.superview }).contains {
+            $0?.gestureRecognizers?.contains { $0 is SlideOverSwipeRecognizer && !($0 is TeacherCopyEdgeSwipeRecognizer) } == true
+        }
+    }
+
+    static func takesFingers(_ recognizer: UIGestureRecognizer) -> Bool {
+        recognizer.allowedTouchTypes.contains(NSNumber(value: UITouch.TouchType.direct.rawValue))
+    }
+}
+
+/// Installs `TeacherCopyEdgeSwipeRecognizer` on the window while the worksheet body is on screen. The view itself is
+/// the body's frame and takes no touches, so the page under it is untouched.
+struct TeacherCopyEdgeSwipe: UIViewRepresentable {
+    var side: TeacherCopyPanelSide
+    var isEnabled: Bool
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (_ translation: CGFloat, _ velocity: CGFloat) -> Void
+
+    func makeUIView(context: Context) -> InstallerView {
+        let view = InstallerView()
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        view.swipe.body = { [weak view] in
+            guard let view, view.window != nil else { return .null }
+            return view.convert(view.bounds, to: nil)
+        }
+        return view
+    }
+
+    func updateUIView(_ view: InstallerView, context: Context) {
+        view.swipe.side = side
+        // Every move re-renders the overlay; re-setting `isEnabled` mid-swipe would reset the swipe under the finger.
+        if view.swipe.isEnabled != isEnabled { view.swipe.isEnabled = isEnabled }
+        view.swipe.onSwipe = { [onChanged, onEnded] phase in
+            switch phase {
+            case .changed(let translation): onChanged(translation)
+            case .ended(let translation, let velocity): onEnded(translation, velocity)
+            }
+        }
+    }
+
+    static func dismantleUIView(_ view: InstallerView, coordinator: ()) { view.uninstall() }
+
+    final class InstallerView: UIView {
+        let swipe = TeacherCopyEdgeSwipeRecognizer()
+
+        /// Moves the swipe with the view's window. Removing it from a window resets it, so it stays put while the
+        /// window is unchanged (SwiftUI re-parents views as the panel mounts during a swipe).
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard swipe.view !== window else { return }
+            uninstall()
+            window?.addGestureRecognizer(swipe)
+        }
+
+        func uninstall() { swipe.view?.removeGestureRecognizer(swipe) }
     }
 }
 
