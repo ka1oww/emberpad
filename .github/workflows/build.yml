@@ -29,7 +29,8 @@ jobs:
   # The iPad test target is split into three parallel shards, balanced by the
   # per-class runtimes in CI. Shards 1 and 2 list their classes explicitly;
   # shard 3 skips exactly those classes, so it runs everything else, including
-  # any test class added later. Every test therefore runs in exactly one shard.
+  # any test class added later. Every test therefore runs in exactly one shard,
+  # except DeviceDrawingStressTests, which runs only from scripts/device-stress-test.sh.
   ipad-tests:
     name: ipad-tests (shard ${{ matrix.shard }})
     runs-on: macos-26
@@ -68,6 +69,7 @@ jobs:
               -skip-testing:EmberPadTests/LibraryFolderBrowserTests
               -skip-testing:EmberPadTests/LiveInkTests
               -skip-testing:EmberPadTests/LaserPointerScreenshotTests
+              -skip-testing:EmberPadTests/DeviceDrawingStressTests
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
