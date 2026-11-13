@@ -65,9 +65,10 @@ final class ToolbarDockScreenshotTests: XCTestCase {
         XCTAssertEqual(topRow.midX, page.midX, accuracy: 1, "centred along the top")
         try save(window, "ep100-01-top")
 
-        // Lift the row: it fades in place, a raised copy follows the finger and the nearest edge's slot lights up.
+        // Carry the row (EP102): the palette itself follows the finger and the nearest edge's slot lights up.
         let handle = try XCTUnwrap(Self.dragHandle(in: window))
-        handle.onDrag(.began(CGPoint(x: topRow.midX, y: topRow.midY)))
+        let centre = CGPoint(x: topRow.midX, y: topRow.midY)
+        handle.onDrag(.began(from: centre, at: centre, palette: topRow))
         handle.onDrag(.moved(CGPoint(x: window.bounds.maxX - 60, y: window.bounds.midY + 40)))
         await pause(0.6)
         try save(window, "ep100-02-lifted-over-the-right-edge")
@@ -83,7 +84,8 @@ final class ToolbarDockScreenshotTests: XCTestCase {
             if !first {
                 let row = try XCTUnwrap(Self.toolRowFrame(in: window))
                 let drag = try XCTUnwrap(Self.dragHandle(in: window))
-                drag.onDrag(.began(CGPoint(x: row.midX, y: row.midY)))
+                let centre = CGPoint(x: row.midX, y: row.midY)
+                drag.onDrag(.began(from: centre, at: centre, palette: row))
                 drag.onDrag(.moved(drop))
             }
             first = false
@@ -92,7 +94,7 @@ final class ToolbarDockScreenshotTests: XCTestCase {
             XCTAssertEqual(tools.settings.toolbarDock, dock, name)
             XCTAssertTrue(Self.renderer(in: window) === renderer, "\(name): moving the palette never reloads the page")
             try checkRow(on: dock, in: window, renderer: renderer, page: page)
-            // It lands where it was let go along the edge.
+            // It lands where it was let go along the edge (carried by its centre, the palette is centred on the drop).
             let row = try XCTUnwrap(Self.toolRowFrame(in: window))
             let expected = ToolbarDockDrag.frame(for: dock, along: ToolbarDockDrag.along(for: drop, on: dock, in: page),
                                                  size: row.size, in: ToolbarDockDrag.room(for: dock, in: page, tabSide: .trailing))

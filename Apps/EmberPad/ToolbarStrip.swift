@@ -33,12 +33,12 @@ enum ToolbarExtra: String, CaseIterable, Identifiable {
 /// laser pointer | the active tool's widths and colours. Image and text are greyed placeholders (design 5.4).
 /// Tapping the selected tool again opens its settings popover. EP101: it floats over the page in a capsule, as
 /// GoodNotes 6's Writing Tools menu does, against any edge of the worksheet (see `ToolbarDock`): across the top or
-/// bottom, or upright down the left or right side. A finger held on it picks it up to move it. It is as long as its
-/// tools, and scrolls only when the worksheet is too narrow for them.
+/// bottom, or upright down the left or right side. A finger dragging it carries it, with no hold (EP102). It is as long
+/// as its tools, and scrolls only when the worksheet is too narrow for them.
 struct ToolbarStrip: View {
     let tools: ToolState
     var dock: ToolbarDock = .top
-    /// The finger's hold and drag that moves the palette (EP100); nil leaves it where it is.
+    /// The finger's drag that carries the palette (EP100, EP102); nil leaves it where it is.
     var onDrag: ((ToolbarDragRecognizer.Phase) -> Void)?
     /// Moves the palette straight to another edge, for VoiceOver's actions (EP100); nil offers none.
     var onMove: ((ToolbarDock) -> Void)?
