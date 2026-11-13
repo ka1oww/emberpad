@@ -40,6 +40,8 @@ final class ToolbarDragProbe: NSObject {
         var step: Double
         /// Whether the palette had been picked up and was moving with the finger.
         var carried: Bool
+        /// How long since the frame before (EP107): a loaded runner now and then shows a frame late.
+        var gap: Double
     }
 
     private var downAt: CFTimeInterval = 0
@@ -50,6 +52,10 @@ final class ToolbarDragProbe: NSObject {
     private var startCentre: CGPoint = .zero
     private var fingerMovedAt: CFTimeInterval?
     private var paletteMovedAt: CFTimeInterval?
+    /// EP107: the frames on which the finger was first `ToolbarDockDrag.startSlop` from where it touched down, and the
+    /// palette first drawn moved, counted from the touch.
+    private var slopFrame: Int?
+    private var pickupFrame: Int?
     private var samples: [Sample] = []
     private var lastFinger: CGPoint?
     private var frameTimes: [CFTimeInterval] = []
@@ -100,6 +106,8 @@ final class ToolbarDragProbe: NSObject {
                        y: frame.height > 0 ? (point.y - frame.minY) / frame.height : 0.5)
         fingerMovedAt = nil
         paletteMovedAt = nil
+        slopFrame = nil
+        pickupFrame = nil
         samples = []
         lastFinger = nil
         frameTimes = []
@@ -189,9 +197,14 @@ final class ToolbarDragProbe: NSObject {
         guard let drawn = drawn() else { return }
         if upAt != nil { settle(drawn.centre, at: CACurrentMediaTime()); return }
         let now = link.timestamp
+        let gap = frameTimes.last.map { now - $0 } ?? 0
         frameTimes.append(now)
+        if slopFrame == nil, hypot(finger.x - start.x, finger.y - start.y) >= ToolbarDockDrag.startSlop {
+            slopFrame = frameTimes.count
+        }
         if paletteMovedAt == nil, hypot(drawn.centre.x - startCentre.x, drawn.centre.y - startCentre.y) > 1 {
             paletteMovedAt = CACurrentMediaTime()
+            pickupFrame = frameTimes.count
         }
         // Only once the finger has started to move: before that nothing should move.
         guard fingerMovedAt != nil else { lastFinger = finger; return }
@@ -200,7 +213,7 @@ final class ToolbarDragProbe: NSObject {
         // Under the finger: the point it took hold of is drawn where the finger is.
         samples.append(Sample(t: now - downAt, fingerX: finger.x, fingerY: finger.y, drawnX: drawn.grab.x, drawnY: drawn.grab.y,
                               error: hypot(drawn.grab.x - finger.x, drawn.grab.y - finger.y), step: step,
-                              carried: paletteMovedAt != nil))
+                              carried: paletteMovedAt != nil, gap: gap))
         if Self.comparesScenes, paletteMovedAt != nil, now - lastSceneAt >= Self.sceneInterval { compareScene(at: now) }
     }
 
@@ -262,6 +275,11 @@ final class ToolbarDragProbe: NSObject {
     private func publish() {
         let errors = samples.map(\.error).sorted()
         let gaps = zip(frameTimes.dropFirst(), frameTimes).map { $0 - $1 }
+        // EP107: a frame on time comes no later than twice the usual frame interval after the one before. On a late
+        // one the finger has moved further, and the palette is that much further behind (`maxBeyondOneFrame` holds it
+        // to the frame's travel all the same).
+        let usualGap = gaps.sorted().dropFirst(gaps.count / 2).first ?? 0
+        let onTime = samples.filter { $0.gap <= 2 * usualGap }.map(\.error)
         func percentile(_ p: Double) -> Double { errors.isEmpty ? 0 : errors[min(errors.count - 1, Int(Double(errors.count) * p))] }
         summary = [
             "frames": Double(samples.count),
@@ -272,9 +290,15 @@ final class ToolbarDragProbe: NSObject {
             // How long after the finger started moving the palette first moved (negative: before the finger moved).
             "pickupDelay": paletteMovedAt.map { $0 - (fingerMovedAt ?? downAt) } ?? -1,
             "maxFrameGap": gaps.max() ?? 0,
+            "usualFrameGap": usualGap,
+            // EP107: the largest distance from the finger on frames that came on time, and how many frames after the
+            // finger was first `ToolbarDockDrag.startSlop` from where it touched down the palette was first drawn
+            // moved: the pick-up counted in frames, so a frame a loaded runner shows late does not make it look slow.
+            "maxErrorOnTime": onTime.max() ?? 0,
+            "pickupFrames": pickupFrame.flatMap { picked in slopFrame.map { Double(picked - $0) } } ?? -1,
             // Once it was carried, how much further off the palette ever was than the one frame it takes to draw what
             // the finger did: about 0 when it keeps up frame for frame, however fast the finger moves. (Before the
-            // pick-up it waits for the few points that tell a drag from a tap: see pickupDelay and maxError.)
+            // pick-up it waits for the few points that tell a drag from a tap: see pickupFrames and maxErrorOnTime.)
             "maxBeyondOneFrame": samples.filter(\.carried).map { max($0.error - $0.step, 0) }.max() ?? 0,
         ]
         if Self.comparesScenes {
