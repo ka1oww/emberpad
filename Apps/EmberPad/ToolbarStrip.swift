@@ -29,23 +29,34 @@ enum ToolbarExtra: String, CaseIterable, Identifiable {
     }
 }
 
-/// The worksheet tool row under the header bar, centred and in GoodNotes' order
-/// (EP54): pen, eraser, highlighter, shapes, lasso, image, text, laser pointer | the
-/// active tool's widths and colours. Image and text are greyed placeholders
-/// (design 5.4). Tapping the selected tool again opens its settings popover.
+/// The worksheet tool row, centred and in GoodNotes' order (EP54): pen, eraser, highlighter, shapes, lasso, image,
+/// text, laser pointer | the active tool's widths and colours. Image and text are greyed placeholders (design 5.4).
+/// Tapping the selected tool again opens its settings popover. EP100: it docks on any edge of the worksheet (see
+/// `ToolbarDock`): a row across the top or bottom, or a column down the left or right side, and a finger held on it
+/// picks it up to move it.
 struct ToolbarStrip: View {
     let tools: ToolState
+    var dock: ToolbarDock = .top
+    /// The finger's hold and drag that moves the row (EP100); nil leaves it where it is.
+    var onDrag: ((ToolbarDragRecognizer.Phase) -> Void)?
+    /// Moves the row straight to another edge, for VoiceOver's actions (EP100); nil offers none.
+    var onMove: ((ToolbarDock) -> Void)?
     static let height: CGFloat = 48
+    /// The column's width down a side (EP100): a 48 pt tool target with a little room either side.
+    static let columnWidth: CGFloat = 56
     /// GoodNotes' left-to-right order of the tools Ember Slate has.
     static let order: [ToolbarSlot] = [
         .tool(.pen), .tool(.eraser), .tool(.highlighter), .tool(.shape),
         .tool(.lasso), .extra(.image), .extra(.text), .tool(.laser),
     ]
 
+    private var vertical: Bool { dock.isVertical }
+
     var body: some View {
+        let layout = vertical ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
         GeometryReader { geometry in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
+            ScrollView(vertical ? .vertical : .horizontal, showsIndicators: false) {
+                layout {
                     ForEach(Self.order) { slot in
                         switch slot {
                         case .tool(let tool): toolButton(tool)
@@ -55,17 +66,43 @@ struct ToolbarStrip: View {
                             }
                         }
                     }
-                    StripSeparator()
-                    ActiveToolMenu(tools: tools)
+                    StripSeparator(vertical: vertical)
+                    ActiveToolMenu(tools: tools, vertical: vertical)
                 }
-                .padding(.horizontal, 12)
-                .frame(minWidth: geometry.size.width, minHeight: Self.height)
+                .padding(vertical ? .vertical : .horizontal, 12)
+                .frame(minWidth: vertical ? Self.columnWidth : geometry.size.width,
+                       minHeight: vertical ? geometry.size.height : Self.height)
             }
         }
-        .frame(height: Self.height)
-        .background(Theme.toolRow)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.line).frame(height: Theme.hairlineWidth)
+        .frame(width: vertical ? Self.columnWidth : nil, height: vertical ? nil : Self.height)
+        // A row at the bottom, or a column, runs on under the home indicator, as the header runs under the status bar.
+        .background(Theme.toolRow.ignoresSafeArea(edges: dock == .top ? [] : .bottom))
+        .overlay(alignment: hairlineAlignment) {
+            if vertical {
+                Rectangle().fill(Theme.line).frame(width: Theme.hairlineWidth).ignoresSafeArea(edges: .bottom)
+            } else {
+                Rectangle().fill(Theme.line).frame(height: Theme.hairlineWidth)
+            }
+        }
+        .background { if let onDrag { ToolbarDragHandle(onDrag: onDrag) } }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Tools")
+        .accessibilityActions {
+            if let onMove {
+                ForEach(ToolbarDock.allCases.filter { $0 != dock }, id: \.self) { other in
+                    Button("Move tools to the \(other.title.lowercased())") { onMove(other) }
+                }
+            }
+        }
+    }
+
+    /// The hairline sits on the row's page side.
+    private var hairlineAlignment: Alignment {
+        switch dock {
+        case .top: .bottom
+        case .bottom: .top
+        case .leading: .trailing
+        case .trailing: .leading
         }
     }
 
@@ -74,7 +111,7 @@ struct ToolbarStrip: View {
             .popover(isPresented: Binding(
                 get: { tools.settingsTool == tool },
                 set: { open in if !open, tools.settingsTool == tool { tools.settingsTool = nil } }
-            ), arrowEdge: .top) {
+            ), arrowEdge: dock.popoverArrowEdge) {
                 ToolSettingsPopover(tool: tool, tools: tools)
                     .presentationCompactAdaptation(.popover)
             }
@@ -95,8 +132,14 @@ enum ToolbarSlot: Identifiable, Equatable {
 }
 
 private struct StripSeparator: View {
+    var vertical = false
+
     var body: some View {
-        Rectangle().fill(Theme.line).frame(width: 1, height: 28).padding(.horizontal, 6)
+        if vertical {
+            Rectangle().fill(Theme.line).frame(width: 28, height: 1).padding(.vertical, 6)
+        } else {
+            Rectangle().fill(Theme.line).frame(width: 1, height: 28).padding(.horizontal, 6)
+        }
     }
 }
 
@@ -153,14 +196,18 @@ private struct ExtraButton: View {
 
 // MARK: - Active tool menu
 
-/// The current tool's controls after the divider: widths, then colours, as in GoodNotes.
+/// The current tool's controls after the divider: widths, then colours, as in GoodNotes. Down a side (EP100) they
+/// stack in the same order, the eraser's modes become two stacked buttons, and the lasso's and laser's one-line hints,
+/// which have no room there, are left out.
 private struct ActiveToolMenu: View {
     let tools: ToolState
+    var vertical = false
     @State private var pickedColor: PickedColor?
     @State private var addingColorFor: WorksheetTool?
 
     var body: some View {
-        HStack(spacing: 6) {
+        let layout = vertical ? AnyLayout(VStackLayout(spacing: 6)) : AnyLayout(HStackLayout(spacing: 6))
+        layout {
             switch tools.current {
             case .pen:
                 widthLines(Theme.penWidths, selected: tools.settings.penWidthIndex, thicknesses: [2, 3.5, 5.5], select: tools.selectPenWidth)
@@ -169,11 +216,17 @@ private struct ActiveToolMenu: View {
                 widthLines(Theme.highlighterWidths, selected: tools.settings.highlighterWidthIndex, thicknesses: [3, 5.5, 11], select: tools.selectHighlighterWidth)
                 colorDots(.highlighter)
             case .eraser:
-                Picker("Eraser", selection: Binding(get: { tools.settings.eraserMode }, set: tools.setEraserMode)) {
-                    ForEach(EraserMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                if vertical {
+                    ForEach(EraserMode.allCases, id: \.self) { mode in
+                        EraserModeButton(mode: mode, selected: tools.settings.eraserMode == mode) { tools.setEraserMode(mode) }
+                    }
+                } else {
+                    Picker("Eraser", selection: Binding(get: { tools.settings.eraserMode }, set: tools.setEraserMode)) {
+                        ForEach(EraserMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
                 }
-                .pickerStyle(.segmented)
-                .fixedSize()
                 widthDots(Theme.eraserSizes, selected: tools.settings.eraserSizeIndex, diameters: [6, 10, 16], select: tools.selectEraserSize)
                     .disabled(tools.settings.eraserMode != .partial)
                     .opacity(tools.settings.eraserMode == .partial ? 1 : 0.4)
@@ -182,15 +235,19 @@ private struct ActiveToolMenu: View {
                 widthLines(Theme.penWidths, selected: tools.settings.penWidthIndex, thicknesses: [2, 3.5, 5.5], select: tools.selectPenWidth)
                 colorDots(.pen)
             case .lasso:
-                Text("Circle ink to select · tap it for Cut, Copy, Delete, Duplicate, Resize, Color")
-                    .font(Theme.meta)
-                    .foregroundStyle(Theme.text2)
-                    .lineLimit(1)
+                if !vertical {
+                    Text("Circle ink to select · tap it for Cut, Copy, Delete, Duplicate, Resize, Color")
+                        .font(Theme.meta)
+                        .foregroundStyle(Theme.text2)
+                        .lineLimit(1)
+                }
             case .laser:
-                Text("\(tools.settings.laserMode.title) · point with the Pencil · nothing is written")
-                    .font(Theme.meta)
-                    .foregroundStyle(Theme.text2)
-                    .lineLimit(1)
+                if !vertical {
+                    Text("\(tools.settings.laserMode.title) · point with the Pencil · nothing is written")
+                        .font(Theme.meta)
+                        .foregroundStyle(Theme.text2)
+                        .lineLimit(1)
+                }
             }
         }
         .addColorSheet(for: $addingColorFor, picked: $pickedColor, tools: tools)
@@ -256,6 +313,31 @@ private struct ActiveToolMenu: View {
             .accessibilityLabel("Width \(widths[index].formatted()) points")
             .accessibilityAddTraits(index == selected ? .isSelected : [])
         }
+    }
+}
+
+/// The eraser's Partial or Whole stroke choice in a side column, where the row's segmented control has no room
+/// (EP100): one short-labelled button each, the chosen one on a soft red square.
+private struct EraserModeButton: View {
+    let mode: EraserMode
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(mode == .partial ? "Partial" : "Whole")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(selected ? Theme.accent : Theme.text2)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: 46, height: 30)
+                .background(selected ? Theme.accentSoft : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(mode.title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -563,9 +645,12 @@ private struct ColorPickerSheet: UIViewControllerRepresentable {
 
 // MARK: - Toast
 
-/// The tool toast: a capsule 60 pt below the strip that fades after 1.3 s.
+/// The tool toast: a capsule 60 pt into the page from the strip (or from the top, with the strip down a side) that
+/// fades after 1.3 s.
 struct ToolToastOverlay: View {
     let toast: ToolToast?
+    /// Above a row docked at the bottom (EP100); below the top otherwise.
+    var fromBottom = false
 
     var body: some View {
         ZStack {
@@ -575,7 +660,7 @@ struct ToolToastOverlay: View {
                     .transition(.opacity)
             }
         }
-        .padding(.top, 60)
+        .padding(fromBottom ? .bottom : .top, 60)
         .animation(.easeInOut(duration: 0.2), value: toast?.id)
         .allowsHitTesting(false)
     }
