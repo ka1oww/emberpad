@@ -107,12 +107,14 @@ final class LibraryFolderTransitionTests: XCTestCase {
         let (library, window) = try await hostLibrary(reduceMotion: false)
         library.sidebarSelection = .subject("Chemistry")
         library.openFolder(try XCTUnwrap(library.visibleFolders.first { $0.name == "Notes" }))
-        await pause(1.0)
+        await pause(0.3)
+        await settle(window)
         let parent = snapshot(window)
 
         library.openFolder(try XCTUnwrap(library.visibleFolders.first { $0.name == "Topic B" }))
         let pushFrames = await frames(window, count: 4, every: 0.05)
-        await pause(1.0)
+        await pause(0.3)
+        await settle(window)
         let child = snapshot(window)
         XCTAssertEqual(library.folderPath, ["Notes", "Topic B"])
         XCTAssertGreaterThan(difference(parent, child), 0.01, "a different folder is showing")
@@ -121,7 +123,8 @@ final class LibraryFolderTransitionTests: XCTestCase {
 
         library.closeFolder()
         let popFrames = await frames(window, count: 4, every: 0.05)
-        await pause(1.0)
+        await pause(0.3)
+        await settle(window)
         let back = snapshot(window)
         XCTAssertEqual(library.folderPath, ["Notes"])
         XCTAssertEqual(library.visibleFolders.map(\.name), ["Topic A", "Topic B", "Topic C"])
@@ -135,14 +138,17 @@ final class LibraryFolderTransitionTests: XCTestCase {
         let (library, window) = try await hostLibrary(reduceMotion: true)
         library.sidebarSelection = .subject("Chemistry")
         library.openFolder(try XCTUnwrap(library.visibleFolders.first { $0.name == "Notes" }))
-        await pause(1.0)
+        await pause(0.3)
+        await settle(window)
         let parent = snapshot(window)
         library.openFolder(try XCTUnwrap(library.visibleFolders.first { $0.name == "Topic C" }))
-        await pause(1.0)
+        await pause(0.3)
+        await settle(window)
         XCTAssertEqual(library.folderPath, ["Notes", "Topic C"])
         XCTAssertEqual(library.visibleCards.map { LibraryFolders.ownTitle(of: $0) }, ["Topic C Notes"])
         library.closeFolder()
-        await pause(1.0)
+        await pause(0.3)
+        await settle(window)
         XCTAssertEqual(library.folderPath, ["Notes"])
         XCTAssertLessThan(difference(snapshot(window), parent), 0.002)
     }
@@ -278,6 +284,18 @@ final class LibraryFolderTransitionTests: XCTestCase {
 
     private func pause(_ seconds: TimeInterval) async {
         try? await Task.sleep(for: .seconds(seconds))
+    }
+
+    /// Waits until the screen stops changing (two samples in a row match), so a slow runner's late frame cannot be
+    /// mistaken for a different page. Gives up after 15 s and lets the caller's assertion report the difference.
+    private func settle(_ window: UIWindow) async {
+        var last = snapshot(window)
+        for _ in 0..<150 {
+            await pause(0.1)
+            let now = snapshot(window)
+            if difference(now, last) == 0 { return }
+            last = now
+        }
     }
 
     /// What is on screen now, including a move in progress.
