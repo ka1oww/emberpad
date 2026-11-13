@@ -123,10 +123,11 @@ enum Theme {
     /// in GoodNotes, is the default. The stored width is the index, so saved settings keep thin, middle or thick.
     static let highlighterWidths: [CGFloat] = [7.5, 8, 19.6]
     static let highlighterDefaultWidthIndex = 1
-    /// Partial-eraser sizes, in screen points (PencilKit erases the same on-screen width at every zoom); the
-    /// whole-stroke eraser has no size. EP71: GoodNotes' small, medium and large erase about 25, 50 and 100 points
-    /// across. PencilKit's partial eraser takes only 16.4 to 80.4 points (EP68), so large is its maximum, 80.4. The
-    /// stored size is the index, so saved settings keep small, medium or large.
+    /// Eraser sizes, the circle's width across in screen points (both erasers erase the same on-screen width at every
+    /// zoom). EP71: GoodNotes' small, medium and large erase about 25, 50 and 100 points across. PencilKit's partial
+    /// eraser takes only 16.4 to 80.4 points (EP68), so large is its maximum, 80.4. EP99: the whole-stroke eraser uses
+    /// the same three, and the same choice, as GoodNotes' eraser has one size for every mode. The stored size is the
+    /// index, so saved settings keep small, medium or large.
     static let eraserSizes: [CGFloat] = [25, 50, 80.4]
     static let eraserDefaultSizeIndex = 1
     /// The toast capsule: `#1C1C1E` at 88% in both themes (design 5.4).

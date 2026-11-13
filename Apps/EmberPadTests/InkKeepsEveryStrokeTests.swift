@@ -184,7 +184,7 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         let drawn = ShapeToolTests.freehand(ShapeToolTests.hand(corners, closed: true))
         canvas.drawing = PKDrawing(strokes: [drawn])
         controller.canvasViewDrawingDidChange(canvas)
-        await InkSettle.settle(timeout: 0.3)
+        await InkSettle.settle()
         XCTAssertNotEqual(canvas.drawing.strokes.first?.path.count, drawn.path.count, "the clean shape is on the page")
         XCTAssertFalse(controller.hasPendingInk)
     }

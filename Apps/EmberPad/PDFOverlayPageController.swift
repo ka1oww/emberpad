@@ -45,7 +45,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     let eraserTouch = LiveInkRecognizer()
     /// Apple Pencil hover with the eraser chosen, on iPads that support it; elsewhere it never fires. Internal for tests.
     let eraserHover = UIHoverGestureRecognizer()
-    /// The page ink space of the eraser stroke in progress, fixed at pen-down, which sizes the whole-stroke circle.
+    /// EP99: the whole-stroke eraser is EmberPad's own, so while it is chosen this takes the Pencil on the worksheet,
+    /// as the laser's does: PencilKit's drawing recogniser is off, and the Pencil must not scroll the pages instead.
+    /// Fingers never reach it. Internal for tests.
+    let wholeStrokeEraserClaim = LaserPointerRecognizer()
+    /// The whole-stroke eraser stroke in progress, if any. Internal for tests.
+    private(set) var wholeStrokeErase: WholeStrokeEraseStroke?
+    /// The page ink space of the eraser stroke in progress, fixed at pen-down.
     private weak var eraserStrokeSpace: UIView?
     private var currentPage = 0
     /// Off from the moment the worksheet starts leaving, so a late throttled frame cannot put a page back on the
@@ -183,6 +189,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         eraserHover.allowedTouchTypes = [UITouch.TouchType.pencil.rawValue as NSNumber]
         eraserHover.delegate = self
         pdfView.addGestureRecognizer(eraserHover)
+        wholeStrokeEraserClaim.delegate = self
+        pdfView.addGestureRecognizer(wholeStrokeEraserClaim)
         view.layer.addSublayer(eraserCircle)
         updateCanvasInput()
         publishPage()
@@ -297,6 +305,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if canvases[index] === canvas { landInkEdits() }
         inkFlights.remove(canvas: ObjectIdentifier(canvas))
         if highlighterErase?.canvas === canvas { finishHighlighterErase() }
+        if wholeStrokeErase?.canvas === canvas { finishWholeStrokeErase() }
         inkSelection.canvasWillLeave(canvas)
         livePen.remove(page: index)
         if scribblePreview?.page == index, canvases[index] === canvas { clearScribblePreview() }
@@ -395,11 +404,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     func undo() {
         guard !readOnly else { return }
+        finishWholeStrokeErase()
         landInkEdits()
         activeCanvas?.undoManager?.undo()
     }
     func redo() {
         guard !readOnly else { return }
+        finishWholeStrokeErase()
         landInkEdits()
         activeCanvas?.undoManager?.redo()
     }
@@ -409,6 +420,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// The single tool path: every live canvas gets the tool; new canvases take
     /// `tools.pencilTool` when they are created.
     func apply(_ tool: any PKTool) {
+        finishWholeStrokeErase()
         landInkEdits()
         finishHighlighterErase()
         clearScribblePreview()
@@ -427,9 +439,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private func updateCanvasInput() {
         let lasso = tools.current == .lasso && !readOnly
         let pointing = tools.current == .laser && !readOnly
+        // EP99: EmberPad's own whole-stroke eraser takes the Pencil; PencilKit's would erase only what the tip touches.
+        let ownEraser = tools.current == .eraser && tools.settings.eraserMode == .wholeStroke && !readOnly
         for candidate in canvases.values {
             let focused = candidate === activeCanvas && !readOnly
-            candidate.drawingGestureRecognizer.isEnabled = focused && !lasso && !pointing
+            candidate.drawingGestureRecognizer.isEnabled = focused && !lasso && !pointing && !ownEraser
             InkSelectionController.lassoRecognizer(on: candidate)?.isEnabled = focused && lasso
         }
         if laser.isEnabled != pointing { laser.isEnabled = pointing }
@@ -437,6 +451,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let erasing = tools.current == .eraser && !readOnly
         if eraserTouch.isEnabled != erasing { eraserTouch.isEnabled = erasing }
         if eraserHover.isEnabled != erasing { eraserHover.isEnabled = erasing }
+        if wholeStrokeEraserClaim.isEnabled != ownEraser { wholeStrokeEraserClaim.isEnabled = ownEraser }
         if !erasing { hideEraserCircle() }
     }
 
@@ -536,6 +551,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         self.readOnly = readOnly
         if readOnly {
             finishHighlighterErase()
+            finishWholeStrokeErase()
             inkSelection.dismiss()
             liveStroke = nil
             student.cancelLiveStroke()
@@ -758,13 +774,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// eraser is not chosen, the pages are read-only or there is no page there. Internal for tests.
     @discardableResult
     func showEraserCircle(at location: CGPoint, on space: UIView? = nil) -> Bool {
-        guard !readOnly, tools.current == .eraser, let tool = tools.pencilTool as? PKEraserTool,
-              let space = space ?? pageLocation(of: location).flatMap({ canvases[$0.page]?.pageSpace }) else {
+        guard !readOnly, tools.current == .eraser,
+              space ?? pageLocation(of: location).flatMap({ canvases[$0.page]?.pageSpace }) != nil else {
             hideEraserCircle()
             return false
         }
-        let diameter = EraserPreview.diameter(for: tool, pageScale: EraserPreview.pageScale(of: space, in: view))
-        EraserPreview.show(eraserCircle, at: view.convert(location, from: pdfView), diameter: diameter)
+        EraserPreview.show(eraserCircle, at: view.convert(location, from: pdfView), diameter: EraserPreview.diameter(for: tools.settings))
         return true
     }
 
@@ -781,6 +796,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
               showEraserCircle(at: location, on: canvas.pageSpace) else { return nil }
         eraserStrokeSpace = canvas.pageSpace
         prepareHighlighterErase(on: canvas)
+        beginWholeStrokeErase(on: canvas, page: page)
         return pdfView
     }
 
@@ -804,7 +820,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// before PencilKit starts erasing, the only moment it can (EP71). An erase from the last stroke still waiting for
     /// its commit is finished first, so each stroke is its own undo step.
     private func prepareHighlighterErase(on canvas: PKCanvasView) {
-        guard !readOnly, canvas === activeCanvas, tools.current == .eraser, tools.settings.eraseHighlighterOnly else { return }
+        // EP99: the whole-stroke eraser is EmberPad's own, which leaves pen ink alone itself.
+        guard !readOnly, canvas === activeCanvas, tools.current == .eraser, tools.settings.eraserMode == .partial,
+              tools.settings.eraseHighlighterOnly else { return }
         if let erase = highlighterErase {
             guard erase.lifted || erase.canvas !== canvas else { return }
             finishHighlighterErase()
@@ -819,13 +837,18 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         case .began(let samples), .moved(let samples, _):
             guard let space = eraserStrokeSpace, let newest = samples.last else { return }
             recordHighlighterSweep(samples, on: space)
+            sweepWholeStrokeErase(samples, on: space)
             showEraserCircle(at: newest.location, on: space)
         case .ended(let samples):
-            if let space = eraserStrokeSpace { recordHighlighterSweep(samples, on: space) }
+            if let space = eraserStrokeSpace {
+                recordHighlighterSweep(samples, on: space)
+                sweepWholeStrokeErase(samples, on: space)
+            }
             fallthrough
         case .cancelled:
             eraserStrokeSpace = nil
             hideEraserCircle()
+            liftWholeStrokeErase()
             // A touch PencilKit never erased with (it began off the focused page, or was cancelled) still puts the
             // pen ink back; one PencilKit did erase with waits for `canvasViewDidEndUsingTool`, after its commit.
             if let erase = highlighterErase, !erase.toolBegan {
@@ -840,13 +863,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// Adds eraser samples (PDF view coordinates) to a highlighter-only erase's sweep, in the page points of `space`,
     /// with the eraser's reach on that page, so the lift knows whether PencilKit has a cut to commit (EP79).
     private func recordHighlighterSweep(_ samples: [LiveInkSample], on space: UIView) {
-        guard let erase = highlighterErase, erase.canvas.pageSpace === space,
-              let tool = tools.pencilTool as? PKEraserTool else { return }
+        guard let erase = highlighterErase, erase.canvas.pageSpace === space else { return }
         let scale = EraserPreview.pageScale(of: space, in: view)
         guard scale > 0 else { return }
-        let width = tool.width.isFinite ? max(0, tool.width) : 0
-        let diameter = max(EraserPreview.diameter(for: tool, pageScale: scale), width)
-        erase.reach = max(erase.reach, diameter / 2 / scale)
+        erase.reach = max(erase.reach, EraserPreview.diameter(for: tools.settings) / 2 / scale)
         erase.sweep.append(contentsOf: samples.map { space.convert($0.location, from: pdfView) })
     }
 
@@ -1309,6 +1329,96 @@ extension PDFOverlayPageController {
             isReplacingStroke = false
         }
         session.update(drawing, page: page)
+    }
+}
+
+// MARK: - Whole-stroke eraser (EP99)
+
+extension PDFOverlayPageController {
+    /// How often a whole-stroke erase that had to wait for PencilKit to commit an earlier stroke looks again, in
+    /// seconds; and the longest it waits after the lift (PencilKit gives up on a stroke within 3 s, `InkFlights`).
+    static let wholeStrokeEraseRetry: TimeInterval = 0.05
+    static let wholeStrokeEraseMaxWait: TimeInterval = 4
+
+    /// Eraser pen-down on `canvas`, the focused page, with the whole-stroke eraser chosen: the circle chosen in the
+    /// toolbar, at this zoom, is what the stroke erases with.
+    func beginWholeStrokeErase(on canvas: PKCanvasView, page: Int) {
+        finishWholeStrokeErase()
+        guard !readOnly, canvas === activeCanvas, tools.current == .eraser,
+              tools.settings.eraserMode == .wholeStroke else { return }
+        let radius = WholeStrokeErase.radius(diameter: EraserPreview.diameter(for: tools.settings),
+                                             pageScale: EraserPreview.pageScale(of: canvas.pageSpace, in: view))
+        wholeStrokeErase = WholeStrokeEraseStroke(page: page, canvas: canvas, radius: radius,
+                                                  highlighterOnly: tools.settings.eraseHighlighterOnly)
+    }
+
+    /// Eraser samples (PDF view coordinates) on the page whose ink space is `space`: every stroke the circle touches
+    /// along them goes at once, as in GoodNotes.
+    func sweepWholeStrokeErase(_ samples: [LiveInkSample], on space: UIView) {
+        guard let erase = wholeStrokeErase, erase.canvas?.pageSpace === space else { return }
+        erase.waiting.append(contentsOf: samples.map { space.convert($0.location, from: pdfView) })
+        applyWholeStrokeErase(erase)
+    }
+
+    /// Takes what the waiting path touches off the page. EP94: never while PencilKit holds a stroke it has not
+    /// committed (a pen stroke just before the eraser was chosen), as changing the page then makes PencilKit throw that
+    /// stroke away; the path waits and is tested once PencilKit has committed it. Edits queued for earlier strokes
+    /// land first, so they never land on a page this stroke has changed under them.
+    private func applyWholeStrokeErase(_ erase: WholeStrokeEraseStroke) {
+        guard wholeStrokeErase === erase, let canvas = erase.canvas, canvases[erase.page] === canvas,
+              inkFlights.isEmpty, !isReplacingStroke else { return }
+        if !erase.hasRead {
+            if hasPendingInk { landInkEdits() }
+            erase.read(canvas.drawing)
+        }
+        guard erase.sweepWaiting() else { return }
+        setWholeStrokeErasedDrawing(PKDrawing(strokes: erase.strokes), page: erase.page)
+    }
+
+    private func setWholeStrokeErasedDrawing(_ drawing: PKDrawing, page: Int) {
+        inkSelection.pageDidChange(page)
+        if let canvas = canvases[page] {
+            isReplacingStroke = true
+            canvas.drawing = drawing
+            isReplacingStroke = false
+        }
+        session.update(drawing, page: page)
+    }
+
+    /// The Pencil lifted (or its touch was cancelled): the erase is one undo step, once any path still waiting has
+    /// been tested.
+    func liftWholeStrokeErase() {
+        guard let erase = wholeStrokeErase else { return }
+        erase.lifted = true
+        let deadline = Date().addingTimeInterval(Self.wholeStrokeEraseMaxWait)
+        func attempt() {
+            guard wholeStrokeErase === erase else { return }
+            applyWholeStrokeErase(erase)
+            if erase.waiting.isEmpty || Date() >= deadline || erase.canvas == nil {
+                finishWholeStrokeErase()
+                tools.eraserLifted()
+                return
+            }
+            let work = DispatchWorkItem { MainActor.assumeIsolated { attempt() } }
+            erase.retry = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.wholeStrokeEraseRetry, execute: work)
+        }
+        attempt()
+    }
+
+    /// Ends the whole-stroke erase in progress, if any, registering what it erased as one undo step named "Erase".
+    /// A path still waiting for PencilKit is dropped: the tool changed, the page left or the editor is closing.
+    func finishWholeStrokeErase() {
+        guard let erase = wholeStrokeErase else { return }
+        wholeStrokeErase = nil
+        erase.retry?.cancel()
+        guard let before = erase.before, let canvas = erase.canvas, erase.strokes.count < before.strokes.count,
+              let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager else { return }
+        let after = PKDrawing(strokes: erase.strokes)
+        undoManager.beginUndoGrouping()
+        registerDrawingSwap(on: undoManager, page: erase.page, restoring: before, then: after)
+        undoManager.setActionName("Erase")
+        undoManager.endUndoGrouping()
     }
 }
 

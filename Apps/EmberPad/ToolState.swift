@@ -35,7 +35,7 @@ enum WorksheetTool: String, CaseIterable, Codable, Sendable {
 enum EraserMode: String, CaseIterable, Codable, Sendable {
     /// Erases only what the eraser touches (bitmap eraser).
     case partial
-    /// Removes every stroke the eraser touches (vector eraser).
+    /// Removes every stroke the eraser's circle touches (EmberPad's own, `WholeStrokeErase`).
     case wholeStroke
 
     var title: String {
@@ -63,6 +63,7 @@ struct ToolSettings: Codable, Equatable, Sendable {
     var highlighterWidthIndex = Theme.highlighterDefaultWidthIndex
     /// Whole stroke by default (EP71), the teacher's GoodNotes eraser setting; a stored choice is kept.
     var eraserMode: EraserMode = .wholeStroke
+    /// One eraser size for both modes, as in GoodNotes (EP99).
     var eraserSizeIndex = Theme.eraserDefaultSizeIndex
     /// Draw and hold for a straight highlighter line (EP-14).
     var straightHighlighter = true
@@ -231,6 +232,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
         case .eraser:
             switch eraserMode {
             case .partial: PKEraserTool(.fixedWidthBitmap, width: eraserSize)
+            // PencilKit's vector eraser has no width, so the sized whole-stroke eraser is EmberPad's own
+            // (`WholeStrokeErase`, EP99) and PencilKit's drawing recogniser is off while it is chosen.
             case .wholeStroke: PKEraserTool(.vector)
             }
         // The laser never inks: the canvases' drawing recogniser is off while it is chosen, and a lasso tool is
