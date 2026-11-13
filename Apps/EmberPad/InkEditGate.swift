@@ -179,6 +179,10 @@ struct PendingInkEdit {
         case penFeel(PenFeelSettings, toolWidth: CGFloat, color: UIColor)
         /// The stroke becomes `strokes`, as one undo step named `actionName`: the pen feel, a straight line, a shape.
         case replace([PKStroke], actionName: String)
+        /// A pen stroke held into a straight line (EP96): it becomes the line the live pen drew while the Pencil was
+        /// down, worked out once the live pen has seen the lift, as one undo step named "Straight Line". `fallback`,
+        /// the committed stroke straightened, is used when the live pen has no line for it.
+        case straightLine(fallback: PKStroke)
         /// The scribble and the strokes at these indices (of the page as it was before the scribble) go, as one undo
         /// step named "Scribble to Erase" (EP82).
         case scribble(erasing: [Int])
@@ -207,6 +211,7 @@ struct PendingInkEdit {
         switch kind {
         case .penFeel: return false
         case .replace(_, let actionName): return actionName != PendingInkEdit.inkActionName
+        case .straightLine: return true
         case .scribble: return true
         case .keep(let lasso): return lasso
         }
@@ -214,6 +219,8 @@ struct PendingInkEdit {
 
     /// The undo step of a stroke that is just ink.
     static let inkActionName = "Ink"
+    /// The undo step of a stroke snapped straight.
+    static let straightLineActionName = "Straight Line"
 }
 
 /// A pen stroke PencilKit threw away (EP94): it began and ended and never committed. The live pen drew it from the
@@ -270,6 +277,8 @@ enum InkEditReplay {
             switch edits[index] {
             case .replace(let replacements, let actionName)? where !replacements.isEmpty:
                 append(replacements.map(PenFeel.visible), from: index, named: actionName)
+            case .straightLine(let fallback)?:
+                append([PenFeel.visible(fallback)], from: index, named: PendingInkEdit.straightLineActionName)
             case .scribble(let erasing)?:
                 let erased = Set(erasing)
                 let before = page

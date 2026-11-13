@@ -32,6 +32,8 @@ struct LivePenStrokes {
         /// The lifted stroke, shaped once on lift: drawn on every Pencil move after that, so it is not reshaped
         /// from all its samples each time (EP94).
         fileprivate(set) var liftedShape: PKStroke?
+        /// Draw and hold latched a straight line (EP96): from then on the stroke is drawn, and lifted, as that line.
+        fileprivate(set) var line: HeldLine?
 
         var isLifted: Bool { liftedAt != nil }
         /// Neither owed nor waiting on PencilKit's stroke for the same touch.
@@ -45,6 +47,10 @@ struct LivePenStrokes {
         func stroke(lifted: Bool, creationDate date: Date? = nil) -> PKStroke? {
             let all = lifted ? samples : samples + predicted
             guard let start = all.first?.time else { return nil }
+            if let line, let last = all.last {
+                return PenFeel.stroke(line.points(to: last, startTime: start), color: color, settings: settings,
+                                      toolWidth: toolWidth, lifted: lifted, creationDate: date ?? creationDate)
+            }
             let points = all.map { s in
                 PKStrokePoint(location: s.location, timeOffset: max(s.time - start, 0), size: CGSize(width: 2, height: 2),
                               opacity: 1, force: s.force, azimuth: s.azimuth, altitude: s.altitude, secondaryScale: 1)
@@ -85,6 +91,17 @@ struct LivePenStrokes {
             strokes.remove(at: oldest)
             extra -= 1
         }
+    }
+
+    /// Draw and hold latched on the stroke being written on `page` (EP96): from now until lift it is drawn as a
+    /// straight line from where it began to wherever the Pencil is, laid flat as the pen's lines are, in its own pen
+    /// ink, and it lifts as that line. Returns false when no stroke is being written there.
+    @discardableResult
+    mutating func holdStraight(page: Int) -> Bool {
+        guard let index = strokes.lastIndex(where: { $0.liftedAt == nil }), strokes[index].page == page,
+              let line = HeldLine(samples: strokes[index].samples) else { return false }
+        strokes[index].line = line
+        return true
     }
 
     mutating func extend(samples: [LiveInkSample], predicted: [LiveInkSample]) {
@@ -215,4 +232,44 @@ struct LivePenStrokes {
 
     /// The pages that have live ink.
     var pages: Set<Int> { Set(strokes.map(\.page)) }
+}
+
+/// A pen stroke held into a straight line (EP96): where it began, and the Pencil's force and angles taken from the
+/// stroke so far, so the line is drawn with the same weight as the writing it came from. Each point of the line is
+/// a copy of one sample, so drawing it costs the same however long the Pencil was held or moved about.
+struct HeldLine: Equatable {
+    let start: CGPoint
+    let force: CGFloat
+    let azimuth: CGFloat
+    let altitude: CGFloat
+
+    /// Nil for a stroke with no samples.
+    init?(samples: [LiveInkSample]) {
+        guard let first = samples.first else { return nil }
+        start = first.location
+        // The median force, so a light touch-down or a press while held does not set the weight of the whole line.
+        let template = samples.sorted { $0.force < $1.force }[samples.count / 2]
+        force = template.force
+        azimuth = template.azimuth
+        altitude = template.altitude
+    }
+
+    /// The line's two ends with the Pencil at `end`: laid flat when it is within the pen's ±8° of horizontal, at the
+    /// height it began (`StrokeSnap.Level.pen`), as the committed line always was.
+    func ends(to end: CGPoint) -> (start: CGPoint, end: CGPoint) {
+        StrokeSnap.straightLine(first: start, last: end, level: .pen) ?? (start, end)
+    }
+
+    /// The line's points, `StrokeSnap.pointSpacing` apart, timed evenly from the stroke's start to `last`.
+    func points(to last: LiveInkSample, startTime: TimeInterval) -> [PKStrokePoint] {
+        let line = ends(to: last.location)
+        let locations = StrokeSnap.linePoints(from: line.start, to: line.end)
+        let duration = max(last.time - startTime, 0)
+        let size = CGSize(width: 2, height: 2)
+        return locations.enumerated().map { index, location in
+            let fraction = Double(index) / Double(max(locations.count - 1, 1))
+            return PKStrokePoint(location: location, timeOffset: duration * fraction, size: size, opacity: 1,
+                                 force: force, azimuth: azimuth, altitude: altitude, secondaryScale: 1)
+        }
+    }
 }
