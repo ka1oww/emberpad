@@ -1047,6 +1047,7 @@ extension PDFOverlayPageController {
         let hold = HoldRecognizer()
         hold.onHold = { [weak self] hold in
             guard let self, !self.circleLassoPress(hold) else { return }
+            self.holdPenLine(hold)
             self.updateHoldGuide(hold)
         }
         hold.onMove = { [weak self] in self?.updateHoldGuide($0) }
@@ -1064,19 +1065,34 @@ extension PDFOverlayPageController {
         return guide
     }
 
-    /// While a held stroke that will snap is down, a dashed line shows where it
-    /// will snap: from where it began to the (flattened) Pencil position. That
-    /// is a held highlighter stroke with "Always straight" off, or a held pen
-    /// stroke. A held pen stroke that is not close to a line (a letter, a
-    /// curve, a circle to lasso) shows no guide, because it will not snap.
-    /// With "Always straight" on the highlighter shows no guide, as GoodNotes'
-    /// "Draw in Straight Line" shows none: the stroke straightens on lift (EP71).
+    /// While a held highlighter stroke that will snap is down ("Always straight" off), a dashed line shows where it
+    /// will snap: from where it began to the (flattened) Pencil position. With "Always straight" on the highlighter
+    /// shows no guide, as GoodNotes' "Draw in Straight Line" shows none: the stroke straightens on lift (EP71). The
+    /// pen shows no guide either: a held pen line is drawn as the straight line itself, in its own ink (EP96).
     static func showsHoldGuide(tool: WorksheetTool, settings: ToolSettings, held: Bool, lineLike: Bool) -> Bool {
         switch tool {
         case .highlighter: !settings.highlighterAlwaysStraight && held && settings.straightHighlighter
-        case .pen: held && settings.penDrawAndHold && lineLike
-        case .lasso, .eraser, .laser, .shape: false
+        case .pen, .lasso, .eraser, .laser, .shape: false
         }
+    }
+
+    /// Whether the pen stroke `hold` tracks is held into a straight line: the pen's "Draw and hold" switch is on and
+    /// the stroke was close to a line when the hold latched (`StrokeSnap.isLineLike`). A held letter, curve or closed
+    /// loop stays as written.
+    func isHeldPenLine(_ hold: HoldRecognizer) -> Bool {
+        tools.current == .pen && hold.heldAtEnd && hold.lineLikeAtHold && tools.settings.penDrawAndHold
+    }
+
+    /// Draw and hold, as GoodNotes (EP96): the moment the hold latches on a pen stroke close to a line, the stroke is
+    /// drawn as a straight line in its own ink, from where it began to the Pencil, and while the Pencil stays down
+    /// the line's end follows it. The lift commits that line. From here on the stroke is a line, never a scribble,
+    /// so the scribble preview stops watching it.
+    private func holdPenLine(_ hold: HoldRecognizer) {
+        guard !readOnly, isHeldPenLine(hold), let canvas = hold.view as? PKCanvasView,
+              let page = canvases.first(where: { $0.value === canvas })?.key,
+              livePen.holdStraight(page: page) else { return }
+        if scribblePreview?.page == page { clearScribblePreview() }
+        showLivePen(page: page)
     }
 
     private func updateHoldGuide(_ hold: HoldRecognizer) {
@@ -1190,9 +1206,12 @@ extension PDFOverlayPageController {
             // A held pen line takes the same pen feel as the handwriting around it, in the same one swap.
             straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth,
                                         color: tools.settings.penColor) ?? straight
+            // It lands as the line the live pen drew while the Pencil was down (EP96); this is only its fallback.
+            enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke, kind: .straightLine(fallback: straight))
+            return true
         }
         enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke,
-                       kind: .replace([straight], actionName: "Straight Line"))
+                       kind: .replace([straight], actionName: PendingInkEdit.straightLineActionName))
         return true
     }
 
@@ -1552,6 +1571,12 @@ extension PDFOverlayPageController {
             guard live != nil || final else { continue }
             pendingInkEdits[index].claimsLive = false
             pendingInkEdits[index].liveID = live?.id
+            if case .straightLine(let fallback) = edit.kind {
+                // Exactly the line drawn while the Pencil was down (EP96), with its end tip.
+                let line = live.flatMap { $0.line == nil ? nil : $0.stroke(lifted: true, creationDate: edit.stroke.path.creationDate) }
+                pendingInkEdits[index].kind = .replace([line ?? fallback], actionName: PendingInkEdit.straightLineActionName)
+                continue
+            }
             guard case .penFeel(let settings, let toolWidth, let color) = edit.kind else { continue }
             let replacement = live?.stroke(lifted: true, creationDate: edit.stroke.path.creationDate)
                 ?? PenFeel.reshaped(edit.stroke, settings: settings, toolWidth: toolWidth, color: color)
@@ -1727,7 +1752,9 @@ extension PDFOverlayPageController {
     func eraseIfScribbled(_ canvas: PKCanvasView, page: Int, previousCount: Int, drawn: Bool, strokes: [PKStroke]) -> Bool {
         guard strokes.count == previousCount + 1, let scribble = strokes.last else { return false }
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
-        guard drawn, !readOnly, tools.current == .pen, tools.settings.scribbleToErase,
+        // A stroke held into a straight line is a line (EP96), however the Pencil moved its end about while held.
+        let heldLine = Self.holdRecognizer(on: canvas).map(isHeldPenLine) ?? false
+        guard drawn, !readOnly, tools.current == .pen, tools.settings.scribbleToErase, !heldLine,
               undoManager?.isUndoing != true, undoManager?.isRedoing != true,
               PenFeel.isPenInk(scribble.ink.inkType) else {
             if let preview = scribblePreview, preview.page == page, preview.matches(scribble) { clearScribblePreview() }

@@ -249,10 +249,12 @@ struct EditorScreen: View {
     /// Back, when the library runs the close transition itself; it gets the page area in window coordinates. Nil pops.
     let onClose: ((CGRect) -> Void)?
 
-    /// `chrome` and `search` are injectable so a test can open the Pages and Search popovers the way a tap does.
+    /// `chrome` and `search` are injectable so a test can open the Pages and Search popovers the way a tap does, and
+    /// `tools` so it can keep its tool settings (the tool row's edge among them) apart from the app's own.
     @MainActor
     init(documentID: UUID, library: LibraryController, presentation: PresentationState,
-         chrome: PageChromeState? = nil, search: WorksheetSearchModel? = nil, toggleSidebar: (() -> Void)? = nil,
+         chrome: PageChromeState? = nil, search: WorksheetSearchModel? = nil, tools: ToolState? = nil,
+         toggleSidebar: (() -> Void)? = nil,
          animatesEntrance: Bool = false, onClose: ((CGRect) -> Void)? = nil) {
         self.documentID = documentID
         self.library = library
@@ -263,6 +265,7 @@ struct EditorScreen: View {
         _pageEntered = State(initialValue: !animatesEntrance)
         _chrome = StateObject(wrappedValue: chrome ?? PageChromeState())
         _search = StateObject(wrappedValue: search ?? WorksheetSearchModel())
+        _tools = State(initialValue: tools ?? ToolState())
     }
     @State private var session: DocumentSession?
     @State private var renderer: (any WorksheetPageRenderer)?
@@ -271,7 +274,7 @@ struct EditorScreen: View {
     /// The header's in-document search (EP63).
     @StateObject private var search: WorksheetSearchModel
     @StateObject private var pageThumbnails = PageThumbnailStore()
-    @State private var tools = ToolState()
+    @State private var tools: ToolState
     // The card's open state and its corner per orientation, persisted across launches (design 6.3).
     @State private var teacherCard = TeacherCopyCardState()
     /// Identifies this editor to `PresentationState`, which only lets the editor that set the answers clear them.
@@ -294,6 +297,10 @@ struct EditorScreen: View {
     @State private var entranceStartedAt: CFTimeInterval = 0
     /// The page area in window coordinates, for the close transition.
     @State private var pageAreaFrame: CGRect = .zero
+    /// The worksheet below the header in window coordinates: the edges the tool row docks on (EP100).
+    @State private var dockArea: CGRect = .zero
+    /// The tool row while a finger has it lifted, and as it lands (EP100).
+    @State private var toolbarDrag: ToolbarDragState?
 
     private var entrance: DocumentTransition.Entrance {
         DocumentTransition.entrance(pageEntered: pageEntered, reduceMotion: reduceMotion)
@@ -346,51 +353,30 @@ struct EditorScreen: View {
     /// tools at all (EP63).
     private var canAddPages: Bool { session?.record.role == .student && pagesAvailable && !editingPages && !chrome.readOnly }
 
+    /// Read-only (EP63) hides the tool row, as GoodNotes does.
+    private var showsTools: Bool { !chrome.readOnly }
+
+    /// The edge the tool row docks on (EP100).
+    private var dock: ToolbarDock { tools.settings.toolbarDock }
+
     var body: some View {
         VStack(spacing: 0) {
             header
-            // Read-only (EP63) hides the tool row, as GoodNotes does.
-            if !chrome.readOnly { ToolbarStrip(tools: tools) }
-            if let session { InkSaveBanner(session: session) }
-            ZStack(alignment: .topLeading) {
-                Group {
-                    if let renderer, let session {
-                        if presentation.policy.rendersOnMainScreen(session.record) {
-                            // A page edit opens a new session and renderer; the id swaps the hosted controller with it.
-                            PageRendererHost(renderer: renderer).id(session.instanceID)
-                        }
-                        else {
-                            // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
-                            PrivatePlaceholder(text: "Teacher copy · private. Hidden while another screen shows this iPad, or while inactive.")
-                        }
-                    } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
-                    else { ProgressView("Opening worksheet") }
+            // EP100: the tool row docks on any edge of the worksheet below the header, and the page makes room for it.
+            // The page area keeps its place in the hierarchy whichever edge it is on, so moving the row never reloads it.
+            VStack(spacing: 0) {
+                if showsTools, dock == .top { toolRow }
+                if let session { InkSaveBanner(session: session) }
+                HStack(spacing: 0) {
+                    if showsTools, dock == .leading { toolRow }
+                    pageArea
+                    if showsTools, dock == .trailing { toolRow }
                 }
-                // EP87: the page grows from the centre while it fades in. Only a transform and an opacity change, and
-                // only on the way in; settled, both are identity.
-                .scaleEffect(entrance.pageScale)
-                .opacity(entrance.pageOpacity)
-                if chrome.pagePillVisible, let session, session.pdf.pageCount > 0 {
-                    PagePill(current: chrome.currentPage, total: session.pdf.pageCount,
-                             showsPages: chrome.isShowingPages(from: .pill)) {
-                        pageNavigator(session)
-                    }
-                    .disabled(!pagesAvailable)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                }
-                // iPad main scene only: the external scene never draws this, and it has no answer URL.
-                if let session {
-                    TeacherCopyCardOverlay(content: .resolve(policy: presentation.policy,
-                                                             mainSceneActive: presentation.mainSceneActive,
-                                                             privateAnswerURL: presentation.privateAnswerURL),
-                                           documentTitle: session.record.title,
-                                           card: teacherCard,
-                                           hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil)
-                }
+                if showsTools, dock == .bottom { toolRow }
             }
-            .overlay(alignment: .top) { ToolToastOverlay(toast: tools.toast) }
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { pageAreaFrame = $0 }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { dockArea = $0 }
         }
+        .overlay { ToolbarDragLayer(drag: toolbarDrag, tools: tools, area: dockArea) }
         // Not in onAppear: that runs inside the library's no-animation push, which would settle the page at once.
         .task {
             guard !pageEntered else { return }
@@ -446,6 +432,109 @@ struct EditorScreen: View {
             presentation.clearPrivateAnswers(owner: answersOwner)
             session?.drawingDidChange = nil
             Task { do { try await library.close(documentID) } catch { library.errorMessage = error.localizedDescription } }
+        }
+    }
+}
+
+extension EditorScreen {
+    /// The page with what floats over it: the page pill, the Teacher copy panel and the tool toast.
+    private var pageArea: some View {
+            ZStack(alignment: .topLeading) {
+                Group {
+                    if let renderer, let session {
+                        if presentation.policy.rendersOnMainScreen(session.record) {
+                            // A page edit opens a new session and renderer; the id swaps the hosted controller with it.
+                            PageRendererHost(renderer: renderer).id(session.instanceID)
+                        }
+                        else {
+                            // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
+                            PrivatePlaceholder(text: "Teacher copy · private. Hidden while another screen shows this iPad, or while inactive.")
+                        }
+                    } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
+                    else { ProgressView("Opening worksheet") }
+                }
+                // EP87: the page grows from the centre while it fades in. Only a transform and an opacity change, and
+                // only on the way in; settled, both are identity.
+                .scaleEffect(entrance.pageScale)
+                .opacity(entrance.pageOpacity)
+                if chrome.pagePillVisible, let session, session.pdf.pageCount > 0 {
+                    PagePill(current: chrome.currentPage, total: session.pdf.pageCount,
+                             showsPages: chrome.isShowingPages(from: .pill)) {
+                        pageNavigator(session)
+                    }
+                    .disabled(!pagesAvailable)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
+                // iPad main scene only: the external scene never draws this, and it has no answer URL.
+                if let session {
+                    TeacherCopyCardOverlay(content: .resolve(policy: presentation.policy,
+                                                             mainSceneActive: presentation.mainSceneActive,
+                                                             privateAnswerURL: presentation.privateAnswerURL),
+                                           documentTitle: session.record.title,
+                                           card: teacherCard,
+                                           hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil,
+                                           edgeSwipeReach: { side in
+                                               ToolbarDockDrag.edgeSwipeReach(dock: dock, showsTools: showsTools, side: side)
+                                           })
+                }
+            }
+            .overlay(alignment: dock == .bottom ? .bottom : .top) {
+            ToolToastOverlay(toast: tools.toast, fromBottom: dock == .bottom)
+        }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { pageAreaFrame = $0 }
+    }
+
+    /// The tool row on its edge. While it is lifted it stays in place, faded, until it lands.
+    private var toolRow: some View {
+        ToolbarStrip(tools: tools, dock: dock, onDrag: { phase in dragToolRow(phase) },
+                     onMove: { target in moveToolRow(to: target) })
+            .opacity(toolbarDrag == nil || toolbarDrag?.settling == true ? 1 : 0.35)
+            .transition(.opacity)
+    }
+
+    /// EP100: a finger held on the row lifts it; it follows the finger, the slot of the nearest edge lights up, and on
+    /// release it snaps to that edge, where it stays across worksheets and launches.
+    private func dragToolRow(_ phase: ToolbarDragRecognizer.Phase) {
+        switch phase {
+        case .began(let point):
+            tools.settingsTool = nil
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            withAnimation(.easeOut(duration: 0.15)) {
+                toolbarDrag = ToolbarDragState(location: point, target: ToolbarDockDrag.target(for: point, in: dockArea))
+            }
+        case .moved(let point):
+            guard var drag = toolbarDrag, !drag.settling else { return }
+            let target = ToolbarDockDrag.target(for: point, in: dockArea)
+            drag.location = point
+            if target != drag.target {
+                UISelectionFeedbackGenerator().selectionChanged()
+                drag.target = target
+                withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) { toolbarDrag = drag }
+            } else {
+                toolbarDrag = drag
+            }
+        case .ended(let point, let velocity):
+            guard toolbarDrag != nil else { return }
+            moveToolRow(to: ToolbarDockDrag.target(for: point, velocity: velocity, in: dockArea))
+        case .cancelled:
+            guard toolbarDrag != nil else { return }
+            withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) { toolbarDrag = nil }
+        }
+    }
+
+    /// Docks the row on `target` with the snap, the lifted row flying into its new slot as it fades.
+    private func moveToolRow(to target: ToolbarDock) {
+        tools.settingsTool = nil
+        let lifted = toolbarDrag != nil
+        if lifted { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) {
+            tools.setToolbarDock(target)
+            if lifted {
+                toolbarDrag = ToolbarDragState(location: ToolbarDockDrag.slotCentre(for: target, in: dockArea),
+                                               target: target, settling: true)
+            }
+        } completion: {
+            if toolbarDrag?.settling == true { toolbarDrag = nil }
         }
     }
 }
