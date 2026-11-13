@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 100 100">
+  <!-- EmberPad's highlighter tool icon (EP106), original artwork. A wide marker with a chisel tip, drawn upright with
+       the tip at +y and turned 45 degrees like the fountain pen, laying a translucent swath beneath it. A template
+       image: only the alpha is used, so the swath stays a lighter shade of the tint. -->
+  <!-- The translucent stroke it has just laid down. -->
+  <rect x="6" y="72" width="47" height="14" rx="3" fill="#000" fill-opacity="0.45"/>
+  <g transform="translate(58 39) rotate(45) scale(0.88)" fill="none" stroke="#000" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Wide barrel, with the cap's joint across it. -->
+    <path d="M -15 -34 Q -15 -44 -5 -44 L 5 -44 Q 15 -44 15 -34 L 15 6 L -15 6 Z"/>
+    <path d="M -15 -12 L 15 -12"/>
+    <!-- Collar narrowing to the tip. -->
+    <path d="M -15 6 L -9 18 L 9 18 L 15 6"/>
+    <!-- The chisel tip: a solid felt block cut on the slant, its flat edge lying along the stroke. -->
+    <path fill="#000" d="M -9 18 L -9 47 L 9 36 L 9 18 Z"/>
+  </g>
+</svg>

@@ -4,7 +4,8 @@ import XCTest
 @testable import EmberPad
 
 /// EP105: every tool shows a picture of itself on the palette and in its toasts. The fountain pen is EmberPad's own
-/// nib drawing, never a marker-like SF Symbol such as `pencil.tip`, which it showed before.
+/// nib drawing, never a marker-like SF Symbol such as `pencil.tip`, which it showed before. EP106: the highlighter is
+/// EmberPad's own chisel-tip marker, no longer SF Symbols' pencil-over-a-line `highlighter`.
 @MainActor
 final class ToolIconTests: XCTestCase {
     private var suiteName = ""
@@ -26,7 +27,7 @@ final class ToolIconTests: XCTestCase {
         let expected: [WorksheetTool: ToolIcon] = [
             .pen: .asset("ToolFountainPen"),
             .eraser: .system("eraser"),
-            .highlighter: .system("highlighter"),
+            .highlighter: .asset("ToolHighlighter"),
             .shape: .system("square.on.circle"),
             .lasso: .system("lasso"),
             .laser: .asset("ToolLaserPointer"),
@@ -47,6 +48,18 @@ final class ToolIconTests: XCTestCase {
             XCTAssertFalse(notAFountainPen.contains(symbol), "the fountain pen shows \(symbol), a marker or pencil")
         }
         XCTAssertEqual(WorksheetTool.pen.icon, .asset("ToolFountainPen"), "EmberPad's own fountain pen nib")
+    }
+
+    func testTheHighlighterIsAChiselTipMarkerNotAPencil() {
+        // SF Symbols that draw a pencil or pen rather than a chisel-tip highlighter, including the `highlighter`
+        // symbol itself, which is a pencil over a line.
+        let notAHighlighter: Set<String> = [
+            "highlighter", "pencil", "pencil.line", "pencil.tip", "pencil.and.underline", "applepencil", "pencil.and.scribble",
+        ]
+        if case .system(let symbol) = WorksheetTool.highlighter.icon {
+            XCTAssertFalse(notAHighlighter.contains(symbol), "the highlighter shows \(symbol), a pencil")
+        }
+        XCTAssertEqual(WorksheetTool.highlighter.icon, .asset("ToolHighlighter"), "EmberPad's own chisel-tip marker")
     }
 
     func testEveryToolIconIsDistinct() {
@@ -83,6 +96,21 @@ final class ToolIconTests: XCTestCase {
         XCTAssertGreaterThan(differing, nibInk.count / 20, "the fountain pen does not look like pencil.tip")
     }
 
+    /// The highlighter's drawing has ink, differs from the pencil-over-a-line symbol it replaced, and its swath is
+    /// translucent, so it draws lighter pixels than the solid marker above it.
+    func testTheHighlighterDrawingDiffersFromTheOldPencilSymbol() throws {
+        let side: CGFloat = 56
+        let marker = try XCTUnwrap(UIImage(named: "ToolHighlighter", in: .main, with: nil))
+        let pencil = try XCTUnwrap(UIImage(systemName: "highlighter"))
+        let markerInk = inkMask(marker, side: side)
+        let pencilInk = inkMask(pencil, side: side)
+        XCTAssertGreaterThan(markerInk.filter { $0 }.count, 80, "the highlighter drawing has ink")
+        let differing = zip(markerInk, pencilInk).filter { $0 != $1 }.count
+        XCTAssertGreaterThan(differing, markerInk.count / 20, "the highlighter does not look like the pencil symbol")
+        let light = inkMask(marker, side: side, threshold: 700).filter { $0 }.count - markerInk.filter { $0 }.count
+        XCTAssertGreaterThan(light, 60, "a translucent swath lies under the tip")
+    }
+
     func testPencilSwitchBackToThePenToastsTheFountainPen() {
         let tools = ToolState(defaults: defaults)
         tools.select(.eraser)
@@ -92,8 +120,9 @@ final class ToolIconTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// Which pixels of the image, drawn black into a `side` square, carry ink.
-    private func inkMask(_ image: UIImage, side: CGFloat) -> [Bool] {
+    /// Which pixels of the image, drawn black into a `side` square, carry ink: their R+G+B is below `threshold` (out of
+    /// 765), so the default counts only dark ink and a higher threshold also counts translucent ink.
+    private func inkMask(_ image: UIImage, side: CGFloat, threshold: Int = 384) -> [Bool] {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         let rendered = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { _ in
@@ -107,7 +136,7 @@ final class ToolIconTests: XCTestCase {
         for y in 0..<cg.height {
             for x in 0..<cg.width {
                 let offset = y * cg.bytesPerRow + x * perPixel
-                mask.append(Int(bytes[offset]) + Int(bytes[offset + 1]) + Int(bytes[offset + 2]) < 384)
+                mask.append(Int(bytes[offset]) + Int(bytes[offset + 1]) + Int(bytes[offset + 2]) < threshold)
             }
         }
         return mask
