@@ -297,8 +297,8 @@ struct EditorScreen: View {
     @State private var entranceStartedAt: CFTimeInterval = 0
     /// The page area in window coordinates, for the close transition.
     @State private var pageAreaFrame: CGRect = .zero
-    /// The tool palette while a finger carries it (EP102). Only the palette and its drop band read it, so a move of
-    /// the finger never rebuilds the editor.
+    /// The tool palette while a finger carries it (EP102). Only the palette reads it, so a move of the finger never
+    /// rebuilds the editor.
     @State private var toolbarCarry = ToolbarCarry()
 
     private var entrance: DocumentTransition.Entrance {
@@ -365,7 +365,6 @@ struct EditorScreen: View {
             // EP101: the tool palette floats over the page (see `pageArea`), so the page keeps the whole worksheet.
             pageArea
         }
-        .overlay { ToolbarDropBand(carry: toolbarCarry, area: pageAreaFrame, tabSide: teacherCard.side) }
         // Not in onAppear: that runs inside the library's no-animation push, which would settle the page at once.
         .task {
             guard !pageEntered else { return }
@@ -487,9 +486,10 @@ extension EditorScreen {
             .modifier(ToolbarCarried(carry: toolbarCarry))
     }
 
-    /// EP100, EP101, EP102: a finger that touches the palette and drags carries it, with no hold, the tool it landed
-    /// on staying under the finger; the band of the edge it would snap to lights up, and when it is let go it snaps
-    /// against that edge where it was let go, and stays there across worksheets and launches.
+    /// EP100, EP101, EP102, EP104: a finger that touches the palette and drags carries it, with no hold, the tool it
+    /// landed on staying under the finger. While it is carried nothing shows where it will land (EP104): no band, no
+    /// outline, no tick as it nears an edge; it just goes where the finger takes it. When it is let go it snaps against
+    /// the edge nearest the finger, where it was let go along it, and stays there across worksheets and launches.
     private func dragToolRow(_ phase: ToolbarDragRecognizer.Phase) {
         let carry = toolbarCarry
         switch phase {
@@ -497,19 +497,11 @@ extension EditorScreen {
             tools.settingsTool = nil
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             carry.pickUp(at: start, palette: palette, finger: point)
-            withAnimation(.easeOut(duration: 0.15)) {
-                carry.isCarrying = true
-                carry.target = ToolbarDockDrag.target(for: point, in: pageAreaFrame)
-            }
+            withAnimation(.easeOut(duration: 0.15)) { carry.isCarrying = true }
         case .moved(let point):
             guard carry.isCarrying else { return }
             // No animation: the palette is exactly where the finger is, every frame.
             carry.follow(point)
-            let target = ToolbarDockDrag.target(for: point, in: pageAreaFrame)
-            if target != carry.target {
-                UISelectionFeedbackGenerator().selectionChanged()
-                withAnimation(.easeOut(duration: 0.15)) { carry.target = target }
-            }
         case .ended(let point, let velocity):
             guard carry.isCarrying else { return }
             carry.follow(point)
@@ -538,7 +530,6 @@ extension EditorScreen {
     private func putDown() {
         toolbarCarry.translation = .zero
         toolbarCarry.isCarrying = false
-        toolbarCarry.target = nil
     }
 }
 

@@ -120,22 +120,6 @@ final class ToolbarDockTests: XCTestCase {
         }
     }
 
-    func testTheCarriedPaletteLightsTheBandAlongItsTargetEdge() {
-        let m = ToolbarDockDrag.margin
-        for dock in ToolbarDock.allCases {
-            let slot = ToolbarDockDrag.slot(for: dock, in: area)
-            XCTAssertEqual(dock.isVertical ? slot.width : slot.height, dock.thickness, "\(dock)")
-            XCTAssertTrue(area.insetBy(dx: m, dy: m).contains(slot), "\(dock) lies inside the worksheet")
-        }
-        XCTAssertEqual(ToolbarDockDrag.slot(for: .bottom, in: area).maxY, area.maxY - m)
-        XCTAssertEqual(ToolbarDockDrag.slot(for: .leading, in: area).minX, area.minX + m)
-        // The band on the pull tab's side stops short of the tab, where the palette lands; the far side is untouched.
-        let tab = TeacherCopyCardGeometry.tabSize.width
-        XCTAssertEqual(ToolbarDockDrag.band(for: .trailing, in: area, tabSide: .trailing).maxX, area.maxX - tab - m)
-        XCTAssertEqual(ToolbarDockDrag.band(for: .leading, in: area, tabSide: .trailing).minX, area.minX + m)
-        XCTAssertEqual(ToolbarDockDrag.band(for: .leading, in: area, tabSide: .leading).minX, area.minX + tab + m)
-    }
-
     func testRowsAndColumns() {
         XCTAssertFalse(ToolbarDock.top.isVertical)
         XCTAssertFalse(ToolbarDock.bottom.isVertical)

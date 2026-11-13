@@ -65,7 +65,7 @@ final class ToolbarDockScreenshotTests: XCTestCase {
         XCTAssertEqual(topRow.midX, page.midX, accuracy: 1, "centred along the top")
         try save(window, "ep100-01-top")
 
-        // Carry the row (EP102): the palette itself follows the finger and the nearest edge's slot lights up.
+        // Carry the row (EP102): the palette itself follows the finger, and nothing shows where it will land (EP104).
         let handle = try XCTUnwrap(Self.dragHandle(in: window))
         let centre = CGPoint(x: topRow.midX, y: topRow.midY)
         handle.onDrag(.began(from: centre, at: centre, palette: topRow))
