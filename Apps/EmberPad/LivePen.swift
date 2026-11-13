@@ -39,8 +39,9 @@ struct LivePenStrokes {
         fileprivate(set) var revision = 0
 
         var isLifted: Bool { liftedAt != nil }
-        /// Neither owed nor waiting on PencilKit's stroke for the same touch.
-        var mayBeDropped: Bool { !owed && !(bound && committedAt == nil) }
+        /// Neither owed, nor waiting on PencilKit's stroke for the same touch, nor landed and waiting for the page to
+        /// draw it (EP108): only a stroke PencilKit never began for may make way for newer ones.
+        var mayBeDropped: Bool { !owed && !bound && committedAt == nil }
 
         /// The stroke as it is drawn now: while written, through the predicted touches and without an end tip;
         /// once lifted, as it is committed.
@@ -64,10 +65,14 @@ struct LivePenStrokes {
     }
 
     /// A lifted stroke that PencilKit never commits (one it discarded) leaves after this long, as does a committed
-    /// one whose page never reports drawing it.
+    /// one whose page never reports drawing it, once the page has drawn it all the same (`expire`).
     static let timeout: TimeInterval = 1
+    /// A committed stroke the page never shows drawing leaves after this long, once the Pencil has been up for
+    /// `timeout` with nothing in flight (EP108), so no stroke's layer stays on the page for good.
+    static let undrawnTimeout: TimeInterval = 3
     /// Enough for fast writing, where a pen-down can come before the previous stroke's commit. Strokes whose swap
-    /// is owed, or that PencilKit began a stroke for, are not counted and never dropped.
+    /// is owed, that PencilKit began a stroke for, or that have landed and wait for the page to draw them, are not
+    /// counted and never dropped (EP108).
     static let maxStrokes = 6
     /// How soon after its lift PencilKit's begin can still be for a stroke (a dot can lift before PencilKit begins it).
     static let bindWindow: TimeInterval = 0.25
@@ -208,13 +213,18 @@ struct LivePenStrokes {
         strokes.removeAll { $0.page == page }
     }
 
-    /// Drops lifted strokes whose commit never came, and committed ones whose page never reported drawing them. An
-    /// owed stroke stays, and so does every lifted one while `keepingLifted` (PencilKit still holds a stroke it has
-    /// not committed, which may be any of them).
-    mutating func expire(now: TimeInterval, keepingLifted: Bool = false) {
+    /// Drops lifted strokes whose commit never came, and committed ones whose page never reported drawing them once
+    /// `drawn` says the page shows them all the same. An owed stroke stays, and so does every lifted one while
+    /// `keepingLifted` (PencilKit still holds a stroke it has not committed, which may be any of them).
+    ///
+    /// EP108: a committed stroke leaves only once the page draws it. PencilKit does not redraw the page while it draws
+    /// a stroke, so when the Pencil comes down just as strokes land, the page shows them only after that next stroke
+    /// lifts; dropped before then, as they were after a second (or as soon as the Pencil came down, for all but the
+    /// newest few), a whole line of writing vanished for as long as the next stroke was drawn.
+    mutating func expire(now: TimeInterval, keepingLifted: Bool = false, drawn: (Stroke) -> Bool) {
         strokes.removeAll { stroke in
             if stroke.owed { return false }
-            if let committed = stroke.committedAt { return now - committed >= Self.timeout }
+            if let committed = stroke.committedAt { return now - committed >= Self.timeout && drawn(stroke) }
             if keepingLifted { return false }
             return stroke.liftedAt.map { now - $0 >= Self.timeout } ?? false
         }

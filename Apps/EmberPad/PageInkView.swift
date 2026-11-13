@@ -55,6 +55,7 @@ final class PageInkView: UIView {
         layoutIfNeeded()
         // EP103: PencilKit redraws the page for the new zoom, as for a change to its drawing.
         pageDrawingDidChange()
+        scribbleCutsDidChangeZoom()
     }
 
     override func layoutSubviews() {
@@ -250,6 +251,10 @@ final class PageInkView: UIView {
     /// The page's drawing has just changed, so PencilKit will redraw its tiles.
     func pageDrawingDidChange() {
         seedsAtChange = tileSeeds()
+        // EP108: a handover still waiting is given its full patience again. PencilKit leaves the page as it is while it
+        // draws a stroke, so strokes that landed as the Pencil came down are redrawn only after that stroke's commit.
+        if !handovers.isEmpty { handoverStarted = CACurrentMediaTime() }
+        if scribbleCutsLanded != nil { scribbleCutsLanded?.since = CACurrentMediaTime() }
     }
 
     /// The page's tiles now, before a change to its drawing.
@@ -272,11 +277,25 @@ final class PageInkView: UIView {
         checkHandovers()
     }
 
+    /// Whether the page itself now draws live stroke `id`, which has landed on it (EP108): every tile under the stroke
+    /// has been redrawn since the page's drawing last changed, at or after the landing. A stroke with no tile under it
+    /// is not known to be drawn. PencilKit leaves the page's tiles as they are while it draws a stroke, so a stroke
+    /// that landed as the Pencil came down is drawn by its own layer alone until the Pencil lifts.
+    func hasDrawn(liveStroke id: UInt64) -> Bool {
+        guard let layer = livePenLayers.first(where: { $0.id == id }) else { return true }
+        guard !layer.view.isHidden else { return true }
+        guard let before = seedsAtChange else { return false }
+        let bounds = layer.latest.bounds.insetBy(dx: -1, dy: -1)
+        let under = tileLayers().filter { $0.frame.intersects(bounds) }
+        return !under.isEmpty && under.allSatisfy { tile in before[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false }
+    }
+
     /// The tiles each landed stroke is waiting for, by live stroke id: their seeds when it landed.
     private var handovers: [UInt64: [ObjectIdentifier: UInt32]] = [:]
     private var handoverWatch: HandoverWatch?
     private var handoverStarted: CFTimeInterval = 0
-    /// A handover gives up after this long, and what is left of its strokes waits for the page's report.
+    /// A handover gives up this long after it began or the page's drawing last changed, and what is left of its
+    /// strokes waits for the page's report.
     static let handoverPatience: TimeInterval = 2
 
     fileprivate func checkHandovers() {
@@ -297,11 +316,239 @@ final class PageInkView: UIView {
                 mask(layer.view, off: redrawn.map(\.frame))
             }
         }
-        if handovers.isEmpty || CACurrentMediaTime() - handoverStarted > Self.handoverPatience {
-            handovers = [:]
+        if CACurrentMediaTime() - handoverStarted > Self.handoverPatience { handovers = [:] }
+        checkScribbleCuts()
+        if handovers.isEmpty, scribbleCutsLanded == nil {
             handoverWatch?.stop()
             handoverWatch = nil
         }
+    }
+
+    // MARK: Ink a scribble erases (EP108)
+
+    /// A scribble's erase shows the moment the Pencil lifts (EP108). PencilKit commits the scribble a few frames after
+    /// the lift, the erase lands on a frame after that, and the page redraws its tiles some frames later again: on the
+    /// iPad a quarter of a second in all, through which the outline went first and the ink it had outlined stayed,
+    /// then went. So from the lift the strokes the scribble erases are cut out of the page as PencilKit draws it (its
+    /// tiles, and the view it draws the page in while a stroke is down), and the scribble's own layer is hidden. Once
+    /// the erase has landed, the cut leaves each tile as the page redraws that tile, which no longer has the strokes.
+    /// Should the erase not happen after all, everything cut out shows again at once.
+    private struct ScribbleCut {
+        /// The scribble's live stroke, by `LivePenStrokes` id.
+        let scribble: UInt64?
+        let strokes: Set<InkStrokeID>
+        /// Each stroke's line, and a width that covers all of its ink, in page points.
+        let lines: [(path: CGPath, width: CGFloat)]
+        /// What the lines cover, in page points.
+        let bounds: CGRect
+        let generation: Int
+    }
+
+    private var scribbleCuts: [ScribbleCut] = []
+    private var scribbleCutGeneration = 0
+    /// Once the cuts' erase has landed: the tiles' seeds before it did, whether the page was idle then, and when it
+    /// landed or the page's drawing last changed.
+    private var scribbleCutsLanded: (seeds: [ObjectIdentifier: UInt32], idle: Bool, since: CFTimeInterval)?
+    /// The cuts drawn once for every change to them, over `frame` in page points: clear where ink is cut, opaque
+    /// elsewhere.
+    private var scribbleCutPicture: (image: CGImage, frame: CGRect)?
+    /// The views of the page canvas wearing the cuts, and the mask each wears.
+    private var scribbleCutMasks: [(view: UIView, mask: CALayer)] = []
+
+    /// Ink is never hidden longer than this for an erase that has not landed: should it never land, the ink shows again.
+    static let scribbleCutPatience: TimeInterval = 4
+    /// How far past a stroke's edge its cut reaches, in page points: PencilKit's anti-aliasing.
+    static let cutMargin: CGFloat = 1.5
+
+    /// Whether any ink is cut out of the page for a scribble.
+    var hidesScribbledInk: Bool { !scribbleCuts.isEmpty }
+
+    /// The scribble with live stroke `scribble` has lifted, and will erase `strokes` of the page: from now on they and
+    /// the scribble's own ink are hidden. A scribble already hiding ink now hides `strokes` instead.
+    func hideScribbledInk(_ strokes: [PKStroke], scribble: UInt64?) {
+        guard !strokes.isEmpty else { return showScribbledInk(scribble: scribble) }
+        scribbleCuts.removeAll { $0.scribble == scribble }
+        scribbleCutGeneration += 1
+        let generation = scribbleCutGeneration
+        let lines = strokes.compactMap(Self.cutLine(of:))
+        let bounds = lines.reduce(CGRect.null) { $0.union($1.path.boundingBoxOfPath.insetBy(dx: -$1.width / 2, dy: -$1.width / 2)) }
+        scribbleCuts.append(ScribbleCut(scribble: scribble, strokes: Set(strokes.map(InkStrokeID.init)), lines: lines,
+                                        bounds: bounds, generation: generation))
+        scribbleCutsLanded = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.scribbleCutPatience) { [weak self] in
+            guard let self, self.scribbleCutsLanded == nil, self.scribbleCuts.contains(where: { $0.generation == generation }) else { return }
+            self.showScribbledInk(scribble: scribble)
+        }
+        if let scribble, let layer = livePenLayers.first(where: { $0.id == scribble }) {
+            handovers[scribble] = nil
+            layer.view.isHidden = true
+        }
+        drawScribbleCuts()
+    }
+
+    /// The scribble with live stroke `scribble` erases nothing after all: what it hid shows again at once, its own ink
+    /// too.
+    func showScribbledInk(scribble: UInt64?) {
+        let shown = scribbleCuts.filter { $0.scribble == scribble }
+        guard !shown.isEmpty else { return }
+        scribbleCuts.removeAll { $0.scribble == scribble }
+        if let scribble, let layer = livePenLayers.first(where: { $0.id == scribble }) { layer.view.isHidden = false }
+        if scribbleCuts.isEmpty { scribbleCutsLanded = nil }
+        drawScribbleCuts()
+    }
+
+    /// The page's queued ink edits have just landed, and its strokes are now `strokes`; its tiles were `tiles` before.
+    /// A cut whose strokes are all off the page leaves each tile as the page redraws it; one whose strokes are still
+    /// on it was not erased, and shows again at once. While the page was still drawing an earlier change, the cuts wait
+    /// for the page's report instead.
+    func scribbledInkLanded(on strokes: [PKStroke], since tiles: PageTiles) {
+        guard !scribbleCuts.isEmpty else { return }
+        let onPage = Set(strokes.map(InkStrokeID.init))
+        for cut in scribbleCuts where !cut.strokes.isDisjoint(with: onPage) { showScribbledInk(scribble: cut.scribble) }
+        guard !scribbleCuts.isEmpty else { return }
+        scribbleCutsLanded = (tiles.seeds, tiles.idle && !tiles.seeds.isEmpty, CACurrentMediaTime())
+        if handoverWatch == nil { handoverWatch = HandoverWatch(self) }
+        checkScribbleCuts()
+    }
+
+    /// PencilKit reports the page drawn: a landed erase is on screen everywhere.
+    func pageDidFinishRendering() {
+        guard scribbleCutsLanded != nil else { return }
+        releaseScribbleCuts()
+    }
+
+    /// The page's zoom changed: PencilKit draws every tile afresh, so a landed erase leaves its cuts behind, and one
+    /// still to land is cut again for the new zoom.
+    private func scribbleCutsDidChangeZoom() {
+        guard !scribbleCuts.isEmpty else { return }
+        if scribbleCutsLanded != nil { releaseScribbleCuts() } else { drawScribbleCuts() }
+    }
+
+    /// Takes a landed erase's cut off every tile the page has redrawn since, and off the page once none is left.
+    private func checkScribbleCuts() {
+        guard let landed = scribbleCutsLanded else { return }
+        guard CACurrentMediaTime() - landed.since <= Self.handoverPatience else { return releaseScribbleCuts() }
+        // While the page was still drawing an earlier change, a tile redrawn next may not have the erase yet.
+        guard landed.idle, let frame = scribbleCutPicture?.frame else { return }
+        // A tile counts once it has been redrawn since the erase landed. Where no tile is left, nothing is drawn.
+        let pending = tileLayers().filter { tile in
+            tile.frame.intersects(frame) && landed.seeds[ObjectIdentifier(tile.layer)].map { $0 == tile.seed } ?? true
+        }
+        guard !pending.isEmpty else { return releaseScribbleCuts() }
+        maskScribbleCuts(pending: pending.map(\.frame))
+    }
+
+    private func releaseScribbleCuts() {
+        scribbleCuts = []
+        scribbleCutsLanded = nil
+        drawScribbleCuts()
+    }
+
+    /// Draws the cuts afresh, and masks the page with them.
+    private func drawScribbleCuts() {
+        scribbleCutPicture = nil
+        let frame = scribbleCuts.reduce(CGRect.null) { $0.union($1.bounds) }.intersection(bounds).integral
+        if !frame.isNull, frame.width > 0, frame.height > 0 {
+            // Sharp at the zoom the ink is drawn for, within a bound on its pixels.
+            let display = traitCollection.displayScale > 0 ? traitCollection.displayScale : 2
+            let scale = min(display * inkScale, (Self.maximumCutPixels / (frame.width * frame.height)).squareRoot())
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = scale
+            format.opaque = false
+            let image = UIGraphicsImageRenderer(size: frame.size, format: format).image { context in
+                let cg = context.cgContext
+                cg.setFillColor(UIColor.black.cgColor)
+                cg.fill(CGRect(origin: .zero, size: frame.size))
+                cg.translateBy(x: -frame.minX, y: -frame.minY)
+                cg.setBlendMode(.clear)
+                cg.setLineCap(.round)
+                cg.setLineJoin(.round)
+                for line in scribbleCuts.flatMap(\.lines) {
+                    cg.setLineWidth(line.width)
+                    cg.addPath(line.path)
+                    cg.strokePath()
+                }
+            }
+            if let image = image.cgImage { scribbleCutPicture = (image, frame) }
+        }
+        maskScribbleCuts(pending: nil)
+    }
+
+    /// The most pixels a picture of the cuts has.
+    static let maximumCutPixels: CGFloat = 4_000_000
+
+    /// Masks the views PencilKit draws the page's ink in (its tiles, and the view it draws the page in while a stroke
+    /// is down) with the picture of the cuts: everywhere but in `pending`, when given, the page shows in full.
+    private func maskScribbleCuts(pending: [CGRect]?) {
+        let hosts = scribbleCutPicture == nil ? [] : canvas.subviews.filter { view in
+            // Not the live pen's or the set-aside layers, nor the scroll indicators.
+            !(view is PKCanvasView) && view.bounds.width >= 32 && view.bounds.height >= 32
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        for (view, mask) in scribbleCutMasks where !hosts.contains(view) && view.layer.mask === mask { view.layer.mask = nil }
+        scribbleCutMasks.removeAll { !hosts.contains($0.view) }
+        guard let picture = scribbleCutPicture else { return }
+        for view in hosts {
+            let host = view.layer
+            let mask: CALayer
+            if let entry = scribbleCutMasks.first(where: { $0.view === view }) {
+                mask = entry.mask
+            } else {
+                mask = CALayer()
+                mask.sublayers = [CAShapeLayer(), CALayer(), CAShapeLayer()]
+                scribbleCutMasks.append((view, mask))
+            }
+            guard let layers = mask.sublayers, layers.count == 3, let outside = layers[0] as? CAShapeLayer,
+                  let released = layers[2] as? CAShapeLayer else { continue }
+            // From page points to the mask's own coordinates; the mask covers the view's bounds.
+            let toMask = Self.transform(from: layer, to: host)
+                .concatenating(CGAffineTransform(translationX: -host.bounds.minX, y: -host.bounds.minY))
+            mask.frame = host.bounds
+            // Opaque everywhere but the picture's frame.
+            let around = CGMutablePath()
+            around.addRect(bounds.insetBy(dx: -bounds.width, dy: -bounds.height), transform: toMask)
+            around.addRect(picture.frame, transform: toMask)
+            outside.fillRule = .evenOdd
+            outside.path = around
+            layers[1].frame = picture.frame.applying(toMask)
+            layers[1].contents = picture.image
+            // Opaque over the picture's frame but for the tiles still to be redrawn.
+            if let pending {
+                let shown = CGMutablePath()
+                shown.addRect(picture.frame, transform: toMask)
+                for rect in pending { shown.addRect(rect, transform: toMask) }
+                released.fillRule = .evenOdd
+                released.path = shown
+            } else {
+                released.path = nil
+            }
+            host.mask = mask
+        }
+    }
+
+    /// A stroke's line in page points, and a width that covers all its ink: its widest point's, and a little more.
+    private static func cutLine(of stroke: PKStroke) -> (path: CGPath, width: CGFloat)? {
+        let points = Array(stroke.path.interpolatedPoints(by: .distance(1.5)))
+        guard let first = points.first else { return nil }
+        let transform = stroke.transform
+        let scale = max(hypot(transform.a, transform.b), hypot(transform.c, transform.d))
+        let widest = points.reduce(0) { max($0, $1.size.width, $1.size.height) } * scale
+        let line = CGMutablePath()
+        line.move(to: first.location.applying(transform))
+        for point in points.dropFirst() { line.addLine(to: point.location.applying(transform)) }
+        if points.count == 1 { line.addLine(to: first.location.applying(transform)) }
+        return (line, widest + 2 * cutMargin)
+    }
+
+    /// The affine map from `from`'s coordinates to `to`'s.
+    private static func transform(from: CALayer, to: CALayer) -> CGAffineTransform {
+        let origin = from.convert(CGPoint.zero, to: to)
+        let x = from.convert(CGPoint(x: 1, y: 0), to: to)
+        let y = from.convert(CGPoint(x: 0, y: 1), to: to)
+        return CGAffineTransform(a: x.x - origin.x, b: x.y - origin.y, c: y.x - origin.x, d: y.y - origin.y,
+                                 tx: origin.x, ty: origin.y)
     }
 
     /// Masks `view` off the page rectangles `rects`, so the page's own tiles show there alone.

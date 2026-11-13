@@ -161,10 +161,22 @@ enum ScribbleErase {
     /// The scribble's passes, split where it turns back, each sharing its turning point with the next; or nil when
     /// the points are not a scribble's shape. The axis is whichever of the stroke's two principal axes gives a
     /// scribble with the most passes: along the stroke for lines back and forth, across it for a zigzag.
+    ///
+    /// When neither does, the page's own upright and level axes are tried (EP108). Part way through a zigzag its
+    /// points can lean as a whole (three passes of a slanted or two-peak zigzag, or a tall one as wide as it is high),
+    /// which tilts the principal axes far enough that every pass seems to drift sideways. The scribble then stopped
+    /// being one for a few samples and became one again, so its outline went off and on while it was drawn.
     static func passes(of points: [CGPoint]) -> [[CGPoint]]? {
         guard points.count >= 8, let axes = principalAxes(of: points) else { return nil }
+        let level = CGVector(dx: 1, dy: 0), upright = CGVector(dx: 0, dy: 1)
+        return mostPasses(points, axes: [(axes.0, axes.1), (axes.1, axes.0)])
+            ?? mostPasses(points, axes: [(level, upright), (upright, level)])
+    }
+
+    /// Of the scribbles `points` make along each (axis, across) pair, the one with the most passes.
+    private static func mostPasses(_ points: [CGPoint], axes: [(CGVector, CGVector)]) -> [[CGPoint]]? {
         var best: [[CGPoint]]?
-        for (axis, across) in [(axes.0, axes.1), (axes.1, axes.0)] {
+        for (axis, across) in axes {
             guard let passes = scribblePasses(points, axis: axis, across: across),
                   passes.count > (best?.count ?? 0) else { continue }
             best = passes
@@ -186,10 +198,15 @@ enum ScribbleErase {
         guard passes.count >= minimumPasses else { return nil }
         let spans = passes.map { abs(dot($0.last!, axis) - dot($0.first!, axis)) }
         guard median(spans) >= fullPass * extent else { return nil }
-        // A pass's sideways drift against its length along the axis. The first and last passes may stop short, so
-        // they are measured against at least the swing.
-        let drifts = zip(passes, spans).map { pass, span in
-            abs(dot(pass.last!, across) - dot(pass.first!, across)) / max(span, swing)
+        // A pass's sideways drift against its length along the axis, measured against at least the swing. The first
+        // and last passes may stop short, so they are measured against at least the typical pass (EP108): while the
+        // Pencil is still drawing the last one, a few points past a rounded turn are mostly sideways, and that
+        // stopped the scribble being one until the pass grew.
+        let typical = median(spans)
+        let drifts = zip(passes, spans).enumerated().map { index, element in
+            let (pass, span) = element
+            let end = index == 0 || index == passes.count - 1
+            return abs(dot(pass.last!, across) - dot(pass.first!, across)) / max(span, swing, end ? typical : 0)
         }
         guard drifts.allSatisfy({ $0 <= maximumDrift }), median(drifts) <= typicalDrift else { return nil }
         return passes
@@ -254,6 +271,35 @@ enum ScribbleErase {
             let top = max(y0, Int((minY / Self.cell).rounded(.down))), bottom = min(y0 + rows - 1, Int((maxY / Self.cell).rounded(.down)))
             guard left <= right, top <= bottom else { return }
             for x in left...right { for y in top...bottom { body((x - x0) * rows + (y - y0)) } }
+        }
+
+        /// The cells within `radius` of `point`, in rings out from the cell holding it, until `body` returns true.
+        /// The cells a ring adds are no nearer than the ring before's, so a search that stops at its first hit
+        /// stops near `point`; one that finds nothing visits the same cells as `forEach` over the same square.
+        func forEachRing(around point: CGPoint, within radius: CGFloat, _ body: (Int) -> Bool) {
+            let cx = Int((point.x / Self.cell).rounded(.down)), cy = Int((point.y / Self.cell).rounded(.down))
+            let left = max(x0, Int(((point.x - radius) / Self.cell).rounded(.down)))
+            let right = min(x0 + columns - 1, Int(((point.x + radius) / Self.cell).rounded(.down)))
+            let top = max(y0, Int(((point.y - radius) / Self.cell).rounded(.down)))
+            let bottom = min(y0 + rows - 1, Int(((point.y + radius) / Self.cell).rounded(.down)))
+            guard left <= right, top <= bottom else { return }
+            let rings = max(cx - left, right - cx, cy - top, bottom - cy)
+            var ring = max(0, left - cx, cx - right, top - cy, cy - bottom)
+            while ring <= rings {
+                let minX = max(left, cx - ring), maxX = min(right, cx + ring)
+                let minY = max(top, cy - ring), maxY = min(bottom, cy + ring)
+                if minX <= maxX, minY <= maxY {
+                    for x in minX...maxX {
+                        if x == cx - ring || x == cx + ring {
+                            for y in minY...maxY where body((x - x0) * rows + (y - y0)) { return }
+                        } else {
+                            if cy - ring >= minY, body((x - x0) * rows + (cy - ring - y0)) { return }
+                            if ring > 0, cy + ring <= maxY, body((x - x0) * rows + (cy + ring - y0)) { return }
+                        }
+                    }
+                }
+                ring += 1
+            }
         }
     }
 
@@ -331,16 +377,19 @@ enum ScribbleErase {
             self.cells = cells
         }
 
-        /// Whether a point of the scribble is within `radius` of `point`.
+        /// Whether a point of the scribble is within `radius` of `point`. The cells are searched in rings out from
+        /// `point`'s own and the search stops at the first sample in reach (EP108): a scribble's reach can be a few
+        /// hundred points, thousands of cells, and the preview asks this of every point of every crossed stroke
+        /// each time the scribble moves.
         func contains(within radius: CGFloat, of point: CGPoint) -> Bool {
             let r2 = radius * radius
             var found = false
-            grid.forEach(minX: point.x - radius, minY: point.y - radius, maxX: point.x + radius, maxY: point.y + radius) { cell in
-                guard !found else { return }
+            grid.forEachRing(around: point, within: radius) { cell in
                 for other in cells[cell] {
                     let dx = other.x - point.x, dy = other.y - point.y
-                    if dx * dx + dy * dy <= r2 { found = true; return }
+                    if dx * dx + dy * dy <= r2 { found = true; return true }
                 }
+                return false
             }
             return found
         }

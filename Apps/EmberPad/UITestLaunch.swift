@@ -1,3 +1,5 @@
+import EmberSyncKit
+import PencilKit
 import UIKit
 
 #if DEBUG
@@ -27,6 +29,41 @@ enum UITestLaunch {
         let folder = inbox.appendingPathComponent(className, isDirectory: true)
         try? files.createDirectory(at: folder, withIntermediateDirectories: true)
         try? worksheet().write(to: folder.appendingPathComponent("\(title).pdf"))
+    }
+
+    /// EP108: launched with this as well, the worksheet opens with a few lines of pen ink on its first page, so a
+    /// real-touch test can work a finger on a page that holds ink. Only in memory: nothing is saved unless the test
+    /// writes.
+    static let inkArgument = "-EmberPadUITestInk"
+
+    /// `drawings` as `record` opens with them: the seeded ink on the first page, when launched for it.
+    static func drawings(_ drawings: [Int: PKDrawing], for record: DocumentRecord) -> [Int: PKDrawing] {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains(worksheetArgument), arguments.contains(inkArgument), record.title.hasPrefix(title),
+              drawings[0]?.strokes.isEmpty ?? true else { return drawings }
+        var seeded = drawings
+        seeded[0] = PKDrawing(strokes: handwriting())
+        return seeded
+    }
+
+    /// Five short wavy words on each of the first three ruled lines, in page points.
+    private static func handwriting() -> [PKStroke] {
+        let ink = PKInk(.pen, color: .black)
+        var strokes: [PKStroke] = []
+        for row in 1...3 {
+            let line = 130 + CGFloat(row) * 28
+            for word in 0..<5 {
+                let left = 70 + CGFloat(word) * 95
+                let points = (0...24).map { k -> PKStrokePoint in
+                    let t = CGFloat(k) / 24
+                    return PKStrokePoint(location: CGPoint(x: left + 70 * t, y: line - 10 - 7 * sin(t * .pi * 6)),
+                                         timeOffset: Double(k) * 0.01, size: CGSize(width: 2.5, height: 2.5), opacity: 1,
+                                         force: 1, azimuth: 0, altitude: .pi / 2)
+                }
+                strokes.append(PKStroke(ink: ink, path: PKStrokePath(controlPoints: points, creationDate: Date())))
+            }
+        }
+        return strokes
     }
 
     /// Two A4 pages with a heading and ruled lines.

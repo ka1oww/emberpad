@@ -404,6 +404,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     /// The page drew its ink: the live pen's committed strokes there are now on the page itself.
     func canvasViewDidFinishRendering(_ canvasView: PKCanvasView) {
+        (canvasView.superview as? PageInkView)?.pageDidFinishRendering()
         guard let page = canvases.first(where: { $0.value === canvasView })?.key,
               livePen.strokes.contains(where: { $0.page == page && $0.committedAt != nil }) else { return }
         livePen.rendered(page: page)
@@ -453,6 +454,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             let focused = candidate === activeCanvas && !readOnly
             candidate.drawingGestureRecognizer.isEnabled = focused && !lasso && !pointing && !ownEraser
             InkSelectionController.lassoRecognizer(on: candidate)?.isEnabled = focused && lasso
+            Self.turnOffPencilKitSelection(on: candidate)
         }
         if laser.isEnabled != pointing { laser.isEnabled = pointing }
         if !pointing { hideLaser(animated: false); clearLaserTrail() }
@@ -712,7 +714,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                     livePen.bind(id: id)
                 }
                 showLivePen(page: liveStroke.page)
-                beginScribblePreview(page: liveStroke.page, samples: samples.map(\.location))
+                beginScribblePreview(page: liveStroke.page, samples: samples.map(\.location), liveID: livePen.writing?.id)
             } else {
                 clearScribblePreview()
             }
@@ -765,8 +767,17 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             let pages = self.livePen.pages
-            // While PencilKit holds a stroke it has not committed, any lifted live stroke may be it (EP94).
-            self.livePen.expire(now: self.livePenClock(), keepingLifted: !self.inkFlights.isEmpty)
+            let now = self.livePenClock()
+            // While PencilKit holds a stroke it has not committed, any lifted live stroke may be it (EP94). A landed
+            // stroke stays drawn until the page draws it (EP108), or, should the page never show doing so, until the
+            // Pencil has been up for a while with nothing in flight, long enough for any redraw to be over.
+            let quiet = !self.pencilIsDown && self.inkFlights.isEmpty
+                && self.inkTiming.lastLift.map { CACurrentMediaTime() - $0 >= LivePenStrokes.timeout } ?? true
+            self.livePen.expire(now: now, keepingLifted: !self.inkFlights.isEmpty) { stroke in
+                let pageView = self.canvases[stroke.page]?.superview as? PageInkView
+                if pageView?.hasDrawn(liveStroke: stroke.id) ?? true { return true }
+                return quiet && stroke.committedAt.map { now - $0 >= LivePenStrokes.undrawnTimeout } ?? true
+            }
             pages.forEach { self.showLivePen(page: $0) }
             self.scheduleLivePenExpiry()
         }
@@ -1173,6 +1184,29 @@ extension PDFOverlayPageController {
 
     static func holdRecognizer(on canvas: PKCanvasView) -> HoldRecognizer? {
         canvas.gestureRecognizers?.lazy.compactMap { $0 as? HoldRecognizer }.first
+    }
+
+    /// PencilKit's own selection, which a finger works on the page (EP108). A tap on a page with ink brought up its
+    /// "Select All / Insert Space" menu, and a double tap, a press or a tap and drag selected ink. EmberPad selects
+    /// with its own lasso and pastes from its own menu, and PencilKit's selection and "Insert Space" would move the
+    /// page's ink outside both and outside EmberPad's undo. These are PencilKit's recognisers inside the canvas, by the
+    /// names PencilKit gives them.
+    static let pencilKitSelectionRecognizers: Set<String> = [
+        "com.apple.PencilKit.progressiveTaps", "com.apple.PencilKit.longPressToSelectToken",
+        "com.apple.PencilKit.modifySelection",
+    ]
+
+    /// Turns PencilKit's own selection off on `canvas`, each time the input rules settle (every touch focuses its
+    /// page first), so a recogniser PencilKit makes afresh is off before a finger reaches it.
+    static func turnOffPencilKitSelection(on canvas: PKCanvasView) {
+        var views = canvas.subviews
+        while let view = views.popLast() {
+            for recognizer in view.gestureRecognizers ?? []
+            where recognizer.isEnabled && pencilKitSelectionRecognizers.contains(recognizer.name ?? "") {
+                recognizer.isEnabled = false
+            }
+            views += view.subviews
+        }
     }
 
     /// After PencilKit commits a stroke, swap it for a straight one when it
@@ -1602,6 +1636,11 @@ extension PDFOverlayPageController {
             let tiles = pageView?.pageTiles()
             land(edits.filter { $0.page == page }, recovered: recovered.filter { $0.page == page }, page: page,
                  restoringClearInk: restore.contains(page))
+            // EP108: ink a scribble hid from its lift is erased now, or shows again. Before the handover, so a scribble
+            // that stayed as ink is handed over from its own layer.
+            if let pageView, pageView.hidesScribbledInk, let tiles, let canvas = canvases[page] {
+                pageView.scribbledInkLanded(on: canvas.drawing.strokes, since: tiles)
+            }
             var landed: [UInt64] = []
             for id in edits.lazy.filter({ $0.page == page }).compactMap(\.liveID) where livePen.stroke(id: id) != nil {
                 livePen.landed(id: id, now: now)
@@ -1956,6 +1995,8 @@ extension PDFOverlayPageController {
     /// no ink stays as drawn. `strokes` is the page as PencilKit committed it. Returns whether the stroke is taken.
     func eraseIfScribbled(_ canvas: PKCanvasView, page: Int, previousCount: Int, drawn: Bool, strokes: [PKStroke]) -> Bool {
         guard strokes.count == previousCount + 1, let scribble = strokes.last else { return false }
+        // The live pen's stroke for this one, whose ink and erase may be hidden since its lift (EP108).
+        let liveID = scribblePreview.flatMap { $0.page == page && $0.matches(scribble) ? $0.liveID : nil } ?? committingLiveID
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         // A stroke held into a straight line is a line (EP96), however the Pencil moved its end about while held.
         let heldLine = Self.holdRecognizer(on: canvas).map(isHeldPenLine) ?? false
@@ -1963,11 +2004,14 @@ extension PDFOverlayPageController {
               undoManager?.isUndoing != true, undoManager?.isRedoing != true,
               PenFeel.isPenInk(scribble.ink.inkType) else {
             if let preview = scribblePreview, preview.page == page, preview.matches(scribble) { clearScribblePreview() }
+            pageInkView(page)?.showScribbledInk(scribble: liveID)
             return false
         }
         let base = Array(strokes.dropLast())
-        let erased = finishScribblePreview(page: page, scribble: scribble, base: base)
-            ?? ScribbleErase.erasedIndices(scribble: scribble, in: base)
+        let previewed = finishScribblePreview(page: page, scribble: scribble, base: base)
+        let erased = previewed ?? ScribbleErase.erasedIndices(scribble: scribble, in: base)
+        // Without its preview (a stroke after it began its own), what goes is hidden now instead.
+        if previewed == nil { pageInkView(page)?.hideScribbledInk(erased.map { base[$0] }, scribble: liveID) }
         guard !erased.isEmpty else { return false }
         // The stroke is the scribble's, whatever a hold at its end would have made of it.
         Self.holdRecognizer(on: canvas)?.consumeHold()
