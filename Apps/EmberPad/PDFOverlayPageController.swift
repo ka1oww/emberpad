@@ -1871,7 +1871,7 @@ extension PDFOverlayPageController {
             }
             guard popped < most else { return putBack(popped, on: undoManager) }
             popped += 1
-            switch undoStep(undoManager, on: canvas, page: page, from: current) {
+            switch undoStep(undoManager, on: canvas, page: page, from: current, keepingLateStrokes: true) {
             case .empty:
                 continue
             case .otherPage:
@@ -1909,10 +1909,11 @@ extension PDFOverlayPageController {
         case changed(PKDrawing)
     }
 
-    /// Undoes the top step, `drawing` being `canvas`'s drawing (page `page`) before it (EP98). Leaves
-    /// `isReplacingStroke` set for the caller to clear.
+    /// Undoes the top step, `drawing` being `canvas`'s drawing (page `page`) before it (EP98). With
+    /// `keepingLateStrokes` (a landing's pops), a step that takes strokes owed a late step together with others leaves
+    /// those on the page and takes only the others (EP107). Leaves `isReplacingStroke` set for the caller to clear.
     private func undoStep(_ undoManager: UndoManager, on canvas: PKCanvasView, page: Int,
-                          from drawing: PKDrawing) -> UndoneStep {
+                          from drawing: PKDrawing, keepingLateStrokes: Bool = false) -> UndoneStep {
         // Every page's drawing counts its changes (`scribbleRevisions`), on screen or not.
         let others = scribbleRevisions.filter { $0.key != page }
         let late = lateInkSteps.flatMap { $0.ownSteps.contains(undoManager.undoActionName) ? nil : $0 }
@@ -1931,6 +1932,18 @@ extension PDFOverlayPageController {
                 canvas.drawing = drawing
                 lateInkSteps?.strokes.subtract(taken)
                 return .empty
+            }
+            let lateTaken = taken.filter(late.strokes.contains)
+            if keepingLateStrokes, taken.count == drawing.strokes.count - after.strokes.count, !lateTaken.isEmpty {
+                // On a slow run loop PencilKit can make that late step in the next strokes' commit, one step for
+                // both. The landed strokes keep their own steps and stay on the page; the step takes only the next
+                // strokes, which the landing gives steps of their own. Taken whole, the landing gave the landed
+                // strokes a second step, and their first then took nothing (122 steps for 120 strokes on CI).
+                let others = Set(taken).subtracting(lateTaken)
+                let kept = PKDrawing(strokes: drawing.strokes.filter { !others.contains(InkStrokeID($0)) })
+                canvas.drawing = kept
+                lateInkSteps?.strokes.subtract(lateTaken)
+                return .changed(kept)
             }
         }
         return .changed(after)

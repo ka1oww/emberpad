@@ -249,6 +249,35 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         Self.assertOneUndoStepPerStroke(canvas, undo, count: 4, "a late step met by a landing long after")
     }
 
+    /// On a slow run loop PencilKit can make its late step for strokes that landed with steps of their own in the
+    /// next stroke's commit: one step takes both. The landed strokes keep their own steps and stay on the page, and
+    /// the next stroke lands with its own (EP107). Before, the landing gave the landed strokes a second step, and their
+    /// first then took nothing: two taps of undo in a row did nothing (122 steps for 120 strokes on CI).
+    func testALateStepMadeInTheNextStrokesCommitTakesOnlyThatStroke() async throws {
+        for landed in [1, 2] {
+            let (controller, session) = try await PenFeelTests.makeController()
+            let canvas = try PenFeelTests.canvas(controller, session)
+            let undo = Self.pencilKitUndo(for: controller)
+            let strokes = (0..<landed + 2).map { Self.liveStroke(y: 100 + CGFloat($0) * 60, at: $0) }
+            Self.pencilKitStep(undo, on: canvas, removing: [strokes[0]])
+            strokes[...landed].forEach { Self.commit($0, on: canvas, controller) }
+            await InkSettle.settle()
+            // The writing goes on, and PencilKit's step for the landed strokes comes with the next stroke's commit.
+            controller.inkTiming.lastLift = CACurrentMediaTime() + 60
+            let next = strokes[landed + 1]
+            Self.pencilKitStep(undo, on: canvas, removing: Array(canvas.drawing.strokes[1...landed]) + [next])
+            Self.commit(next, on: canvas, controller)
+            controller.inkTiming.lastLift = nil
+            controller.scheduleInkLanding()
+            await InkSettle.settle()
+            let label = "a late step for \(landed) landed in the next stroke's commit"
+            XCTAssertEqual(canvas.drawing.strokes.map(\.ink.inkType), Array(repeating: .fountainPen, count: landed + 2),
+                           label)
+            XCTAssertEqual(session.drawing(on: 0).strokes.count, landed + 2, "\(label): every stroke is saved")
+            Self.assertOneUndoStepPerStroke(canvas, undo, count: landed + 2, label)
+        }
+    }
+
     /// A held line lands with a step of its own, named for it; when it lands before PencilKit has made its step, the
     /// next landing keeps that step, as it does an "Ink" step, however soon or long after: it takes the line back,
     /// as PencilKit's late step for it would, but is never taken for one (EP107).
@@ -632,10 +661,11 @@ private final class WritingPage {
         var steps = 0
         while undo.canUndo, steps < 2 * count + 10 {
             let before = canvas.drawing.strokes.count
+            let name = undo.undoActionName
             undo.undo()
             steps += 1
-            XCTAssertEqual(canvas.drawing.strokes.count, before - 1, "\(label): undo \(steps) takes one stroke",
-                           file: file, line: line)
+            XCTAssertEqual(canvas.drawing.strokes.count, before - 1,
+                           "\(label): undo \(steps) (\"\(name)\") takes one stroke", file: file, line: line)
         }
         XCTAssertEqual(steps, count, "\(label): one undo step per stroke", file: file, line: line)
         for _ in 0..<steps { undo.redo() }

@@ -89,7 +89,9 @@ final class DocumentTransitionTests: XCTestCase {
     /// old fixed 120 points took in the page area's top (it starts at about 92 since the tool palette floats), so no
     /// frame of a zoom could pass. A page that loads too late to zoom just appears, by design
     /// (`DocumentTransition.shortestPageZoom`), as it can on a loaded runner; up to three opens are watched for one
-    /// that zooms.
+    /// that zooms. On the CI runner the page loads too late on every open (EP107), so the watched opens stretch the
+    /// entrance (`DocumentTransition.entranceStretch`): the page zooms the same way, only slower, and its timing is
+    /// checked by `testOpenZoomsThePageFromTheCentreAndFadesTheBarsIn`.
     func testThePageZoomsInFromTheCentreOnceItHasLoaded() async throws {
         let (library, window, navigator) = try await hostLibrary(reduceMotion: false)
         try await goToTutorial(library)
@@ -98,11 +100,13 @@ final class DocumentTransitionTests: XCTestCase {
         await pause(1.0)
         close(navigator, in: window, reduceMotion: false)
         await pause(1.0)
+        DocumentTransition.entranceStretch = 4
+        defer { DocumentTransition.entranceStretch = 1 }
         for _ in 0..<3 {
             try open("Synthetic Sheet 6", library, navigator, reduceMotion: false)
             var drawn: [(rect: CGRect, opacity: Float)] = []
             var midway: UIImage?
-            let watchUntil = CACurrentMediaTime() + 0.8
+            let watchUntil = CACurrentMediaTime() + DocumentTransition.openPageEntrance + 0.6
             while CACurrentMediaTime() < watchUntil {
                 await pause(0.004)
                 guard let shown = Self.drawnPageArea(in: window) else { continue }

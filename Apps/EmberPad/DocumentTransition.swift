@@ -27,6 +27,12 @@ enum DocumentTransition {
     /// that loads later zooms over what is left of it, and one that leaves less than this just appears, as GoodNotes'
     /// page does when it is not ready. The page is never settled later than the old 0.35 s push would have left it.
     static let shortestPageZoom: Double = 0.08
+    /// How many times longer than `openPageDuration` the page's entrance lasts: 1 in the app. A hosted test stretches
+    /// it so a page that loads too late for the 0.22 s entrance on a loaded CI runner still zooms and can be watched
+    /// (EP107); the zoom's timing itself is checked without hosting.
+    static var entranceStretch: Double = 1
+    /// How long the page's entrance lasts: the time from the editor appearing to the page settled.
+    static var openPageEntrance: Double { openPageDuration * entranceStretch }
     /// How long the library takes to fade off the editor on open, easing out so most of it is gone in the first half:
     /// GoodNotes drops the library within a frame or two while its bars fade in over about 0.2 s.
     static let openLibraryFadeDuration: Double = 0.2
@@ -55,7 +61,7 @@ enum DocumentTransition {
     /// The page's zoom (or, with Reduce Motion, fade) when its content arrives `elapsed` seconds after the editor
     /// appeared: whatever is left of the entrance, or nil when too little is left and the page should just appear.
     static func pageAnimation(elapsed: Double, reduceMotion: Bool) -> Animation? {
-        let remaining = (reduceMotion ? reduceMotionDuration : openPageDuration) - max(0, elapsed)
+        let remaining = (reduceMotion ? reduceMotionDuration : openPageEntrance) - max(0, elapsed)
         guard remaining >= shortestPageZoom else { return nil }
         return reduceMotion ? .easeInOut(duration: remaining) : .easeOut(duration: remaining)
     }
