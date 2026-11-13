@@ -252,8 +252,7 @@ final class ScribbleEraseTests: XCTestCase {
                        "the live scribble stays until the page has drawn the erase, so the two go together")
         controller.canvasViewDidFinishRendering(canvas)
         XCTAssertEqual(pageView.livePenStrokes.count, 0)
-        XCTAssertNotEqual(pageView.livePenLayer?.isHidden, false)
-        XCTAssertNotEqual(pageView.liftedPenLayer?.isHidden, false)
+        XCTAssertTrue(pageView.livePenViews.allSatisfy(\.isHidden), "its layer is hidden at once")
         XCTAssertTrue(session.drawing(on: 0).strokes.isEmpty)
         XCTAssertEqual(undo.undoActionName, "Scribble to Erase")
     }

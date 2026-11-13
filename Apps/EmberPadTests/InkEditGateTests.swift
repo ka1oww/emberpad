@@ -287,16 +287,23 @@ final class InkEditGateTests: XCTestCase {
         XCTAssertEqual(landing.map(InkStrokeID.init), pen.strokes[0].stroke(lifted: true).map(InkStrokeID.init))
     }
 
-    func testLiftedStrokesAreDrawnApartFromTheOneBeingWritten() {
+    func testALiftedStrokeIsNotRedrawnWhileTheNextIsWritten() {
         var pen = LivePenStrokes()
         Self.begin(&pen, now: 0)
         let lifted = pen.strokes[0].id
         Self.begin(&pen, now: 0.3)
-        XCTAssertEqual(pen.liftedIDs(page: 0), [lifted])
-        XCTAssertEqual(pen.liftedDrawing(page: 0).strokes.count, 1)
-        XCTAssertEqual(pen.writingDrawing(page: 0).strokes.count, 1)
+        let writing = pen.strokes[1].id
+        let before = pen.shown(page: 0)
+        XCTAssertEqual(before.map(\.id), [lifted, writing], "oldest first")
+        pen.extend(samples: [LiveInkSample(location: CGPoint(x: 90, y: 40), time: 0.4, force: 1, azimuth: 0, altitude: 1)],
+                   predicted: [])
+        let after = pen.shown(page: 0)
+        XCTAssertEqual(after[0], before[0], "the lifted stroke keeps its revision, so its layer is not redrawn")
+        XCTAssertNotEqual(after[1].revision, before[1].revision, "the stroke being written changes with every move")
+        pen.lift(samples: [], now: 0.5)
+        XCTAssertNotEqual(pen.shown(page: 0)[1].revision, after[1].revision, "and once more on lift, for its end tip")
         XCTAssertEqual(pen.drawing(page: 0).strokes.count, 2)
-        XCTAssertTrue(pen.liftedIDs(page: 1).isEmpty)
+        XCTAssertTrue(pen.shown(page: 1).isEmpty)
     }
 
     // MARK: Fixtures
