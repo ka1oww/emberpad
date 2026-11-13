@@ -101,6 +101,9 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// The Shape tool's Fill Color (EP64): closed shapes are filled with a light tint of their colour. Off by default,
     /// as in GoodNotes.
     var shapeFill = false
+    /// EP100: the worksheet edge the tool row docks on, moved by holding the row with a finger and dragging it, as in
+    /// GoodNotes 6. Under the header by default, where it always was.
+    var toolbarDock: ToolbarDock = .top
 
     /// Tip sharpness's default before EP51 (`penTipSharpnessChosen`).
     static let legacyDefaultTipSharpness = 0.5
@@ -161,6 +164,7 @@ struct ToolSettings: Codable, Equatable, Sendable {
         laserMode = (try? c.decodeIfPresent(LaserMode.self, forKey: .laserMode)) ?? d.laserMode
         shapeSnap = (try? c.decodeIfPresent(Bool.self, forKey: .shapeSnap)) ?? d.shapeSnap
         shapeFill = (try? c.decodeIfPresent(Bool.self, forKey: .shapeFill)) ?? d.shapeFill
+        toolbarDock = (try? c.decodeIfPresent(ToolbarDock.self, forKey: .toolbarDock)) ?? d.toolbarDock
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
@@ -400,6 +404,7 @@ final class ToolState {
     func setLaserMode(_ mode: LaserMode) { update { $0.laserMode = mode } }
     func setShapeSnap(_ on: Bool) { update { $0.shapeSnap = on } }
     func setShapeFill(_ on: Bool) { update { $0.shapeFill = on } }
+    func setToolbarDock(_ dock: ToolbarDock) { update { $0.toolbarDock = dock } }
 
     func canAddColor(for tool: WorksheetTool) -> Bool {
         presets(for: tool).count < ToolSettings.maxPresets

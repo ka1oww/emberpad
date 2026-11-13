@@ -115,10 +115,14 @@ enum TeacherCopySlide {
 
     /// Whether a finger touching down at `x` (window coordinates) is at the edge the panel is hidden off. `bodyMinX`
     /// and `bodyMaxX` are the worksheet body's left and right edges, which are the screen's while the library sidebar
-    /// is hidden, as it is whenever a worksheet opens.
-    static func edgeSwipeStarts(atX x: CGFloat, side: TeacherCopyPanelSide, bodyMinX: CGFloat, bodyMaxX: CGFloat) -> Bool {
+    /// is hidden, as it is whenever a worksheet opens. `reach` widens the band outwards past the body's edge: a tool
+    /// column docked down that side lies between the body and the screen's edge (EP100), and a swipe from the screen's
+    /// edge across it still pulls the panel out.
+    static func edgeSwipeStarts(atX x: CGFloat, side: TeacherCopyPanelSide, bodyMinX: CGFloat, bodyMaxX: CGFloat,
+                                reach: CGFloat = 0) -> Bool {
         guard bodyMaxX - bodyMinX > 2 * edgeBand else { return false }
-        return side == .leading ? x >= bodyMinX && x <= bodyMinX + edgeBand : x <= bodyMaxX && x >= bodyMaxX - edgeBand
+        return side == .leading ? x >= bodyMinX - reach && x <= bodyMinX + edgeBand
+                                : x <= bodyMaxX + reach && x >= bodyMaxX - edgeBand
     }
 
     /// Whether a finger that touched down at the hidden panel's edge and has moved (dx, dy) is pulling the panel in:
@@ -278,6 +282,8 @@ struct TeacherCopyCardOverlay: View {
     let card: TeacherCopyCardState
     /// False on a page added in Ember Slate, which the Teacher copy has no page for.
     var hasAnswerPage = true
+    /// How far outside the body the edge swipe on a side may start: across a tool column docked down that side (EP100).
+    var edgeSwipeReach: (TeacherCopyPanelSide) -> CGFloat = { _ in 0 }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The finger's horizontal travel while a swipe is in progress.
     @State private var drag: CGFloat?
@@ -322,7 +328,7 @@ struct TeacherCopyCardOverlay: View {
             }
             .frame(width: container.width, height: container.height, alignment: .topLeading)
             // EP97: while the panel is hidden, a finger swipe in from that edge of the body brings it out, as the tab does.
-            .background(TeacherCopyEdgeSwipe(side: side, isEnabled: !card.isOpen,
+            .background(TeacherCopyEdgeSwipe(side: side, isEnabled: !card.isOpen, reach: edgeSwipeReach(side),
                                              onChanged: { drag = $0 },
                                              onEnded: { settle(translation: $0, velocity: $1, panelSize: panelSize, in: container) }))
             // Nothing slides out over whatever sits beside the worksheet body.
@@ -530,6 +536,8 @@ class SlideOverSwipeRecognizer: UIGestureRecognizer {
 /// that lands on the pull tab is left to the tab's own swipe, so the two never move the panel together.
 final class TeacherCopyEdgeSwipeRecognizer: SlideOverSwipeRecognizer {
     var side = TeacherCopyPanelSide.leading
+    /// How far outside the body on `side` a swipe may start (`TeacherCopySlide.edgeSwipeStarts`).
+    var reach: CGFloat = 0
     /// The worksheet body's frame in window coordinates.
     var body: () -> CGRect = { .null }
 
@@ -539,7 +547,8 @@ final class TeacherCopyEdgeSwipeRecognizer: SlideOverSwipeRecognizer {
         guard !frame.isNull, !frame.isEmpty else { return false }
         let point = touch.location(in: nil)
         guard point.y >= frame.minY, point.y <= frame.maxY else { return false }
-        return TeacherCopySlide.edgeSwipeStarts(atX: point.x, side: side, bodyMinX: frame.minX, bodyMaxX: frame.maxX)
+        return TeacherCopySlide.edgeSwipeStarts(atX: point.x, side: side, bodyMinX: frame.minX, bodyMaxX: frame.maxX,
+                                                reach: reach)
     }
 
     override func begins(dx: CGFloat, dy: CGFloat) -> Bool? {
@@ -569,6 +578,7 @@ final class TeacherCopyEdgeSwipeRecognizer: SlideOverSwipeRecognizer {
 struct TeacherCopyEdgeSwipe: UIViewRepresentable {
     var side: TeacherCopyPanelSide
     var isEnabled: Bool
+    var reach: CGFloat = 0
     var onChanged: (CGFloat) -> Void
     var onEnded: (_ translation: CGFloat, _ velocity: CGFloat) -> Void
 
@@ -585,6 +595,7 @@ struct TeacherCopyEdgeSwipe: UIViewRepresentable {
 
     func updateUIView(_ view: InstallerView, context: Context) {
         view.swipe.side = side
+        view.swipe.reach = reach
         // Every move re-renders the overlay; re-setting `isEnabled` mid-swipe would reset the swipe under the finger.
         if view.swipe.isEnabled != isEnabled { view.swipe.isEnabled = isEnabled }
         view.swipe.onSwipe = { [onChanged, onEnded] phase in
