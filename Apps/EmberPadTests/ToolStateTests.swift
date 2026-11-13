@@ -254,7 +254,7 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(tools.handlePencil(.switchEraser, gesture: .doubleTap), .select(.eraser))
         XCTAssertEqual(tools.current, .eraser)
         XCTAssertEqual(tools.toast?.text, "Whole stroke eraser · Pencil double-tap", "the default eraser (EP71)")
-        XCTAssertEqual(tools.toast?.symbol, "eraser")
+        XCTAssertEqual(tools.toast?.icon, .system("eraser"))
         XCTAssertEqual(tools.handlePencil(.switchEraser, gesture: .doubleTap), .select(.highlighter))
         XCTAssertEqual(tools.current, .highlighter)
         XCTAssertEqual(tools.toast?.text, "Highlighter · Pencil double-tap")

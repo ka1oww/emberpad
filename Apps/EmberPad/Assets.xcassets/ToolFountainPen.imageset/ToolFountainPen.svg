@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 100 100">
+  <!-- EmberPad's fountain pen tool icon (EP105), original artwork. Drawn upright with the nib at +y, then turned
+       45 degrees so it writes down-left like the SF Symbols beside it. A template image: only the alpha is used. -->
+  <g transform="translate(50 50) rotate(45) scale(0.88)" fill="none" stroke="#000" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Barrel, with the cap's joint across it. -->
+    <path d="M -13 -52 Q -13 -62 -3 -62 L 3 -62 Q 13 -62 13 -52 L 13 2 L -13 2 Z"/>
+    <path d="M -13 -26 L 13 -26"/>
+    <!-- Grip section. -->
+    <path d="M -11 2 L -10 11 L 10 11 L 11 2"/>
+    <!-- The nib: a solid split point with its breather hole and slit cut out. -->
+    <path fill="#000" stroke="none" fill-rule="evenodd" d="M -12.5 11 L 12.5 11 C 12.5 30 6 47 0 64 C -6 47 -12.5 30 -12.5 11 Z M -1.6 56 L -1.6 31.5 A 4.4 4.4 0 1 1 1.6 31.5 L 1.6 56 Z"/>
+  </g>
+</svg>

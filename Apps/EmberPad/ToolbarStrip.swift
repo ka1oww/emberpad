@@ -141,6 +141,35 @@ private enum ToolIconMetrics {
     static let height: CGFloat = 44
 }
 
+/// A tool's icon at a symbol point size (EP105). An SF Symbol takes the size and weight as a font; an asset-catalog
+/// drawing is a template image in a square box `assetScale` times the size, which gives it the same optical size and
+/// stroke as a light SF Symbol at that point size, and takes the same tint. It is decoration: the tool button and the
+/// toast text name the tool for VoiceOver.
+struct ToolIconImage: View {
+    let icon: ToolIcon
+    let size: CGFloat
+    var weight: Font.Weight = .light
+
+    static let assetScale: CGFloat = 1.1
+
+    var body: some View {
+        Group {
+            switch icon {
+            case .system(let name):
+                Image(systemName: name)
+                    .font(.system(size: size, weight: weight))
+            case .asset(let name):
+                Image(name)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size * Self.assetScale, height: size * Self.assetScale)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 private struct ToolButton: View {
     let tool: WorksheetTool
     let selected: Bool
@@ -148,8 +177,7 @@ private struct ToolButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: tool.symbol)
-                .font(.system(size: ToolIconMetrics.size, weight: .light))
+            ToolIconImage(icon: tool.icon, size: ToolIconMetrics.size)
                 .foregroundStyle(selected ? Theme.accent : Theme.text2)
                 .frame(width: ToolIconMetrics.width, height: ToolIconMetrics.height)
                 // Ember's selected tool: red on a soft red square, as before EP54 (EP57).
@@ -662,7 +690,7 @@ struct ToolToastLabel: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: toast.symbol)
+            ToolIconImage(icon: toast.icon, size: 15, weight: .semibold)
             Text(toast.text)
         }
         .font(.subheadline.weight(.semibold))

@@ -20,16 +20,25 @@ enum WorksheetTool: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    var symbol: String {
+    /// The tool's picture on the palette and in its toasts (EP105). SF Symbols where one shows the tool; the fountain
+    /// pen and laser pointer have none, so they are EmberPad's own vector drawings in the asset catalog.
+    var icon: ToolIcon {
         switch self {
-        case .lasso: "lasso"
-        case .pen: "pencil.tip"
-        case .highlighter: "highlighter"
-        case .eraser: "eraser"
-        case .laser: "circle.circle"
-        case .shape: "square.on.circle"
+        case .lasso: .system("lasso")
+        case .pen: .asset("ToolFountainPen")
+        case .highlighter: .system("highlighter")
+        case .eraser: .system("eraser")
+        case .laser: .asset("ToolLaserPointer")
+        case .shape: .system("square.on.circle")
         }
     }
+}
+
+/// A tool's picture: an SF Symbol, or an original template vector in the asset catalog for a tool SF Symbols has no
+/// picture of (EP105).
+enum ToolIcon: Hashable, Sendable {
+    case system(String)
+    case asset(String)
 }
 
 enum EraserMode: String, CaseIterable, Codable, Sendable {
@@ -291,7 +300,7 @@ enum PencilCommand: Equatable, Sendable {
 /// A transient capsule message over the worksheet (design 5.4).
 struct ToolToast: Equatable, Identifiable {
     let id = UUID()
-    let symbol: String
+    let icon: ToolIcon
     let text: String
 }
 
@@ -371,7 +380,7 @@ final class ToolState {
         case .none: break
         case .select(let tool):
             select(tool)
-            showToast(symbol: tool.symbol, text: "\(toolTitle(tool)) · \(gesture.title)")
+            showToast(icon: tool.icon, text: "\(toolTitle(tool)) · \(gesture.title)")
         case .openSettings:
             settingsTool = settings.current
         }
@@ -484,8 +493,13 @@ final class ToolState {
 
     // MARK: - Toasts
 
+    /// Shows a toast with an SF Symbol.
     func showToast(symbol: String, text: String) {
-        let next = ToolToast(symbol: symbol, text: text)
+        showToast(icon: .system(symbol), text: text)
+    }
+
+    func showToast(icon: ToolIcon, text: String) {
+        let next = ToolToast(icon: icon, text: text)
         toast = next
         toastTask?.cancel()
         toastTask = Task { [weak self] in
