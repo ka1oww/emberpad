@@ -38,9 +38,22 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
     func testALongLessonOnABusyPageKeepsEveryStroke() throws {
         let page = try writingPage(baseStrokes: 1500)
         page.write(count: 120, gaps: [0.005, 0.01, 0.02, 0.05, 0.3])
-        // On a page this busy PencilKit's own undo steps can merge or hold nothing when the run loop is slow (as on a
-        // CI runner), so the guarantee here is the ink: every stroke kept, and undo then redo brings every one back.
-        page.assertEveryStrokeKept(120, "120 strokes on a 1500-stroke page", strictUndoSteps: false)
+        page.assertEveryStrokeKept(120, "120 strokes on a 1500-stroke page")
+    }
+
+    /// A slow run loop, as on a loaded CI runner: PencilKit then commits a burst late, groups its strokes' undo steps
+    /// out of order, makes some steps only after their strokes have landed, and leaves a step that changes nothing
+    /// for a stroke it threw away. Every undo step still takes exactly one stroke (EP98). Before EP98, at 2 ms one
+    /// step in about 120 took none, and at 6 ms whole bursts fell back to PencilKit's steps, which then took none.
+    func testOnASlowRunLoopEachUndoStepStillTakesOneStroke() throws {
+        for stall in [0.002, 0.006] {
+            let page = try writingPage(baseStrokes: 1500)
+            page.slowingEachTurn(by: stall) {
+                page.write(count: 120, gaps: [0.005, 0.01, 0.02, 0.05, 0.3])
+                page.settle()
+            }
+            page.assertEveryStrokeKept(120, "120 strokes, each turn of the run loop \(Int(stall * 1000)) ms slower")
+        }
     }
 
     /// Writing that never pauses long enough for the pen's swaps: they still land once `InkLandingTiming.mostWaiting`
@@ -54,9 +67,7 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         }
         XCTAssertLessThanOrEqual(mostWaiting, 33, "the queue is bounded")
         XCTAssertGreaterThanOrEqual(mostWaiting, 24, "short bursts still wait for the pause")
-        // A 150-stroke page: PencilKit's own undo steps can hold nothing on a slow run loop, so as in the 1500-stroke
-        // test the guarantee is the ink, and undo then redo brings every stroke back.
-        page.assertEveryStrokeKept(80, "80 strokes with no pause", strictUndoSteps: false)
+        page.assertEveryStrokeKept(80, "80 strokes with no pause")
     }
 
     /// A stroke PencilKit throws away however it happens (here the drawing is set while it is being written) is put
@@ -119,6 +130,87 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
             XCTAssertEqual(canvas.drawing.strokes.count, left, "one undo takes one stroke")
         }
         XCTAssertFalse(undo.canUndo)
+    }
+
+    /// A step PencilKit left for a stroke it threw away changes nothing. Among the strokes landing, or just below
+    /// them, it is dropped, so no tap of undo does nothing (EP98).
+    func testAnUndoStepThatChangesNothingIsDroppedAsTheStrokesLand() async throws {
+        for emptyAt in [0, 1] {
+            let (controller, session) = try await PenFeelTests.makeController()
+            let canvas = try PenFeelTests.canvas(controller, session)
+            let undo = Self.pencilKitUndo(for: controller)
+            let strokes = (0..<2).map { Self.liveStroke(y: 100 + CGFloat($0) * 60, at: $0) }
+            for (n, stroke) in strokes.enumerated() {
+                if n == emptyAt { Self.pencilKitStep(undo, on: canvas, removing: []) }
+                Self.pencilKitStep(undo, on: canvas, removing: [stroke])
+                Self.commit(stroke, on: canvas, controller)
+            }
+            await InkSettle.settle()
+            Self.assertOneUndoStepPerStroke(canvas, undo, count: 2, "an empty step \(emptyAt == 0 ? "below" : "among") them")
+        }
+    }
+
+    /// On a slow run loop PencilKit can group a burst's strokes out of order: its newest step takes strokes from
+    /// either side of one an older step takes. Every stroke still lands with the pen feel, as its own step (EP98).
+    func testStrokesPencilKitGroupsOutOfOrderEachLandAsTheirOwnStep() async throws {
+        let (controller, session) = try await PenFeelTests.makeController()
+        let canvas = try PenFeelTests.canvas(controller, session)
+        let undo = Self.pencilKitUndo(for: controller)
+        let strokes = (0..<3).map { Self.liveStroke(y: 100 + CGFloat($0) * 60, at: $0) }
+        strokes.forEach { Self.commit($0, on: canvas, controller) }
+        Self.pencilKitStep(undo, on: canvas, removing: [strokes[1]])
+        Self.pencilKitStep(undo, on: canvas, removing: [strokes[0], strokes[2]])
+        await InkSettle.settle()
+        XCTAssertEqual(canvas.drawing.strokes.map(\.ink.inkType), Array(repeating: .fountainPen, count: 3))
+        Self.assertOneUndoStepPerStroke(canvas, undo, count: 3, "grouped out of order")
+    }
+
+    /// On a slow run loop PencilKit can make a stroke's undo step only after the stroke has landed. The stroke lands
+    /// with a step of its own, and PencilKit's late step, which then changes nothing, is dropped (EP98).
+    func testAStrokeWhoseStepPencilKitMakesLateLandsWithItsOwnStep() async throws {
+        let (controller, session) = try await PenFeelTests.makeController()
+        let canvas = try PenFeelTests.canvas(controller, session)
+        let undo = Self.pencilKitUndo(for: controller)
+        let strokes = (0..<2).map { Self.liveStroke(y: 100 + CGFloat($0) * 60, at: $0) }
+        Self.pencilKitStep(undo, on: canvas, removing: [strokes[0]])
+        strokes.forEach { Self.commit($0, on: canvas, controller) }
+        await InkSettle.settle()
+        XCTAssertEqual(canvas.drawing.strokes.map(\.ink.inkType), [.fountainPen, .fountainPen])
+        Self.pencilKitStep(undo, on: canvas, removing: [])
+        await InkSettle.settle()
+        XCTAssertFalse(undo.canRedo, "the dropped step leaves no redo behind")
+        Self.assertOneUndoStepPerStroke(canvas, undo, count: 2, "a step made late")
+    }
+
+    /// The undo manager is the window's, shared by every page: a step for another page is never taken as one that
+    /// changes nothing, so its ink stays and its step with it.
+    func testAStepForAnotherPageIsNeverDropped() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ep98-\(UUID().uuidString)", isDirectory: true)
+        roots.append(root)
+        let session = try StudentMirrorFixture.session(.student, pages: 2, root: root)
+        let suiteName = "EmberPadTests.EP98.\(UUID().uuidString)"
+        suiteNames.append(suiteName)
+        let controller = PDFOverlayPageController(session: session, student: StudentDisplayModel(),
+                                                  tools: ToolState(defaults: UserDefaults(suiteName: suiteName)!))
+        controller.loadViewIfNeeded()
+        let canvas = try PenFeelTests.canvas(controller, session)
+        let undo = Self.pencilKitUndo(for: controller)
+        let other = Self.liveStroke(y: 300, at: 9)
+        session.update(PKDrawing(strokes: [PenFeel.visible(other)]), page: 1)
+        undo.beginUndoGrouping()
+        controller.registerInkAppend(on: undo, page: 1, strokes: [PenFeel.visible(other)])
+        undo.setActionName("Paste")
+        undo.endUndoGrouping()
+        let stroke = Self.liveStroke(y: 100, at: 0)
+        Self.pencilKitStep(undo, on: canvas, removing: [stroke])
+        Self.commit(stroke, on: canvas, controller)
+        await InkSettle.settle()
+        XCTAssertEqual(session.drawing(on: 1).strokes.count, 1, "the other page keeps its ink")
+        undo.undo()
+        XCTAssertEqual(canvas.drawing.strokes.count, 0)
+        XCTAssertEqual(undo.undoActionName, "Paste", "and its step")
+        undo.undo()
+        XCTAssertEqual(session.drawing(on: 1).strokes.count, 0)
     }
 
     /// PencilKit can commit a stroke before ones begun earlier (measured on a 4000-stroke page). A late commit is
@@ -200,6 +292,48 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         return PKStroke(ink: PKInk(PenFeel.liveInkType, color: UIColor.black.withAlphaComponent(0)),
                         path: PKStrokePath(controlPoints: points,
                                            creationDate: created ?? Date(timeIntervalSince1970: 1_800_000_000 + Double(n))))
+    }
+
+    /// An undo manager standing in for the window's, grouping only where a step says so, as in a test there is no
+    /// event to group by.
+    private static func pencilKitUndo(for controller: PDFOverlayPageController) -> UndoManager {
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        controller.inkSelection.undoManagerOverride = undo
+        return undo
+    }
+
+    /// PencilKit commits `stroke`: it is put on the end of the canvas.
+    private static func commit(_ stroke: PKStroke, on canvas: PKCanvasView, _ controller: PDFOverlayPageController) {
+        canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + [stroke])
+        controller.canvasViewDrawingDidChange(canvas)
+    }
+
+    /// An undo step as PencilKit makes one: `strokes` come off the canvas wherever they are, and redo puts the page
+    /// back. One for strokes no longer on the page changes nothing.
+    private static func pencilKitStep(_ undo: UndoManager, on canvas: PKCanvasView, removing strokes: [PKStroke]) {
+        let ids = strokes.map(InkStrokeID.init)
+        undo.beginUndoGrouping()
+        undo.registerUndo(withTarget: canvas) { canvas in
+            MainActor.assumeIsolated {
+                let kept = canvas.drawing.strokes.filter { !ids.contains(InkStrokeID($0)) }
+                PenFeelTests.registerPencilKitStep(on: undo, canvas: canvas, restoring: canvas.drawing)
+                if kept.count < canvas.drawing.strokes.count { canvas.drawing = PKDrawing(strokes: kept) }
+            }
+        }
+        undo.setActionName("Added strokes")
+        undo.endUndoGrouping()
+    }
+
+    /// Each of the `count` undo steps takes one stroke, an "Ink" step, and none is left over.
+    private static func assertOneUndoStepPerStroke(_ canvas: PKCanvasView, _ undo: UndoManager, count: Int, _ label: String,
+                                                   file: StaticString = #filePath, line: UInt = #line) {
+        for left in (0..<count).reversed() {
+            XCTAssertEqual(undo.undoActionName, PendingInkEdit.inkActionName, label, file: file, line: line)
+            undo.undo()
+            XCTAssertEqual(canvas.drawing.strokes.count, left, "\(label): one undo takes one stroke", file: file, line: line)
+        }
+        XCTAssertFalse(undo.canUndo, "\(label): no step is left over", file: file, line: line)
     }
 
     static func alpha(_ color: UIColor) -> CGFloat {
@@ -324,12 +458,20 @@ private final class WritingPage {
         Self.turn(0.2)
     }
 
+    /// Runs `body` with every turn of the main run loop `stall` seconds slower, as on a loaded CI runner.
+    func slowingEachTurn(by stall: TimeInterval, _ body: () -> Void) {
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue, true, 0) { _, _ in
+            let end = ProcessInfo.processInfo.systemUptime + stall
+            while ProcessInfo.processInfo.systemUptime < end {}
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        defer { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) }
+        body()
+    }
+
     /// Every one of `count` strokes written is on the canvas and saved, exactly once, visible, in the fountain pen,
-    /// and each is its own undo step.
-    /// With `strictUndoSteps` off (a very busy page), undoing may take extra steps that change nothing, so only the
-    /// undo-all-then-redo-all round trip is checked.
-    func assertEveryStrokeKept(_ count: Int, _ label: String, strictUndoSteps: Bool = true,
-                               file: StaticString = #filePath, line: UInt = #line) {
+    /// and each is its own undo step: no step takes none, or more than one.
+    func assertEveryStrokeKept(_ count: Int, _ label: String, file: StaticString = #filePath, line: UInt = #line) {
         settle()
         let saved = Array(session.drawing(on: 0).strokes.dropFirst(base))
         let shown = Array(canvas.drawing.strokes.dropFirst(base))
@@ -345,17 +487,10 @@ private final class WritingPage {
             let before = canvas.drawing.strokes.count
             undo.undo()
             steps += 1
-            if strictUndoSteps {
-                XCTAssertEqual(canvas.drawing.strokes.count, before - 1, "\(label): undo \(steps) takes one stroke",
-                               file: file, line: line)
-            }
-        }
-        if strictUndoSteps {
-            XCTAssertEqual(steps, count, "\(label): one undo step per stroke", file: file, line: line)
-        } else {
-            XCTAssertEqual(canvas.drawing.strokes.count - base, 0, "\(label): undo takes every stroke off",
+            XCTAssertEqual(canvas.drawing.strokes.count, before - 1, "\(label): undo \(steps) takes one stroke",
                            file: file, line: line)
         }
+        XCTAssertEqual(steps, count, "\(label): one undo step per stroke", file: file, line: line)
         for _ in 0..<steps { undo.redo() }
         XCTAssertEqual(canvas.drawing.strokes.count - base, count, "\(label): redo brings every stroke back",
                        file: file, line: line)
