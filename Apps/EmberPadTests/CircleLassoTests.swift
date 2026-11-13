@@ -973,11 +973,8 @@ final class CircleLassoTests: XCTestCase {
     private static func commit(_ drawing: PKDrawing, on canvas: PKCanvasView, _ controller: PDFOverlayPageController,
                                undo: UndoManager? = nil, held hold: HoldRecognizer? = nil) {
         if let undo {
-            let before = canvas.drawing
             undo.beginUndoGrouping()
-            undo.registerUndo(withTarget: canvas) { canvas in
-                MainActor.assumeIsolated { canvas.drawing = before }
-            }
+            PenFeelTests.registerPencilKitStep(on: undo, canvas: canvas, restoring: canvas.drawing)
             undo.endUndoGrouping()
         }
         hold?.heldAtEnd = true

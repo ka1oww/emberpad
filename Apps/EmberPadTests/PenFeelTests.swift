@@ -459,14 +459,23 @@ final class PenFeelTests: XCTestCase {
     /// Sets the canvas as a committed stroke would and registers the undo step PencilKit would for it.
     static func commit(_ drawing: PKDrawing, on canvas: PKCanvasView, _ controller: PDFOverlayPageController,
                                undo: UndoManager) {
-        let before = canvas.drawing
         undo.beginUndoGrouping()
-        undo.registerUndo(withTarget: canvas) { canvas in
-            MainActor.assumeIsolated { canvas.drawing = before }
-        }
+        registerPencilKitStep(on: undo, canvas: canvas, restoring: canvas.drawing)
         undo.endUndoGrouping()
         canvas.drawing = drawing
         controller.canvasViewDrawingDidChange(canvas)
+    }
+
+    /// An undo step as PencilKit registers one: it sets the canvas back to `restoring` and, like any real step,
+    /// registers its own redo.
+    static func registerPencilKitStep(on undo: UndoManager, canvas: PKCanvasView, restoring: PKDrawing) {
+        undo.registerUndo(withTarget: canvas) { canvas in
+            MainActor.assumeIsolated {
+                let now = canvas.drawing
+                canvas.drawing = restoring
+                registerPencilKitStep(on: undo, canvas: canvas, restoring: now)
+            }
+        }
     }
 
     /// Lets the swap that waits a turn of the main queue run.

@@ -441,11 +441,8 @@ final class ScribbleEraseTests: XCTestCase {
     /// Pencil stroke just ended on the canvas (its hold recogniser saw it), as for every stroke the teacher writes.
     private static func commit(_ strokes: [PKStroke], on canvas: PKCanvasView, _ controller: PDFOverlayPageController,
                                undo: UndoManager, drawn: Bool = false) {
-        let before = canvas.drawing
         undo.beginUndoGrouping()
-        undo.registerUndo(withTarget: canvas) { canvas in
-            MainActor.assumeIsolated { canvas.drawing = before }
-        }
+        PenFeelTests.registerPencilKitStep(on: undo, canvas: canvas, restoring: canvas.drawing)
         undo.endUndoGrouping()
         if drawn { PDFOverlayPageController.holdRecognizer(on: canvas)?.pencilStroke = true }
         canvas.drawing = PKDrawing(strokes: strokes)

@@ -157,7 +157,7 @@ struct InkLandingTiming {
 }
 
 /// A stroke as EmberPad finds it again after PencilKit committed it: the same creation moment, seed and points.
-struct InkStrokeID: Equatable {
+struct InkStrokeID: Hashable {
     let creationDate: Date
     let randomSeed: UInt32
     let pointCount: Int
@@ -192,8 +192,9 @@ struct PendingInkEdit {
     }
 
     let page: Int
-    /// Where PencilKit put the stroke on the page.
-    let index: Int
+    /// Where the stroke is on the page: where PencilKit put it, or where it moved to when PencilKit took back an
+    /// earlier stroke (`dropped`).
+    var index: Int
     /// The stroke PencilKit committed, to find it again when the edit lands.
     let stroke: PKStroke
     var kind: Kind
@@ -203,6 +204,9 @@ struct PendingInkEdit {
     var liveID: UInt64?
     /// The scribble preview that outlined what a scribble erases, cleared once the erase lands.
     weak var scribblePreview: ScribblePreview?
+    /// PencilKit took the stroke back off the page after committing it, outside undo (EP98: on a slow device, when
+    /// it commits two strokes at once): it goes back on the page when the edit lands, as its own undo step.
+    var dropped = false
 
     /// Whether the writer sees this edit land (an erase, a straight line, a shape, a lasso), so it lands at the first
     /// safe frame. The pen's own swap is drawn by the live pen until it lands, so it waits for a pause in the writing

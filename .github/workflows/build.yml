@@ -45,6 +45,7 @@ jobs:
               -only-testing:EmberPadTests/SearchReadOnlyScreenshotTests
               -only-testing:EmberPadTests/WorksheetHeaderScreenshotTests
               -only-testing:EmberPadTests/CircleLassoTests
+              -only-testing:EmberPadTests/InkKeepsEveryStrokeTests
           - shard: 2
             selection: >-
               -only-testing:EmberPadTests/LibraryScreenshotTests
@@ -60,6 +61,7 @@ jobs:
               -skip-testing:EmberPadTests/SearchReadOnlyScreenshotTests
               -skip-testing:EmberPadTests/WorksheetHeaderScreenshotTests
               -skip-testing:EmberPadTests/CircleLassoTests
+              -skip-testing:EmberPadTests/InkKeepsEveryStrokeTests
               -skip-testing:EmberPadTests/LibraryScreenshotTests
               -skip-testing:EmberPadTests/EraserPreviewScreenshotTests
               -skip-testing:EmberPadTests/PageNavigationTests
