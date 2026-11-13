@@ -6,13 +6,13 @@ import PencilKit
 import EmberSyncKit
 @testable import EmberPad
 
-/// EP100 proof: the real editor, hosted in the app's main scene with a synthetic paired worksheet, with its tool row
-/// moved to each edge by the same finger drag the row's recogniser reports (Simulator cannot synthesise the touch,
-/// so the test feeds its phases to the editor). In every position the row lies on that edge beside the same page,
-/// the tools still set the PencilKit tool on the pages, every tool's settings popover opens on the page side, the
-/// Teacher copy panel and its edge swipe stay usable, and the edge is kept for the next worksheet. Screenshots are
-/// attached and written to `EP100_SHOTS_DIR` when the runner has it (`TEST_RUNNER_EP100_SHOTS_DIR`), else to the
-/// temporary directory.
+/// EP100, EP101 proof: the real editor, hosted in the app's main scene with a synthetic paired worksheet, with its
+/// floating tool palette moved to each edge by the drag phases its recogniser reports (the real finger's touches are
+/// driven end to end by `EmberPadUITests`). In every position the palette floats over the same full-size page against
+/// that edge, the tools still set the PencilKit tool on the pages, every tool's settings popover opens on the page
+/// side, the Teacher copy edge swipe stays on, and the place is kept for the next worksheet. Screenshots are attached
+/// and written to `EP100_SHOTS_DIR` when the runner has it (`TEST_RUNNER_EP100_SHOTS_DIR`), else to the temporary
+/// directory.
 @MainActor
 final class ToolbarDockScreenshotTests: XCTestCase {
     private var root: URL!
@@ -59,7 +59,10 @@ final class ToolbarDockScreenshotTests: XCTestCase {
         session.update(PKDrawing(strokes: [Self.stroke(from: CGPoint(x: 80, y: 180), to: CGPoint(x: 480, y: 230))]), page: 0)
         let renderer = try XCTUnwrap(Self.renderer(in: window))
         XCTAssertEqual(tools.settings.toolbarDock, .top)
+        let page = renderer.view.convert(renderer.view.bounds, to: nil)
         let topRow = try XCTUnwrap(Self.toolRowFrame(in: window))
+        try checkRow(on: .top, in: window, renderer: renderer, page: page)
+        XCTAssertEqual(topRow.midX, page.midX, accuracy: 1, "centred along the top")
         try save(window, "ep100-01-top")
 
         // Lift the row: it fades in place, a raised copy follows the finger and the nearest edge's slot lights up.
@@ -70,7 +73,7 @@ final class ToolbarDockScreenshotTests: XCTestCase {
         try save(window, "ep100-02-lifted-over-the-right-edge")
 
         let shots: [(ToolbarDock, CGPoint, String, String)] = [
-            (.trailing, CGPoint(x: window.bounds.maxX - 20, y: window.bounds.midY), "ep100-03-right", "ep100-04-right-pen-settings"),
+            (.trailing, CGPoint(x: window.bounds.maxX - 20, y: window.bounds.midY - 120), "ep100-03-right", "ep100-04-right-pen-settings"),
             (.bottom, CGPoint(x: window.bounds.midX, y: window.bounds.maxY - 10), "ep100-05-bottom", "ep100-06-bottom-pen-settings"),
             (.leading, CGPoint(x: 12, y: window.bounds.midY), "ep100-07-left", "ep100-08-left-pen-settings"),
             (.top, CGPoint(x: window.bounds.midX, y: 90), "ep100-09-top-again", "ep100-10-top-pen-settings"),
@@ -87,8 +90,14 @@ final class ToolbarDockScreenshotTests: XCTestCase {
             try XCTUnwrap(Self.dragHandle(in: window)).onDrag(.ended(drop, velocity: .zero))
             await pause(0.8)
             XCTAssertEqual(tools.settings.toolbarDock, dock, name)
-            XCTAssertTrue(Self.renderer(in: window) === renderer, "\(name): moving the row never reloads the page")
-            try checkRow(on: dock, in: window, renderer: renderer)
+            XCTAssertTrue(Self.renderer(in: window) === renderer, "\(name): moving the palette never reloads the page")
+            try checkRow(on: dock, in: window, renderer: renderer, page: page)
+            // It lands where it was let go along the edge.
+            let row = try XCTUnwrap(Self.toolRowFrame(in: window))
+            let expected = ToolbarDockDrag.frame(for: dock, along: ToolbarDockDrag.along(for: drop, on: dock, in: page),
+                                                 size: row.size, in: ToolbarDockDrag.room(for: dock, in: page, tabSide: .trailing))
+            XCTAssertEqual(row.midX, expected.midX, accuracy: 1, name)
+            XCTAssertEqual(row.midY, expected.midY, accuracy: 1, name)
             try checkEdgeSwipe(dock: dock, in: window)
             try save(window, name)
             try await checkTools(tools, renderer: renderer, host: host, dock: dock, window: window, popoverShot: popoverShot)
@@ -119,9 +128,9 @@ final class ToolbarDockScreenshotTests: XCTestCase {
         await wait { library.liveSession(for: id) != nil && chrome.jumpToPage != nil }
         await pause(1.0)
         let renderer = try XCTUnwrap(Self.renderer(in: window))
-        try checkRow(on: .leading, in: window, renderer: renderer)
+        try checkRow(on: .leading, in: window, renderer: renderer, page: renderer.view.convert(renderer.view.bounds, to: nil))
 
-        // Read-only hides the row on any edge, and the page takes the whole width.
+        // Read-only hides the palette on any edge, and the page keeps the whole width.
         chrome.readOnly = true
         await pause(0.6)
         XCTAssertNil(Self.toolRowFrame(in: window))
@@ -134,47 +143,50 @@ final class ToolbarDockScreenshotTests: XCTestCase {
 
     // MARK: Checks
 
-    /// The row lies along `dock`'s edge, with the page beside it and never under it.
-    private func checkRow(on dock: ToolbarDock, in window: UIWindow, renderer: PDFOverlayPageController) throws {
-        XCTAssertEqual(Self.installedHandles(in: window).count, 1, "\(dock): one row, and one drag on the window")
+    /// The palette floats over the page against `dock`'s edge, a margin in, and the page keeps its whole size (the
+    /// one it opened with) whichever edge the palette is on.
+    private func checkRow(on dock: ToolbarDock, in window: UIWindow, renderer: PDFOverlayPageController, page: CGRect) throws {
+        XCTAssertEqual(Self.installedHandles(in: window).count, 1, "\(dock): one palette, and one drag on the window")
         let row = try XCTUnwrap(Self.toolRowFrame(in: window), "\(dock)")
-        let page = renderer.view.convert(renderer.view.bounds, to: nil)
-        XCTAssertFalse(row.intersection(page).width > 1 && row.intersection(page).height > 1, "\(dock): the row covers no page")
+        XCTAssertEqual(renderer.view.convert(renderer.view.bounds, to: nil), page, "\(dock): the page makes no room for it")
+        XCTAssertTrue(page.insetBy(dx: ToolbarDockDrag.margin - 1, dy: ToolbarDockDrag.margin - 1).contains(row),
+                      "\(dock): it floats over the page, a margin in")
+        let m = ToolbarDockDrag.margin
         switch dock {
         case .top:
             XCTAssertEqual(row.height, ToolbarStrip.height, accuracy: 1)
-            XCTAssertEqual(row.width, window.bounds.width, accuracy: 1)
-            XCTAssertLessThanOrEqual(row.maxY, page.minY + 1)
+            XCTAssertEqual(row.minY, page.minY + m, accuracy: 1)
         case .bottom:
             XCTAssertEqual(row.height, ToolbarStrip.height, accuracy: 1)
-            XCTAssertEqual(row.width, window.bounds.width, accuracy: 1)
-            XCTAssertGreaterThanOrEqual(row.minY, page.maxY - 1)
-            XCTAssertEqual(row.maxY, window.bounds.maxY - window.safeAreaInsets.bottom, accuracy: 1)
+            XCTAssertEqual(row.maxY, page.maxY - m, accuracy: 1)
         case .leading:
             XCTAssertEqual(row.width, ToolbarStrip.columnWidth, accuracy: 1)
-            XCTAssertEqual(row.minX, 0, accuracy: 1)
-            XCTAssertEqual(page.minX, row.maxX, accuracy: 1)
+            XCTAssertEqual(row.minX, page.minX + m, accuracy: 1)
         case .trailing:
+            // The hidden Teacher copy's pull tab is on the right: the palette sits beside it, never over it.
             XCTAssertEqual(row.width, ToolbarStrip.columnWidth, accuracy: 1)
-            XCTAssertEqual(row.maxX, window.bounds.maxX, accuracy: 1)
-            XCTAssertEqual(page.maxX, row.minX, accuracy: 1)
+            XCTAssertEqual(row.maxX, page.maxX - TeacherCopyCardGeometry.tabSize.width - m, accuracy: 1)
         }
-        if dock.isVertical { XCTAssertEqual(row.minY, page.minY, accuracy: 1, "\(dock): the column runs beside the page") }
+        if dock.isVertical {
+            XCTAssertGreaterThan(row.height, row.width, "\(dock): upright down the side")
+        } else {
+            XCTAssertLessThan(row.width, page.width - 2 * m + 1, "\(dock): as long as its tools, not edge to edge")
+        }
     }
 
-    /// The hidden Teacher copy's edge swipe still starts at the screen's right edge, across a column docked there.
+    /// The hidden Teacher copy's edge swipe still starts at the screen's right edge, outside the palette floating
+    /// there.
     private func checkEdgeSwipe(dock: ToolbarDock, in window: UIWindow) throws {
         let swipe = try XCTUnwrap(window.gestureRecognizers?.compactMap { $0 as? TeacherCopyEdgeSwipeRecognizer }.first)
         XCTAssertTrue(swipe.isEnabled, "\(dock): the panel is hidden, so its edge swipe is on")
         XCTAssertEqual(swipe.side, .trailing)
         let body = swipe.body()
-        XCTAssertEqual(swipe.reach, dock == .trailing ? ToolbarStrip.columnWidth : 0, "\(dock)")
+        XCTAssertEqual(body.maxX, window.bounds.maxX, accuracy: 1, "\(dock): the body runs to the screen's edge")
         XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: window.bounds.maxX - 4, side: .trailing,
-                                                      bodyMinX: body.minX, bodyMaxX: body.maxX, reach: swipe.reach),
+                                                      bodyMinX: body.minX, bodyMaxX: body.maxX),
                       "\(dock): a finger at the screen's right edge pulls the panel")
-        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: body.maxX - 4, side: .trailing,
-                                                      bodyMinX: body.minX, bodyMaxX: body.maxX, reach: swipe.reach),
-                      "\(dock): and so does one at the page's right edge")
+        let row = try XCTUnwrap(Self.toolRowFrame(in: window))
+        XCTAssertLessThan(row.maxX, window.bounds.maxX - 4, "\(dock): and it lands beside the palette, not on it")
     }
 
     /// Every tool selects on its button's action and sets the pages' PencilKit tool; every tool's settings popover

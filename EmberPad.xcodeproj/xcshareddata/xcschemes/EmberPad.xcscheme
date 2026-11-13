@@ -8,12 +8,18 @@
       <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
         <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10000000000000000000002" BuildableName="EmberPadTests.xctest" BlueprintName="EmberPadTests" ReferencedContainer="container:EmberPad.xcodeproj" />
       </BuildActionEntry>
+      <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A20000000000000000000002" BuildableName="EmberPadUITests.xctest" BlueprintName="EmberPadUITests" ReferencedContainer="container:EmberPad.xcodeproj" />
+      </BuildActionEntry>
     </BuildActionEntries>
   </BuildAction>
   <TestAction buildConfiguration="Debug" shouldUseLaunchSchemeArgsEnv="YES">
     <Testables>
       <TestableReference skipped="NO">
         <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10000000000000000000002" BuildableName="EmberPadTests.xctest" BlueprintName="EmberPadTests" ReferencedContainer="container:EmberPad.xcodeproj" />
+      </TestableReference>
+      <TestableReference skipped="NO">
+        <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A20000000000000000000002" BuildableName="EmberPadUITests.xctest" BlueprintName="EmberPadUITests" ReferencedContainer="container:EmberPad.xcodeproj" />
       </TestableReference>
     </Testables>
   </TestAction>

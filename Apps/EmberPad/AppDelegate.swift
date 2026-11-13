@@ -54,6 +54,9 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
         Theme.applyAppearance()
+        #if DEBUG
+        UITestLaunch.prepareIfRequested()
+        #endif
         let window = UIWindow(windowScene: scene)
         switch AppEnvironment.shared {
         case .success(let environment):

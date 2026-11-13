@@ -29,20 +29,21 @@ enum ToolbarExtra: String, CaseIterable, Identifiable {
     }
 }
 
-/// The worksheet tool row, centred and in GoodNotes' order (EP54): pen, eraser, highlighter, shapes, lasso, image,
-/// text, laser pointer | the active tool's widths and colours. Image and text are greyed placeholders (design 5.4).
-/// Tapping the selected tool again opens its settings popover. EP100: it docks on any edge of the worksheet (see
-/// `ToolbarDock`): a row across the top or bottom, or a column down the left or right side, and a finger held on it
-/// picks it up to move it.
+/// The worksheet tool palette, in GoodNotes' order (EP54): pen, eraser, highlighter, shapes, lasso, image, text,
+/// laser pointer | the active tool's widths and colours. Image and text are greyed placeholders (design 5.4).
+/// Tapping the selected tool again opens its settings popover. EP101: it floats over the page in a capsule, as
+/// GoodNotes 6's Writing Tools menu does, against any edge of the worksheet (see `ToolbarDock`): across the top or
+/// bottom, or upright down the left or right side. A finger held on it picks it up to move it. It is as long as its
+/// tools, and scrolls only when the worksheet is too narrow for them.
 struct ToolbarStrip: View {
     let tools: ToolState
     var dock: ToolbarDock = .top
-    /// The finger's hold and drag that moves the row (EP100); nil leaves it where it is.
+    /// The finger's hold and drag that moves the palette (EP100); nil leaves it where it is.
     var onDrag: ((ToolbarDragRecognizer.Phase) -> Void)?
-    /// Moves the row straight to another edge, for VoiceOver's actions (EP100); nil offers none.
+    /// Moves the palette straight to another edge, for VoiceOver's actions (EP100); nil offers none.
     var onMove: ((ToolbarDock) -> Void)?
     static let height: CGFloat = 48
-    /// The column's width down a side (EP100): a 48 pt tool target with a little room either side.
+    /// The palette's width down a side (EP100): a 48 pt tool target with a little room either side.
     static let columnWidth: CGFloat = 56
     /// GoodNotes' left-to-right order of the tools Ember Slate has.
     static let order: [ToolbarSlot] = [
@@ -53,40 +54,21 @@ struct ToolbarStrip: View {
     private var vertical: Bool { dock.isVertical }
 
     var body: some View {
-        let layout = vertical ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
-        GeometryReader { geometry in
-            ScrollView(vertical ? .vertical : .horizontal, showsIndicators: false) {
-                layout {
-                    ForEach(Self.order) { slot in
-                        switch slot {
-                        case .tool(let tool): toolButton(tool)
-                        case .extra(let extra):
-                            ExtraButton(extra: extra) {
-                                tools.showToast(symbol: extra.symbol, text: "\(extra.title) · coming later")
-                            }
-                        }
-                    }
-                    StripSeparator(vertical: vertical)
-                    ActiveToolMenu(tools: tools, vertical: vertical)
-                }
-                .padding(vertical ? .vertical : .horizontal, 12)
-                .frame(minWidth: vertical ? Self.columnWidth : geometry.size.width,
-                       minHeight: vertical ? geometry.size.height : Self.height)
-            }
+        let shape = Capsule(style: .continuous)
+        ViewThatFits(in: vertical ? .vertical : .horizontal) {
+            content
+            ScrollView(vertical ? .vertical : .horizontal, showsIndicators: false) { content }
         }
         .frame(width: vertical ? Self.columnWidth : nil, height: vertical ? nil : Self.height)
-        // A row at the bottom, or a column, runs on under the home indicator, as the header runs under the status bar.
-        .background(Theme.toolRow.ignoresSafeArea(edges: dock == .top ? [] : .bottom))
-        .overlay(alignment: hairlineAlignment) {
-            if vertical {
-                Rectangle().fill(Theme.line).frame(width: Theme.hairlineWidth).ignoresSafeArea(edges: .bottom)
-            } else {
-                Rectangle().fill(Theme.line).frame(height: Theme.hairlineWidth)
-            }
-        }
+        .background(Theme.toolRow, in: shape)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Theme.line, lineWidth: Theme.hairlineWidth))
+        .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+        .contentShape(shape)
         .background { if let onDrag { ToolbarDragHandle(onDrag: onDrag) } }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Tools")
+        .accessibilityIdentifier("Tools")
         .accessibilityActions {
             if let onMove {
                 ForEach(ToolbarDock.allCases.filter { $0 != dock }, id: \.self) { other in
@@ -96,14 +78,23 @@ struct ToolbarStrip: View {
         }
     }
 
-    /// The hairline sits on the row's page side.
-    private var hairlineAlignment: Alignment {
-        switch dock {
-        case .top: .bottom
-        case .bottom: .top
-        case .leading: .trailing
-        case .trailing: .leading
+    private var content: some View {
+        let layout = vertical ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
+        return layout {
+            ForEach(Self.order) { slot in
+                switch slot {
+                case .tool(let tool): toolButton(tool)
+                case .extra(let extra):
+                    ExtraButton(extra: extra) {
+                        tools.showToast(symbol: extra.symbol, text: "\(extra.title) · coming later")
+                    }
+                }
+            }
+            StripSeparator(vertical: vertical)
+            ActiveToolMenu(tools: tools, vertical: vertical)
         }
+        .padding(vertical ? .vertical : .horizontal, vertical ? 14 : 16)
+        .frame(width: vertical ? Self.columnWidth : nil, height: vertical ? nil : Self.height)
     }
 
     private func toolButton(_ tool: WorksheetTool) -> some View {
@@ -648,7 +639,7 @@ private struct ColorPickerSheet: UIViewControllerRepresentable {
 /// fades after 1.3 s.
 struct ToolToastOverlay: View {
     let toast: ToolToast?
-    /// Above a row docked at the bottom (EP100); below the top otherwise.
+    /// Above a palette at the bottom (EP100); below the top otherwise.
     var fromBottom = false
 
     var body: some View {
@@ -659,7 +650,8 @@ struct ToolToastOverlay: View {
                     .transition(.opacity)
             }
         }
-        .padding(fromBottom ? .bottom : .top, 60)
+        // Clear of the floating palette on that edge (EP101).
+        .padding(fromBottom ? .bottom : .top, ToolbarDockDrag.margin + ToolbarStrip.height + 12)
         .animation(.easeInOut(duration: 0.2), value: toast?.id)
         .allowsHitTesting(false)
     }
