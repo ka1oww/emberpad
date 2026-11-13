@@ -21,12 +21,13 @@ enum WorksheetTool: String, CaseIterable, Codable, Sendable {
     }
 
     /// The tool's picture on the palette and in its toasts (EP105). SF Symbols where one shows the tool; the fountain
-    /// pen and laser pointer have none, so they are EmberPad's own vector drawings in the asset catalog.
+    /// pen and laser pointer have none, and SF Symbols' `highlighter` is a pencil over a line, so those three are
+    /// EmberPad's own vector drawings in the asset catalog (the highlighter's chisel-tip marker since EP106).
     var icon: ToolIcon {
         switch self {
         case .lasso: .system("lasso")
         case .pen: .asset("ToolFountainPen")
-        case .highlighter: .system("highlighter")
+        case .highlighter: .asset("ToolHighlighter")
         case .eraser: .system("eraser")
         case .laser: .asset("ToolLaserPointer")
         case .shape: .system("square.on.circle")
