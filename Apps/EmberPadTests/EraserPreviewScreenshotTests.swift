@@ -61,11 +61,14 @@ final class EraserPreviewScreenshotTests: XCTestCase {
             tools.selectEraserSize(index)
             try await eraseHalfway(renderer, window: window, session: session, name: "ep68-0\(index + 1)-partial-\(names[index])")
         }
+        // EP99: the whole-stroke eraser in the same three sizes.
         tools.setEraserMode(.wholeStroke)
-        try await eraseHalfway(renderer, window: window, session: session, name: "ep68-04-whole-stroke")
+        for index in Theme.eraserSizes.indices {
+            tools.selectEraserSize(index)
+            try await eraseHalfway(renderer, window: window, session: session, name: "ep99-0\(index + 1)-whole-stroke-\(names[index])")
+        }
 
-        // Zoomed in: the partial circle keeps its size on screen, as PencilKit's partial eraser does; the
-        // whole-stroke circle grows with the page.
+        // Zoomed in: both circles keep their size on screen, as both erasers erase the same on-screen width (EP99).
         renderer.pdfView.scaleFactor = fit * 2
         await pause(0.3)
         renderer.updateInkScale()
@@ -111,8 +114,8 @@ final class EraserPreviewScreenshotTests: XCTestCase {
         stroke.lift()
         await pause(0.6)
         XCTAssertFalse(renderer.eraserCircleVisible)
-        XCTAssertNotEqual(canvas.drawing.dataRepresentation(), ink.dataRepresentation(), "PencilKit erased")
-        if name.hasSuffix("large") { try save(window, "ep68-07-after-lift") }
+        XCTAssertNotEqual(canvas.drawing.dataRepresentation(), ink.dataRepresentation(), "the eraser erased")
+        if name.hasSuffix("large") { try save(window, name.hasPrefix("ep99") ? "\(name)-after-lift" : "ep68-07-after-lift") }
         // The next capture writes the same lines afresh; this erase's undo step is not needed.
         canvas.undoManager?.removeAllActions()
     }

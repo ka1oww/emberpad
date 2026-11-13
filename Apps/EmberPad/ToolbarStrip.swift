@@ -174,9 +174,8 @@ private struct ActiveToolMenu: View {
                 }
                 .pickerStyle(.segmented)
                 .fixedSize()
+                // One size for both modes, as GoodNotes' eraser has (EP99).
                 widthDots(Theme.eraserSizes, selected: tools.settings.eraserSizeIndex, diameters: [6, 10, 16], select: tools.selectEraserSize)
-                    .disabled(tools.settings.eraserMode != .partial)
-                    .opacity(tools.settings.eraserMode == .partial ? 1 : 0.4)
             case .shape:
                 // Shapes draw with the pen's widths and colours (EP64).
                 widthLines(Theme.penWidths, selected: tools.settings.penWidthIndex, thicknesses: [2, 3.5, 5.5], select: tools.selectPenWidth)

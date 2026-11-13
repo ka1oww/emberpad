@@ -3,30 +3,27 @@ import UIKit
 
 /// The eraser's reach (EP68), as GoodNotes shows it: a light see-through circle under the Pencil while the eraser
 /// touches the page, and while the Pencil hovers with the eraser chosen on an iPad that supports hover. The circle is
-/// the area PencilKit erases, at the zoom on screen. It is a layer above the pages on this iPad only: never ink, never
+/// the area the eraser erases, at the zoom on screen. It is a layer above the pages on this iPad only: never ink, never
 /// on the student view, in an export, a thumbnail or the undo history.
 enum EraserPreview {
-    /// The whole-stroke (vector) eraser's reach across, in page points. PencilKit gives that eraser no width
-    /// (`PKEraserTool(.vector).width` is 0), so this was measured on iOS 26.5. A stroke whose line passes within
-    /// about 3.5 page points of the Pencil's path is removed, and that distance stays the same in page points at
-    /// every zoom from 0.76x to 5x, so the circle grows and shrinks with the page.
-    static let wholeStrokeReach: CGFloat = 7
-
-    /// The circle's diameter on screen, in points, for `tool` on a page drawn at `pageScale` screen points per page
-    /// point. The partial (bitmap) eraser's width is in screen points: PencilKit erases the same on-screen width at
-    /// every zoom, so its circle keeps one size while the page zooms. Its width is the tool's own, which PencilKit
-    /// keeps within `validWidthRange` (16.4 to 80.4 points on iOS 26.5), so the circle is the width it really erases.
-    static func diameter(for tool: PKEraserTool, pageScale: CGFloat) -> CGFloat {
-        diameter(eraserType: tool.eraserType, width: tool.width, pageScale: pageScale)
+    /// The circle's diameter on screen, in points: the eraser size chosen in the toolbar (`Theme.eraserSizes`), the
+    /// same for both modes, as GoodNotes' eraser has one size whichever mode is chosen (EP99). Both erase the same
+    /// on-screen width at every zoom, so the circle keeps one size while the page zooms. The partial eraser is
+    /// PencilKit's, which keeps its width within `validWidthRange` (16.4 to 80.4 points on iOS 26.5), so its circle is
+    /// the width it really erases. The whole-stroke eraser is EmberPad's own (`WholeStrokeErase`), which takes every
+    /// stroke this circle touches.
+    static func diameter(for settings: ToolSettings) -> CGFloat {
+        diameter(mode: settings.eraserMode, size: settings.eraserSize)
     }
 
-    static func diameter(eraserType: PKEraserTool.EraserType, width: CGFloat, pageScale: CGFloat) -> CGFloat {
-        switch eraserType {
-        case .vector:
-            guard pageScale.isFinite, pageScale > 0 else { return 0 }
-            return wholeStrokeReach * pageScale
-        default:
-            return width.isFinite ? max(0, width) : 0
+    static func diameter(mode: EraserMode, size: CGFloat) -> CGFloat {
+        guard size.isFinite, size > 0 else { return 0 }
+        switch mode {
+        case .partial:
+            let range = PKEraserTool.EraserType.fixedWidthBitmap.validWidthRange
+            return min(max(size, range.lowerBound), range.upperBound)
+        case .wholeStroke:
+            return size
         }
     }
 

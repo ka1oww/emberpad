@@ -34,16 +34,13 @@ final class EraserPreviewTests: XCTestCase {
             let tool = try XCTUnwrap(settings.pencilTool as? PKEraserTool)
             // PencilKit keeps the width inside its range, and the circle is the width it keeps, not the one asked for.
             XCTAssertEqual(tool.width, min(max(size, range.lowerBound), range.upperBound), accuracy: 0.001)
-            for scale in [0.5, 0.76, 1, 1.26, 2.5, 4, 5] as [CGFloat] {
-                XCTAssertEqual(EraserPreview.diameter(for: tool, pageScale: scale), tool.width, accuracy: 0.001,
-                               "The partial eraser keeps one on-screen size at \(scale)x")
-            }
+            XCTAssertEqual(EraserPreview.diameter(for: settings), tool.width, accuracy: 0.001,
+                           "The circle is the width PencilKit erases, at every zoom")
         }
         settings.eraserSizeIndex = 2
-        let large = try XCTUnwrap(settings.pencilTool as? PKEraserTool)
+        let large = EraserPreview.diameter(for: settings)
         settings.eraserSizeIndex = 1
-        let medium = try XCTUnwrap(settings.pencilTool as? PKEraserTool)
-        XCTAssertGreaterThan(EraserPreview.diameter(for: large, pageScale: 1), EraserPreview.diameter(for: medium, pageScale: 1))
+        XCTAssertGreaterThan(large, EraserPreview.diameter(for: settings))
     }
 
     /// Each size is one PencilKit really erases: inside its partial eraser's range, so never raised to its minimum,
@@ -60,23 +57,35 @@ final class EraserPreviewTests: XCTestCase {
         settings.eraserMode = .partial
         let diameters = try Theme.eraserSizes.indices.map { index -> CGFloat in
             settings.eraserSizeIndex = index
-            return EraserPreview.diameter(for: try XCTUnwrap(settings.pencilTool(for: .eraser) as? PKEraserTool), pageScale: 1)
+            XCTAssertEqual(try XCTUnwrap(settings.pencilTool(for: .eraser) as? PKEraserTool).width, Theme.eraserSizes[index],
+                           accuracy: 0.001)
+            return EraserPreview.diameter(for: settings)
         }
         XCTAssertEqual(diameters, Theme.eraserSizes, "the circle is each size's real width")
         XCTAssertEqual(Theme.eraserDefaultSizeIndex, 1, "medium stays the default")
     }
 
-    func testWholeStrokeCircleZoomsWithThePage() throws {
+    /// EP99: the whole-stroke eraser takes the same three sizes, from the same choice: its circle is the chosen size,
+    /// in screen points, whichever mode is chosen.
+    func testWholeStrokeCircleIsTheChosenSizeSharedWithPartial() throws {
         var settings = ToolSettings()
-        settings.eraserMode = .wholeStroke
-        let tool = try XCTUnwrap(settings.pencilTool(for: .eraser) as? PKEraserTool)
-        XCTAssertEqual(tool.eraserType, .vector)
-        XCTAssertEqual(EraserPreview.wholeStrokeReach, 7)
-        XCTAssertEqual(EraserPreview.diameter(for: tool, pageScale: 1), 7, accuracy: 0.001)
-        XCTAssertEqual(EraserPreview.diameter(for: tool, pageScale: 1.26), 8.82, accuracy: 0.001)
-        XCTAssertEqual(EraserPreview.diameter(for: tool, pageScale: 2.52), 17.64, accuracy: 0.001)
+        for (index, size) in Theme.eraserSizes.enumerated() {
+            settings.eraserSizeIndex = index
+            settings.eraserMode = .wholeStroke
+            XCTAssertEqual(try XCTUnwrap(settings.pencilTool(for: .eraser) as? PKEraserTool).eraserType, .vector)
+            let whole = EraserPreview.diameter(for: settings)
+            XCTAssertEqual(whole, size, accuracy: 0.001)
+            settings.eraserMode = .partial
+            XCTAssertEqual(EraserPreview.diameter(for: settings), whole, accuracy: 0.001, "one size for both modes")
+        }
         for bad in [0, -1, .nan, .infinity] as [CGFloat] {
-            XCTAssertEqual(EraserPreview.diameter(for: tool, pageScale: bad), 0, "No circle for a page with no scale")
+            XCTAssertEqual(EraserPreview.diameter(mode: .wholeStroke, size: bad), 0, "No circle for an unusable size")
+        }
+        XCTAssertEqual(WholeStrokeErase.radius(diameter: 50, pageScale: 1), 25, accuracy: 0.001)
+        XCTAssertEqual(WholeStrokeErase.radius(diameter: 50, pageScale: 2.5), 10, accuracy: 0.001,
+                       "zoomed in, the same circle on screen covers less of the page")
+        for bad in [0, -1, .nan, .infinity] as [CGFloat] {
+            XCTAssertEqual(WholeStrokeErase.radius(diameter: 50, pageScale: bad), 0, "No reach on a page with no scale")
         }
     }
 
@@ -160,11 +169,12 @@ final class EraserPreviewTests: XCTestCase {
         XCTAssertEqual(try diameter(), large, accuracy: 0.001, "The partial circle keeps its size when zoomed")
 
         tools.setEraserMode(.wholeStroke)
-        let zoomed = try diameter()
-        XCTAssertEqual(zoomed, 7 * controller.pdfView.scaleFactor, accuracy: 0.05)
+        XCTAssertEqual(try diameter(), Theme.eraserSizes[2], accuracy: 0.001, "EP99: the whole-stroke circle is the chosen size")
+        tools.selectEraserSize(0)
+        XCTAssertEqual(try diameter(), Theme.eraserSizes[0], accuracy: 0.001)
         controller.pdfView.scaleFactor = fit
         controller.updateInkScale()
-        XCTAssertEqual(try diameter(), zoomed / 2, accuracy: 0.05, "The whole-stroke circle zooms with the page")
+        XCTAssertEqual(try diameter(), Theme.eraserSizes[0], accuracy: 0.001, "and keeps its size when zoomed")
     }
 
     func testPencilStrokeMovesTheCircleAndLiftHidesItWithoutTouchingAnything() throws {
@@ -279,8 +289,9 @@ final class EraserPreviewTests: XCTestCase {
         }
     }
 
-    /// The whole-stroke eraser removes lines whose path passes within the circle's radius and keeps the rest.
-    func testWholeStrokeCircleIsTheReachPencilKitRemovesWithin() throws {
+    /// EP99: the whole-stroke eraser removes, whole, every line its circle touches and keeps the rest, at each size
+    /// and zoom: the circle on screen is what it erases with.
+    func testWholeStrokeEraserRemovesWhatItsCircleTouches() throws {
         let tools = makeTools()
         let session = try makeSession(pages: 1)
         let controller = try host(session, tools: tools)
@@ -288,29 +299,72 @@ final class EraserPreviewTests: XCTestCase {
         tools.setEraserMode(.wholeStroke)
         let fit = controller.pdfView.scaleFactor
         let x: CGFloat = 306
-        let offsets: [CGFloat] = [1, 2, 3, 3.2, 3.8, 4, 5, 6]
-        for zoom in [1.0, 2.5, 0.6] as [CGFloat] {
+        let offsets: [CGFloat] = [2, 6, 9, 12, 16, 20, 24, 28, 34, 40, 48, 60, 80]
+        for (index, zoom) in [(0, 1.0), (1, 1.0), (2, 1.0), (1, 2.5), (2, 0.6)] as [(Int, CGFloat)] {
+            tools.selectEraserSize(index)
             let (canvas, window) = try zoomTo(fit * zoom, controller)
-            canvas.drawing = PKDrawing(strokes: offsets.map {
+            XCTAssertFalse(canvas.drawingGestureRecognizer.isEnabled, "EmberPad's eraser has the Pencil, not PencilKit's")
+            XCTAssertTrue(controller.wholeStrokeEraserClaim.isEnabled, "the Pencil does not scroll the pages instead")
+            let lines = PKDrawing(strokes: offsets.map {
                 Self.line(from: CGPoint(x: x + $0, y: 60), to: CGPoint(x: x + $0, y: 260), width: 0.3)
             })
+            canvas.drawing = lines
+            controller.canvasViewDrawingDidChange(canvas)
             let space = canvas.pageSpace
-            var stroke = PencilStroke(window: window, view: canvas,
-                                      recognizers: [canvas.drawingGestureRecognizer, controller.eraserTouch])
+            var stroke = PencilStroke(window: window, view: canvas, recognizers: [controller.eraserTouch])
             stroke.down(at: space.convert(CGPoint(x: x, y: 80), to: nil))
             stroke.move(to: space.convert(CGPoint(x: x, y: 240), to: nil))
             let radius = controller.eraserCircle.bounds.width / 2 / EraserPreview.pageScale(of: space, in: controller.view)
+            XCTAssertEqual(controller.eraserCircle.bounds.width, Theme.eraserSizes[index], accuracy: 0.001)
             stroke.lift()
-            PencilStroke.turn(0.3)
-            let kept = Set(canvas.drawing.strokes.map { ($0.path.first!.location.applying($0.transform).x - x) * 10 }.map { Int($0.rounded()) })
-            guard kept.count < offsets.count else { throw XCTSkip("PencilKit did not erase with the stand-in touch on this OS") }
-            XCTAssertEqual(radius, 3.5, accuracy: 0.01)
+            PencilStroke.turn(0.1)
+            let kept = Set(canvas.drawing.strokes.map { Int((($0.path.first!.location.applying($0.transform).x - x) * 10).rounded()) })
             for offset in offsets {
                 let isKept = kept.contains(Int((offset * 10).rounded()))
-                if offset <= radius - 0.3 { XCTAssertFalse(isKept, "at \(zoom)x a line \(offset) pt off the path is inside the circle and goes") }
-                if offset >= radius + 0.3 { XCTAssertTrue(isKept, "at \(zoom)x a line \(offset) pt off the path is outside the circle and stays") }
+                if offset <= radius - 0.3 { XCTAssertFalse(isKept, "size \(index) at \(zoom)x: a line \(offset) pt off the path is inside the circle and goes") }
+                if offset >= radius + 0.5 { XCTAssertTrue(isKept, "size \(index) at \(zoom)x: a line \(offset) pt off the path is outside the circle and stays") }
             }
+            XCTAssertLessThan(kept.count, offsets.count, "something went")
+            XCTAssertGreaterThan(kept.count, 0, "something stayed")
+            XCTAssertEqual(session.drawing(on: 0).dataRepresentation(), canvas.drawing.dataRepresentation(), "the page saves what is shown")
+            XCTAssertEqual(canvas.undoManager?.undoActionName, "Erase", "one undo step")
+            canvas.undoManager?.undo()
+            XCTAssertEqual(canvas.drawing.strokes.count, offsets.count, "undo brings every erased line back")
+            canvas.undoManager?.redo()
+            XCTAssertEqual(Set(canvas.drawing.strokes.map { Int((($0.path.first!.location.applying($0.transform).x - x) * 10).rounded()) }), kept,
+                           "redo erases them again")
         }
+    }
+
+    /// EP99: the same sweep with a wider eraser removes strokes the narrow one leaves.
+    func testWiderWholeStrokeEraserRemovesStrokesTheNarrowOneMisses() throws {
+        let tools = makeTools()
+        let session = try makeSession(pages: 1)
+        let controller = try host(session, tools: tools)
+        tools.select(.eraser)
+        tools.setEraserMode(.wholeStroke)
+        let fit = controller.pdfView.scaleFactor
+        let x: CGFloat = 306
+        // At the fit zoom (about 1.24x), small reaches about 10 page points either side, large about 32.
+        let lines = PKDrawing(strokes: [4, 20, 60].map {
+            Self.line(from: CGPoint(x: x + $0, y: 60), to: CGPoint(x: x + $0, y: 260), width: 1)
+        })
+        func sweep(size: Int) throws -> Int {
+            tools.selectEraserSize(size)
+            let (canvas, window) = try zoomTo(fit, controller)
+            canvas.drawing = lines
+            controller.canvasViewDrawingDidChange(canvas)
+            let space = canvas.pageSpace
+            var stroke = PencilStroke(window: window, view: canvas, recognizers: [controller.eraserTouch])
+            stroke.down(at: space.convert(CGPoint(x: x, y: 80), to: nil))
+            stroke.move(to: space.convert(CGPoint(x: x, y: 240), to: nil))
+            stroke.lift()
+            PencilStroke.turn(0.1)
+            return canvas.drawing.strokes.count
+        }
+        XCTAssertEqual(try sweep(size: 0), 2, "the small eraser takes only the line it passes over")
+        XCTAssertEqual(try sweep(size: 2), 1, "the large one also takes the line 20 points away")
+        XCTAssertEqual(lines.strokes.count, 3)
     }
 
     // MARK: Helpers
