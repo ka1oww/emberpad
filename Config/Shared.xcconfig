@@ -1,6 +1,8 @@
 // Final bundle ID approved by the teacher (EP-05). Never change the iPad ID: changing it later means deleting the app and its ink.
 EMBERPAD_BUNDLE_ID = io.github.ka1oww.emberpad
 PRODUCT_BUNDLE_IDENTIFIER = $(EMBERPAD_BUNDLE_ID)
+// The iPad home-screen name. scripts/device-stress-test.sh builds a separate stress-test app named Ember Stress.
+EMBERPAD_DISPLAY_NAME = Ember Slate
 SWIFT_VERSION = 5.0
 CLANG_ENABLE_MODULES = YES
 CODE_SIGN_STYLE = Automatic
