@@ -41,8 +41,9 @@ enum ToolbarDock: String, CaseIterable, Codable, Sendable {
     var thickness: CGFloat { isVertical ? ToolbarStrip.columnWidth : ToolbarStrip.height }
 }
 
-/// EP100, EP101, EP102: picking the palette up and dropping it against an edge. Pure, so tests cover every edge and
-/// position without a touch.
+/// EP100, EP101, EP102, EP104: picking the palette up and dropping it against an edge. Pure, so tests cover every edge
+/// and position without a touch. Where it lands is worked out only when it is let go (EP104): while it is carried
+/// nothing shows where that will be.
 enum ToolbarDockDrag {
     /// EP102: a finger that touches the palette and moves this far carries it, with no hold first, as GoodNotes 6's
     /// does. Less is a tap on a tool (a finger's tap drifts a point or two).
@@ -136,24 +137,6 @@ enum ToolbarDockDrag {
         }
     }
 
-    /// The band outlined while the palette is carried towards `dock`: the slot in the room the palette lands in, so it
-    /// never runs over the Teacher copy's pull tab.
-    static func band(for dock: ToolbarDock, in worksheet: CGRect, tabSide: TeacherCopyPanelSide) -> CGRect {
-        slot(for: dock, in: room(for: dock, in: worksheet, tabSide: tabSide))
-    }
-
-    /// The band along `dock`'s edge of `area` that lights up while the palette is carried towards it.
-    static func slot(for dock: ToolbarDock, in area: CGRect) -> CGRect {
-        let inner = area.insetBy(dx: margin, dy: margin)
-        let t = dock.thickness
-        switch dock {
-        case .top: return CGRect(x: inner.minX, y: inner.minY, width: inner.width, height: t)
-        case .bottom: return CGRect(x: inner.minX, y: inner.maxY - t, width: inner.width, height: t)
-        case .leading: return CGRect(x: inner.minX, y: inner.minY, width: t, height: inner.height)
-        case .trailing: return CGRect(x: inner.maxX - t, y: inner.minY, width: t, height: inner.height)
-        }
-    }
-
     /// The snap into place: a quick spring with no visible bounce, or under Reduce Motion a short fade.
     static func snapAnimation(reduceMotion: Bool) -> Animation {
         reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.36, dampingFraction: 0.86)
@@ -194,8 +177,6 @@ final class ToolbarCarry {
     var translation: CGSize = .zero
     /// Whether a finger has the palette.
     var isCarrying = false
-    /// The edge it would snap to if let go now, outlined while it is carried.
-    var target: ToolbarDock?
     /// The point the finger holds, within the palette, which the lift grows about so it stays under the finger.
     var anchor: UnitPoint = .center
     /// Where the finger took hold of it, and where the palette lay then (window coordinates).
@@ -333,8 +314,12 @@ final class ToolbarDragRecognizer: UIGestureRecognizer, UIGestureRecognizerDeleg
         ToolbarDragProbe.shared.touchUp()
         #endif
         guard state == .began || state == .changed else { state = .failed; return }
+        // EP104: the lift is a sample too, so a finger that held the palette still before letting go is not taken for
+        // a flick at the speed it last moved: only travel in the last moments before the lift carries it on.
+        let point = touch.location(in: nil)
+        samples.append((point, touch.timestamp))
         state = .ended
-        onDrag(.ended(touch.location(in: nil), velocity: velocity))
+        onDrag(.ended(point, velocity: velocity))
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -432,34 +417,5 @@ struct ToolbarDragHandle: UIViewRepresentable {
         }
 
         func uninstall() { drag.view?.removeGestureRecognizer(drag) }
-    }
-}
-
-// MARK: - The drop band
-
-/// While the palette is carried, the band along the edge it would snap to if let go now, softly outlined.
-struct ToolbarDropBand: View {
-    let carry: ToolbarCarry
-    /// The worksheet below the header, in window coordinates.
-    let area: CGRect
-    /// The Teacher copy's side, whose pull tab the palette keeps clear of.
-    var tabSide: TeacherCopyPanelSide = .trailing
-
-    var body: some View {
-        GeometryReader { proxy in
-            let origin = proxy.frame(in: .global).origin
-            if carry.isCarrying, let target = carry.target {
-                let slot = ToolbarDockDrag.band(for: target, in: area, tabSide: tabSide).offsetBy(dx: -origin.x, dy: -origin.y)
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Theme.accentSoft.opacity(0.6))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Theme.accent.opacity(0.55), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])))
-                    .frame(width: slot.width - 8, height: slot.height - 8)
-                    .position(x: slot.midX, y: slot.midY)
-                    .transition(.opacity)
-            }
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }
