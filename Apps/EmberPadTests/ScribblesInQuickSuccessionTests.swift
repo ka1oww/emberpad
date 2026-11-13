@@ -67,15 +67,14 @@ final class ScribblesInQuickSuccessionTests: XCTestCase {
         let page = try page(with: strokes)
         let inkView = try XCTUnwrap(page.canvas.superview as? PageInkView)
         let secondLine = Set(strokes[(strokes.count / 2)...].map { $0.path.creationDate })
-        var problems: [String] = []
-        var watching = true
+        // (cut still held, second-line strokes on the page) at every run-loop turn once the second scribble is lifted.
+        var samples: [(held: Bool, secondOnPage: Int)] = []
+        var watching = false
         let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, 1_999_500) { _, _ in
             MainActor.assumeIsolated {
                 guard watching else { return }
                 let dates = Set(page.canvas.drawing.strokes.map(\.path.creationDate))
-                if dates.count < strokes.count, !secondLine.isDisjoint(with: dates), !inkView.hidesScribbledInk {
-                    problems.append("the second scribble's cut was let go while its target was on the page")
-                }
+                samples.append((inkView.hidesScribbledInk, secondLine.intersection(dates).count))
             }
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
@@ -87,10 +86,16 @@ final class ScribblesInQuickSuccessionTests: XCTestCase {
             pencil.down(at: path[0])
             for point in path.dropFirst() { pencil.move(to: point) }
             pencil.lift()
+            if index == 1 { watching = true }
         }
         page.settle()
         watching = false
-        XCTAssertEqual(problems.prefix(3), [])
+        // The scribble covers only part of the line, so some strokes legitimately stay. Any turn that still shows
+        // more of the line than ever remains afterwards must have the cut held (its erase had not landed yet).
+        let remaining = Set(page.canvas.drawing.strokes.map(\.path.creationDate)).intersection(secondLine).count
+        XCTAssertLessThan(remaining, secondLine.count, "the second scribble erased part of its line")
+        let letGo = samples.filter { !$0.held && $0.secondOnPage > remaining }
+        XCTAssertEqual(letGo.count, 0, "the second scribble's cut was let go while its target was still on the page")
         XCTAssertFalse(inkView.hidesScribbledInk, "both erases landed and nothing is left cut")
     }
 
