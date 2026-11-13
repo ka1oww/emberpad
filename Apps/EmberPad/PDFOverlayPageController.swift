@@ -1398,6 +1398,7 @@ extension PDFOverlayPageController {
         return dropped.filter { !onPage.contains(InkStrokeID($0.stroke)) }.flatMap { edit -> [PKStroke] in
             switch edit.kind {
             case .replace(let replacements, _) where !replacements.isEmpty: return replacements
+            case .straightLine(let fallback): return [fallback]
             case .scribble: return []
             case .penFeel, .replace, .keep: return [edit.stroke]
             }
