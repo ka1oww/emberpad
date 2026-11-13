@@ -102,9 +102,12 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// The Shape tool's Fill Color (EP64): closed shapes are filled with a light tint of their colour. Off by default,
     /// as in GoodNotes.
     var shapeFill = false
-    /// EP100: the worksheet edge the tool row docks on, moved by holding the row with a finger and dragging it, as in
-    /// GoodNotes 6. Under the header by default, where it always was.
+    /// EP100: the worksheet edge the floating tool palette sits against, moved by holding it with a finger and
+    /// dragging it, as in GoodNotes 6. Under the header by default, where the tools always were.
     var toolbarDock: ToolbarDock = .top
+    /// EP101: where along that edge it sits, 0 at the left (or top) end and 1 at the right (or bottom). Centred by
+    /// default, as GoodNotes' palette starts.
+    var toolbarAlong: Double = ToolbarDockDrag.defaultAlong
 
     /// Tip sharpness's default before EP51 (`penTipSharpnessChosen`).
     static let legacyDefaultTipSharpness = 0.5
@@ -166,6 +169,7 @@ struct ToolSettings: Codable, Equatable, Sendable {
         shapeSnap = (try? c.decodeIfPresent(Bool.self, forKey: .shapeSnap)) ?? d.shapeSnap
         shapeFill = (try? c.decodeIfPresent(Bool.self, forKey: .shapeFill)) ?? d.shapeFill
         toolbarDock = (try? c.decodeIfPresent(ToolbarDock.self, forKey: .toolbarDock)) ?? d.toolbarDock
+        toolbarAlong = (try? c.decodeIfPresent(Double.self, forKey: .toolbarAlong)) ?? d.toolbarAlong
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
@@ -181,6 +185,7 @@ struct ToolSettings: Codable, Equatable, Sendable {
         s.eraserSizeIndex = Self.clamp(s.eraserSizeIndex, count: Theme.eraserSizes.count)
         s.penTipSharpness = Self.unit(s.penTipSharpness, fallback: Self().penTipSharpness)
         s.penPressureSensitivity = Self.unit(s.penPressureSensitivity, fallback: Self().penPressureSensitivity)
+        s.toolbarAlong = Self.unit(s.toolbarAlong, fallback: Self().toolbarAlong)
         return s
     }
 
@@ -408,6 +413,13 @@ final class ToolState {
     func setShapeSnap(_ on: Bool) { update { $0.shapeSnap = on } }
     func setShapeFill(_ on: Bool) { update { $0.shapeFill = on } }
     func setToolbarDock(_ dock: ToolbarDock) { update { $0.toolbarDock = dock } }
+    /// Puts the palette against `dock`'s edge, `along` it (EP101).
+    func setToolbarPosition(_ dock: ToolbarDock, along: Double) {
+        update {
+            $0.toolbarDock = dock
+            $0.toolbarAlong = along
+        }
+    }
 
     func canAddColor(for tool: WorksheetTool) -> Bool {
         presets(for: tool).count < ToolSettings.maxPresets

@@ -284,6 +284,7 @@
 				"3F1296ACA933E1FB442C022A",
 				"044FE9AE9608555D7674E971",
 				"A10000000000000000000001",
+				"A20000000000000000000001",
 			);
 			"name" = "Products";
 			"sourceTree" = "<group>";
@@ -310,6 +311,7 @@
 				"89187C5E9203F8939CEE5A60",
 				"FBDC4F23F93125BBEEAE800C",
 				"A1000000000000000000000D",
+				"A2000000000000000000000D",
 			);
 			"sourceTree" = "<group>";
 		};
@@ -354,6 +356,10 @@
 						"CreatedOnToolsVersion" = "26.6";
 						"TestTargetID" = "19EB4B09D78A003EF27A1A7A";
 					};
+					"A20000000000000000000002" = {
+						"CreatedOnToolsVersion" = "26.6";
+						"TestTargetID" = "19EB4B09D78A003EF27A1A7A";
+					};
 				};
 			};
 			"buildConfigurationList" = "862894B703A6DEDF96A9DD6C";
@@ -377,6 +383,7 @@
 				"5E40FA52A92C13B0AAF39BC2",
 				"8D4AE7A0EE7D311C9AB7EBD2",
 				"A10000000000000000000002",
+				"A20000000000000000000002",
 			);
 		};
 		"A10000000000000000000001" = {
@@ -515,6 +522,123 @@
 			"buildConfigurations" = (
 				"A10000000000000000000007",
 				"A10000000000000000000008",
+			);
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"A20000000000000000000001" = {
+			"isa" = "PBXFileReference";
+			"explicitFileType" = "wrapper.cfbundle";
+			"includeInIndex" = "0";
+			"path" = "EmberPadUITests.xctest";
+			"sourceTree" = "BUILT_PRODUCTS_DIR";
+		};
+		"A2000000000000000000000D" = {
+			"isa" = "PBXFileSystemSynchronizedRootGroup";
+			"path" = "Apps/EmberPadUITests";
+			"sourceTree" = "<group>";
+		};
+		"A20000000000000000000003" = {
+			"isa" = "PBXSourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"A20000000000000000000004" = {
+			"isa" = "PBXFrameworksBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"A20000000000000000000005" = {
+			"isa" = "PBXResourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"A20000000000000000000002" = {
+			"isa" = "PBXNativeTarget";
+			"buildConfigurationList" = "A20000000000000000000006";
+			"buildPhases" = (
+				"A20000000000000000000003",
+				"A20000000000000000000004",
+				"A20000000000000000000005",
+			);
+			"buildRules" = (
+			);
+			"dependencies" = (
+				"A20000000000000000000009",
+			);
+			"fileSystemSynchronizedGroups" = (
+				"A2000000000000000000000D",
+			);
+			"name" = "EmberPadUITests";
+			"productName" = "EmberPadUITests";
+			"productReference" = "A20000000000000000000001";
+			"productType" = "com.apple.product-type.bundle.ui-testing";
+		};
+		"A20000000000000000000009" = {
+			"isa" = "PBXTargetDependency";
+			"target" = "19EB4B09D78A003EF27A1A7A";
+			"targetProxy" = "A2000000000000000000000A";
+		};
+		"A2000000000000000000000A" = {
+			"isa" = "PBXContainerItemProxy";
+			"containerPortal" = "98F54143AB4E86B28C3AFEE0";
+			"proxyType" = "1";
+			"remoteGlobalIDString" = "19EB4B09D78A003EF27A1A7A";
+			"remoteInfo" = "EmberPad";
+		};
+		"A20000000000000000000007" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"GENERATE_INFOPLIST_FILE" = "YES";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "17.5";
+				"LD_RUNPATH_SEARCH_PATHS" = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				"PRODUCT_BUNDLE_IDENTIFIER" = "$(EMBERPAD_BUNDLE_ID).EmberPadUITests";
+				"PRODUCT_NAME" = "$(TARGET_NAME)";
+				"SDKROOT" = "iphoneos";
+				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+				"TARGETED_DEVICE_FAMILY" = "2";
+				"TEST_TARGET_NAME" = "EmberPad";
+			};
+			"name" = "Debug";
+			"baseConfigurationReference" = "88CEAA489E5229503EE15E09";
+		};
+		"A20000000000000000000008" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"GENERATE_INFOPLIST_FILE" = "YES";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "17.5";
+				"LD_RUNPATH_SEARCH_PATHS" = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				"PRODUCT_BUNDLE_IDENTIFIER" = "$(EMBERPAD_BUNDLE_ID).EmberPadUITests";
+				"PRODUCT_NAME" = "$(TARGET_NAME)";
+				"SDKROOT" = "iphoneos";
+				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+				"TARGETED_DEVICE_FAMILY" = "2";
+				"TEST_TARGET_NAME" = "EmberPad";
+			};
+			"name" = "Release";
+			"baseConfigurationReference" = "88CEAA489E5229503EE15E09";
+		};
+		"A20000000000000000000006" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = (
+				"A20000000000000000000007",
+				"A20000000000000000000008",
 			);
 			"defaultConfigurationIsVisible" = "0";
 			"defaultConfigurationName" = "Release";

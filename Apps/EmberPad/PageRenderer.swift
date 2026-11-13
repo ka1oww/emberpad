@@ -297,10 +297,10 @@ struct EditorScreen: View {
     @State private var entranceStartedAt: CFTimeInterval = 0
     /// The page area in window coordinates, for the close transition.
     @State private var pageAreaFrame: CGRect = .zero
-    /// The worksheet below the header in window coordinates: the edges the tool row docks on (EP100).
-    @State private var dockArea: CGRect = .zero
-    /// The tool row while a finger has it lifted, and as it lands (EP100).
+    /// The tool palette while a finger has it lifted, and as it lands (EP100).
     @State private var toolbarDrag: ToolbarDragState?
+    /// The palette's size across the top or bottom (false) and down a side (true), for where a lifted one lands.
+    @State private var toolbarSizes: [Bool: CGSize] = [:]
 
     private var entrance: DocumentTransition.Entrance {
         DocumentTransition.entrance(pageEntered: pageEntered, reduceMotion: reduceMotion)
@@ -356,27 +356,17 @@ struct EditorScreen: View {
     /// Read-only (EP63) hides the tool row, as GoodNotes does.
     private var showsTools: Bool { !chrome.readOnly }
 
-    /// The edge the tool row docks on (EP100).
+    /// The edge the tool palette floats against (EP100).
     private var dock: ToolbarDock { tools.settings.toolbarDock }
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            // EP100: the tool row docks on any edge of the worksheet below the header, and the page makes room for it.
-            // The page area keeps its place in the hierarchy whichever edge it is on, so moving the row never reloads it.
-            VStack(spacing: 0) {
-                if showsTools, dock == .top { toolRow }
-                if let session { InkSaveBanner(session: session) }
-                HStack(spacing: 0) {
-                    if showsTools, dock == .leading { toolRow }
-                    pageArea
-                    if showsTools, dock == .trailing { toolRow }
-                }
-                if showsTools, dock == .bottom { toolRow }
-            }
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { dockArea = $0 }
+            if let session { InkSaveBanner(session: session) }
+            // EP101: the tool palette floats over the page (see `pageArea`), so the page keeps the whole worksheet.
+            pageArea
         }
-        .overlay { ToolbarDragLayer(drag: toolbarDrag, tools: tools, area: dockArea) }
+        .overlay { ToolbarDragLayer(drag: toolbarDrag, tools: tools, area: pageAreaFrame, tabSide: teacherCard.side) }
         // Not in onAppear: that runs inside the library's no-animation push, which would settle the page at once.
         .task {
             guard !pageEntered else { return }
@@ -463,7 +453,15 @@ extension EditorScreen {
                         pageNavigator(session)
                     }
                     .disabled(!pagesAvailable)
+                    // Above a palette floating along the bottom (EP101).
+                    .padding(.bottom, showsTools && dock == .bottom ? ToolbarDockDrag.margin + ToolbarStrip.height : 0)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
+                // EP101: the tool palette floats over the page against its edge, where it was left. The Teacher copy
+                // slides over it, as Slide Over does, and its pull tab is never under it.
+                if showsTools {
+                    ToolbarFloatLayout(dock: dock, along: tools.settings.toolbarAlong, tabSide: teacherCard.side) { toolRow }
+                        .transition(.opacity)
                 }
                 // iPad main scene only: the external scene never draws this, and it has no answer URL.
                 if let session {
@@ -472,10 +470,7 @@ extension EditorScreen {
                                                              privateAnswerURL: presentation.privateAnswerURL),
                                            documentTitle: session.record.title,
                                            card: teacherCard,
-                                           hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil,
-                                           edgeSwipeReach: { side in
-                                               ToolbarDockDrag.edgeSwipeReach(dock: dock, showsTools: showsTools, side: side)
-                                           })
+                                           hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil)
                 }
             }
             .overlay(alignment: dock == .bottom ? .bottom : .top) {
@@ -484,27 +479,28 @@ extension EditorScreen {
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { pageAreaFrame = $0 }
     }
 
-    /// The tool row on its edge. While it is lifted it stays in place, faded, until it lands.
+    /// The tool palette. While it is lifted it stays in place, faded, until it lands.
     private var toolRow: some View {
         ToolbarStrip(tools: tools, dock: dock, onDrag: { phase in dragToolRow(phase) },
                      onMove: { target in moveToolRow(to: target) })
             .opacity(toolbarDrag == nil || toolbarDrag?.settling == true ? 1 : 0.35)
-            .transition(.opacity)
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { toolbarSizes[dock.isVertical] = $0 }
     }
 
-    /// EP100: a finger held on the row lifts it; it follows the finger, the slot of the nearest edge lights up, and on
-    /// release it snaps to that edge, where it stays across worksheets and launches.
+    /// EP100, EP101: a finger held on the palette lifts it; it follows the finger, the band of the nearest edge lights
+    /// up, and on release it snaps against that edge where it was let go, and stays there across worksheets and
+    /// launches.
     private func dragToolRow(_ phase: ToolbarDragRecognizer.Phase) {
         switch phase {
         case .began(let point):
             tools.settingsTool = nil
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             withAnimation(.easeOut(duration: 0.15)) {
-                toolbarDrag = ToolbarDragState(location: point, target: ToolbarDockDrag.target(for: point, in: dockArea))
+                toolbarDrag = ToolbarDragState(location: point, target: ToolbarDockDrag.target(for: point, in: pageAreaFrame))
             }
         case .moved(let point):
             guard var drag = toolbarDrag, !drag.settling else { return }
-            let target = ToolbarDockDrag.target(for: point, in: dockArea)
+            let target = ToolbarDockDrag.target(for: point, in: pageAreaFrame)
             drag.location = point
             if target != drag.target {
                 UISelectionFeedbackGenerator().selectionChanged()
@@ -515,23 +511,29 @@ extension EditorScreen {
             }
         case .ended(let point, let velocity):
             guard toolbarDrag != nil else { return }
-            moveToolRow(to: ToolbarDockDrag.target(for: point, velocity: velocity, in: dockArea))
+            let target = ToolbarDockDrag.target(for: point, velocity: velocity, in: pageAreaFrame)
+            moveToolRow(to: target, along: ToolbarDockDrag.along(for: point, velocity: velocity, on: target, in: pageAreaFrame))
         case .cancelled:
             guard toolbarDrag != nil else { return }
             withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) { toolbarDrag = nil }
         }
     }
 
-    /// Docks the row on `target` with the snap, the lifted row flying into its new slot as it fades.
-    private func moveToolRow(to target: ToolbarDock) {
+    /// Puts the palette against `target`'s edge, `along` it (where it already was along an edge when nil), with the
+    /// snap, the lifted palette flying to where it lands as it fades.
+    private func moveToolRow(to target: ToolbarDock, along: Double? = nil) {
         tools.settingsTool = nil
+        let along = along ?? tools.settings.toolbarAlong
         let lifted = toolbarDrag != nil
         if lifted { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
         withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) {
-            tools.setToolbarDock(target)
+            tools.setToolbarPosition(target, along: along)
             if lifted {
-                toolbarDrag = ToolbarDragState(location: ToolbarDockDrag.slotCentre(for: target, in: dockArea),
-                                               target: target, settling: true)
+                let size = toolbarSizes[target.isVertical]
+                    ?? (target.isVertical ? CGSize(width: ToolbarStrip.columnWidth, height: 480) : CGSize(width: 480, height: ToolbarStrip.height))
+                let landing = ToolbarDockDrag.frame(for: target, along: along, size: size,
+                                                    in: ToolbarDockDrag.room(for: target, in: pageAreaFrame, tabSide: teacherCard.side))
+                toolbarDrag = ToolbarDragState(location: CGPoint(x: landing.midX, y: landing.midY), target: target, settling: true)
             }
         } completion: {
             if toolbarDrag?.settling == true { toolbarDrag = nil }

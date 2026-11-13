@@ -2,9 +2,10 @@ import SwiftUI
 import XCTest
 @testable import EmberPad
 
-/// EP100: the tool row docks on the top, bottom, left or right edge of the worksheet, as GoodNotes 6's toolbar does.
-/// These cover the pure rules: which edge a drop snaps to, where the docked row sits, the Teacher copy edge swipe
-/// across a side column, and that the chosen edge is stored with the other tool settings.
+/// EP100, EP101: the tool palette floats over the page against the top, bottom, left or right edge of the worksheet,
+/// as GoodNotes 6's Writing Tools menu does. These cover the pure rules: which edge a drop snaps to, where along it the
+/// palette lands and how it fits, that the finger's hold can never be prevented, and that the place is stored with the
+/// other tool settings.
 @MainActor
 final class ToolbarDockTests: XCTestCase {
     /// An iPad landscape worksheet below the header.
@@ -55,17 +56,84 @@ final class ToolbarDockTests: XCTestCase {
         XCTAssertEqual(ToolbarDockDrag.target(for: CGPoint(x: 10, y: 10), in: .zero), .top)
     }
 
-    func testTheRowLandsCentredOnItsEdge() {
-        XCTAssertEqual(ToolbarDockDrag.slotCentre(for: .top, in: area), CGPoint(x: 597, y: 74 + 24))
-        XCTAssertEqual(ToolbarDockDrag.slotCentre(for: .bottom, in: area), CGPoint(x: 597, y: 834 - 24))
-        XCTAssertEqual(ToolbarDockDrag.slotCentre(for: .leading, in: area), CGPoint(x: 28, y: 454))
-        XCTAssertEqual(ToolbarDockDrag.slotCentre(for: .trailing, in: area), CGPoint(x: 1194 - 28, y: 454))
+    // MARK: Floating against an edge
+
+    func testThePaletteFloatsInsideTheEdgeWhereItWasDropped() {
+        let row = CGSize(width: 600, height: ToolbarStrip.height)
+        let column = CGSize(width: ToolbarStrip.columnWidth, height: 500)
+        let m = ToolbarDockDrag.margin
+        // Centred by default, a margin in from the edge, never edge to edge.
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .top, along: 0.5, size: row, in: area),
+                       CGRect(x: 297, y: 74 + m, width: 600, height: 48))
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .bottom, along: 0.5, size: row, in: area),
+                       CGRect(x: 297, y: 834 - m - 48, width: 600, height: 48))
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .leading, along: 0.5, size: column, in: area),
+                       CGRect(x: m, y: 204, width: 56, height: 500))
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .trailing, along: 0.5, size: column, in: area),
+                       CGRect(x: 1194 - m - 56, y: 204, width: 56, height: 500))
+        // Dropped off centre, it is centred where it was let go along the edge.
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .bottom, along: 0.6, size: row, in: area).midX, 0.6 * 1194, accuracy: 0.001)
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .trailing, along: 0.4, size: column, in: area).midY, 74 + 0.4 * 760, accuracy: 0.001)
+        // Towards a corner it moves in just enough to stay whole on the worksheet.
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .top, along: 0, size: row, in: area).minX, m)
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .top, along: 1, size: row, in: area).maxX, 1194 - m)
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .leading, along: 0, size: column, in: area).minY, 74 + m)
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .leading, along: 1, size: column, in: area).maxY, 834 - m)
+        // Longer than the edge (a scrolling palette on a narrow worksheet), it is centred on it.
+        let long = ToolbarDockDrag.frame(for: .top, along: 0, size: CGSize(width: 1400, height: 48), in: area)
+        XCTAssertEqual(long.midX, area.midX, accuracy: 0.001)
+        for dock in ToolbarDock.allCases {
+            for along in stride(from: 0.0, through: 1.0, by: 0.1) {
+                let size = dock.isVertical ? column : row
+                let frame = ToolbarDockDrag.frame(for: dock, along: along, size: size, in: area)
+                XCTAssertTrue(area.insetBy(dx: m - 0.001, dy: m - 0.001).contains(frame), "\(dock) \(along)")
+                XCTAssertEqual(frame.size, size)
+            }
+        }
+    }
+
+    func testWhereAlongTheEdgeADropLands() {
+        XCTAssertEqual(ToolbarDockDrag.along(for: CGPoint(x: 597, y: 800), on: .bottom, in: area), 0.5, accuracy: 0.001)
+        XCTAssertEqual(ToolbarDockDrag.along(for: CGPoint(x: 1194 * 0.25, y: 90), on: .top, in: area), 0.25, accuracy: 0.001)
+        XCTAssertEqual(ToolbarDockDrag.along(for: CGPoint(x: 1180, y: 74 + 190), on: .trailing, in: area), 0.25, accuracy: 0.001)
+        // Past either end it is at that end.
+        XCTAssertEqual(ToolbarDockDrag.along(for: CGPoint(x: -50, y: 90), on: .top, in: area), 0)
+        XCTAssertEqual(ToolbarDockDrag.along(for: CGPoint(x: 20, y: 1000), on: .leading, in: area), 1)
+        // A flick carries it along the edge too.
+        XCTAssertEqual(ToolbarDockDrag.along(for: CGPoint(x: 597, y: 800), velocity: CGVector(dx: 1000, dy: 0), on: .bottom, in: area),
+                       (597 + 120) / 1194, accuracy: 0.001)
+        XCTAssertEqual(ToolbarDockDrag.along(for: .zero, on: .top, in: .zero), ToolbarDockDrag.defaultAlong)
+    }
+
+    /// Down the side the Teacher copy's pull tab is on, the palette floats beside the tab, never over it.
+    func testThePaletteKeepsClearOfTheTeacherCopyTab() {
+        let tab = TeacherCopyCardGeometry.tabSize.width
+        XCTAssertEqual(ToolbarDockDrag.room(for: .trailing, in: area, tabSide: .trailing),
+                       CGRect(x: 0, y: 74, width: 1194 - tab, height: 760))
+        XCTAssertEqual(ToolbarDockDrag.room(for: .leading, in: area, tabSide: .leading),
+                       CGRect(x: tab, y: 74, width: 1194 - tab, height: 760))
+        XCTAssertEqual(ToolbarDockDrag.room(for: .leading, in: area, tabSide: .trailing), area)
+        XCTAssertEqual(ToolbarDockDrag.room(for: .trailing, in: area, tabSide: .leading), area)
+        for side in TeacherCopyPanelSide.allCases {
+            XCTAssertEqual(ToolbarDockDrag.room(for: .top, in: area, tabSide: side), area, "the top stays centred on the page")
+            XCTAssertEqual(ToolbarDockDrag.room(for: .bottom, in: area, tabSide: side), area)
+        }
+    }
+
+    func testTheCarriedPaletteLightsTheBandAlongItsTargetEdge() {
+        let m = ToolbarDockDrag.margin
         for dock in ToolbarDock.allCases {
             let slot = ToolbarDockDrag.slot(for: dock, in: area)
-            XCTAssertEqual(CGPoint(x: slot.midX, y: slot.midY), ToolbarDockDrag.slotCentre(for: dock, in: area), "\(dock)")
             XCTAssertEqual(dock.isVertical ? slot.width : slot.height, dock.thickness, "\(dock)")
-            XCTAssertTrue(area.contains(slot), "\(dock) lies inside the worksheet")
+            XCTAssertTrue(area.insetBy(dx: m, dy: m).contains(slot), "\(dock) lies inside the worksheet")
         }
+        XCTAssertEqual(ToolbarDockDrag.slot(for: .bottom, in: area).maxY, area.maxY - m)
+        XCTAssertEqual(ToolbarDockDrag.slot(for: .leading, in: area).minX, area.minX + m)
+        // The band on the pull tab's side stops short of the tab, where the palette lands; the far side is untouched.
+        let tab = TeacherCopyCardGeometry.tabSize.width
+        XCTAssertEqual(ToolbarDockDrag.band(for: .trailing, in: area, tabSide: .trailing).maxX, area.maxX - tab - m)
+        XCTAssertEqual(ToolbarDockDrag.band(for: .leading, in: area, tabSide: .trailing).minX, area.minX + m)
+        XCTAssertEqual(ToolbarDockDrag.band(for: .leading, in: area, tabSide: .leading).minX, area.minX + tab + m)
     }
 
     func testRowsAndColumns() {
@@ -86,39 +154,35 @@ final class ToolbarDockTests: XCTestCase {
         XCTAssertEqual(ToolbarDock.trailing.popoverArrowEdge, .trailing)
     }
 
-    // MARK: The Teacher copy edge swipe
-
-    /// A column down the side the Teacher copy is hidden off lies between the body and the screen's edge, so the
-    /// edge swipe reaches across it; on any other edge the swipe is exactly as before.
-    func testTheEdgeSwipeReachesAcrossAColumnOnItsSide() {
-        XCTAssertEqual(ToolbarDockDrag.edgeSwipeReach(dock: .trailing, showsTools: true, side: .trailing), ToolbarStrip.columnWidth)
-        XCTAssertEqual(ToolbarDockDrag.edgeSwipeReach(dock: .leading, showsTools: true, side: .leading), ToolbarStrip.columnWidth)
-        XCTAssertEqual(ToolbarDockDrag.edgeSwipeReach(dock: .trailing, showsTools: true, side: .leading), 0)
-        XCTAssertEqual(ToolbarDockDrag.edgeSwipeReach(dock: .leading, showsTools: true, side: .trailing), 0)
-        XCTAssertEqual(ToolbarDockDrag.edgeSwipeReach(dock: .trailing, showsTools: false, side: .trailing), 0,
-                       "read-only hides the row")
-        for side in TeacherCopyPanelSide.allCases {
-            XCTAssertEqual(ToolbarDockDrag.edgeSwipeReach(dock: .top, showsTools: true, side: side), 0)
-            XCTAssertEqual(ToolbarDockDrag.edgeSwipeReach(dock: .bottom, showsTools: true, side: side), 0)
-        }
-
-        // The body is the screen less a right column: a finger at the screen's right edge, on the column, swipes.
-        let reach = ToolbarStrip.columnWidth
-        let bodyMaxX = 1194 - reach
-        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: 1190, side: .trailing, bodyMinX: 0, bodyMaxX: bodyMaxX, reach: reach))
-        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: bodyMaxX - 10, side: .trailing, bodyMinX: 0, bodyMaxX: bodyMaxX, reach: reach))
-        XCTAssertFalse(TeacherCopySlide.edgeSwipeStarts(atX: bodyMaxX - 40, side: .trailing, bodyMinX: 0, bodyMaxX: bodyMaxX, reach: reach))
-        XCTAssertFalse(TeacherCopySlide.edgeSwipeStarts(atX: 1190, side: .trailing, bodyMinX: 0, bodyMaxX: bodyMaxX),
-                       "without the reach the column is outside the band")
-        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: 4, side: .leading, bodyMinX: reach, bodyMaxX: 1194, reach: reach))
-        XCTAssertFalse(TeacherCopySlide.edgeSwipeStarts(atX: 4, side: .leading, bodyMinX: reach, bodyMaxX: 1194))
-    }
-
     // MARK: Persistence
 
-    func testTheRowStartsAtTheTop() {
+    func testThePaletteStartsCentredAtTheTop() {
         XCTAssertEqual(ToolSettings().toolbarDock, .top)
+        XCTAssertEqual(ToolSettings().toolbarAlong, 0.5)
         XCTAssertEqual(ToolState(defaults: makeDefaults()).settings.toolbarDock, .top)
+        XCTAssertEqual(ToolState(defaults: makeDefaults()).settings.toolbarAlong, 0.5)
+    }
+
+    func testThePlaceAlongTheEdgeIsKeptAcrossLaunches() {
+        let defaults = makeDefaults()
+        let tools = ToolState(defaults: defaults)
+        tools.setToolbarPosition(.trailing, along: 0.3)
+        XCTAssertEqual(tools.settings.toolbarDock, .trailing)
+        XCTAssertEqual(tools.settings.toolbarAlong, 0.3)
+        let next = ToolState(defaults: defaults)
+        XCTAssertEqual(next.settings.toolbarDock, .trailing)
+        XCTAssertEqual(next.settings.toolbarAlong, 0.3)
+        // VoiceOver's move to another edge keeps the place along it.
+        next.setToolbarDock(.leading)
+        XCTAssertEqual(ToolState(defaults: defaults).settings.toolbarAlong, 0.3)
+    }
+
+    func testAStoredPlaceOutsideTheEdgeIsBroughtBackOnIt() throws {
+        let defaults = makeDefaults()
+        var stored = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ToolSettings())) as? [String: Any])
+        stored["toolbarAlong"] = 4.5
+        defaults.set(try JSONSerialization.data(withJSONObject: stored), forKey: ToolState.defaultsKey)
+        XCTAssertEqual(ToolState(defaults: defaults).settings.toolbarAlong, 1)
     }
 
     func testTheChosenEdgeIsKeptAcrossLaunches() {
@@ -160,10 +224,12 @@ final class ToolbarDockTests: XCTestCase {
         let defaults = makeDefaults()
         var old = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ToolSettings())) as? [String: Any])
         old.removeValue(forKey: "toolbarDock")
+        old.removeValue(forKey: "toolbarAlong")
         old["current"] = "lasso"
         defaults.set(try JSONSerialization.data(withJSONObject: old), forKey: ToolState.defaultsKey)
         let tools = ToolState(defaults: defaults)
         XCTAssertEqual(tools.settings.toolbarDock, .top)
+        XCTAssertEqual(tools.settings.toolbarAlong, 0.5, "centred")
         XCTAssertEqual(tools.current, .lasso, "the rest of the stored settings are kept")
     }
 
@@ -188,6 +254,16 @@ final class ToolbarDockTests: XCTestCase {
         XCTAssertEqual(drag.minimumPressDuration, ToolbarDockDrag.holdDuration)
         XCTAssertEqual(drag.allowableMovement, ToolbarDockDrag.holdSlop)
         XCTAssertGreaterThanOrEqual(ToolbarDockDrag.holdDuration, 0.25, "a tap on a tool is never a pick-up")
+    }
+
+    /// EP101: SwiftUI's touch recogniser begins as soon as a finger lands on a tool, and a hold that it may prevent
+    /// fails at once (the iPad bug). No other recogniser may prevent the hold either.
+    func testNothingCanPreventTheHold() {
+        let drag = ToolbarDragRecognizer()
+        let began = UILongPressGestureRecognizer()
+        XCTAssertFalse(drag.canBePrevented(by: began))
+        XCTAssertFalse(drag.canBePrevented(by: UIPanGestureRecognizer()))
+        XCTAssertFalse(drag.canBePrevented(by: UITapGestureRecognizer()))
     }
 
     func testReduceMotionSnapsWithAFade() {

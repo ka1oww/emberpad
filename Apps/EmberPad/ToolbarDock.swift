@@ -1,15 +1,15 @@
 import SwiftUI
 import UIKit
 
-/// EP100: the worksheet edge the tool row docks on. GoodNotes 6's floating toolbar and Apple Notes' tool palette are
-/// both picked up and dropped on an edge of the screen, where they snap into place centred on that edge; GoodNotes'
-/// edges are the top, bottom, left and right. Ember Slate's row docks on the same four edges of the worksheet, below
-/// the header: across the top (where it always was) or the bottom, or as a column down the left or right side. The
-/// page makes room for it, so it never covers the page, the Teacher copy panel or its pull tab.
+/// EP100, EP101: the worksheet edge the tool palette floats against. GoodNotes 6's Writing Tools menu floats over
+/// the page and is held and dragged to any edge of the screen, where it snaps into place: across the top or bottom, or
+/// turned upright down the left or right side. Ember Slate's palette does the same over the worksheet below the
+/// header. It never takes room from the page; it floats over it, a little in from the edge, wherever along that edge
+/// it was dropped.
 enum ToolbarDock: String, CaseIterable, Codable, Sendable {
     case top, bottom, leading, trailing
 
-    /// A column down a side; the top and bottom are rows.
+    /// Upright down a side; across the top and bottom.
     var isVertical: Bool { self == .leading || self == .trailing }
 
     /// Its name as the teacher sees it (the app is left to right, so leading is the left).
@@ -22,7 +22,7 @@ enum ToolbarDock: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    /// The edge of the worksheet the row docks against.
+    /// The edge of the worksheet the palette floats against.
     var edge: Edge {
         switch self {
         case .top: .top
@@ -32,55 +32,102 @@ enum ToolbarDock: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    /// The side of a tool's settings popover its arrow is on: the side facing the row, so the popover opens over the
-    /// page, away from the edge (below a top row, above a bottom row, right of a left column, left of a right column).
+    /// The side of a tool's settings popover its arrow is on: the side facing the edge, so the popover opens over the
+    /// page, away from the edge (below a palette at the top, above one at the bottom, right of one on the left, left
+    /// of one on the right).
     var popoverArrowEdge: Edge { edge }
 
-    /// How deep the docked row is: its height across the top or bottom, its width down a side.
+    /// How deep the palette is: its height across the top or bottom, its width down a side.
     var thickness: CGFloat { isVertical ? ToolbarStrip.columnWidth : ToolbarStrip.height }
 }
 
-/// EP100: picking the row up and dropping it on an edge. Pure, so tests cover every edge without a touch.
+/// EP100, EP101: picking the palette up and dropping it against an edge. Pure, so tests cover every edge and position
+/// without a touch.
 enum ToolbarDockDrag {
-    /// A finger held this long on the row picks it up, as GoodNotes' "hold and drag" does. A shorter touch is a tap
-    /// on a tool, and a finger that moves first scrolls the row (or is the Teacher copy's edge swipe).
+    /// A finger held this long on the palette picks it up, as GoodNotes' "hold and drag" does. A shorter touch is a
+    /// tap on a tool, and a finger that moves first scrolls the palette (or is the Teacher copy's edge swipe).
     static let holdDuration: TimeInterval = 0.3
-    /// How far the finger may wander during the hold and still pick the row up.
+    /// How far the finger may wander during the hold and still pick the palette up.
     static let holdSlop: CGFloat = 10
     /// A release still carries this many seconds of travel, so a flick towards an edge lands there.
     static let projection: CGFloat = 0.12
+    /// The gap between the floating palette and the worksheet's edges.
+    static let margin: CGFloat = 10
+    /// Where along its edge the palette first sits: centred, as GoodNotes' does.
+    static let defaultAlong = 0.5
 
-    /// The edge a row dropped at `location` (window coordinates) moving at `velocity` (pt/s) snaps to: the edge of
-    /// `area` (the worksheet below the header) nearest the projected point. A tie keeps the order top, bottom, left,
-    /// right.
+    private static func projected(_ location: CGPoint, _ velocity: CGVector) -> CGPoint {
+        CGPoint(x: location.x + velocity.dx * projection, y: location.y + velocity.dy * projection)
+    }
+
+    /// The edge a palette dropped at `location` (window coordinates) moving at `velocity` (pt/s) snaps to: the edge
+    /// of `area` (the worksheet below the header) nearest the projected point. A tie keeps the order top, bottom,
+    /// left, right.
     static func target(for location: CGPoint, velocity: CGVector = .zero, in area: CGRect) -> ToolbarDock {
         guard area.width > 0, area.height > 0 else { return .top }
-        let x = min(max(location.x + velocity.dx * projection, area.minX), area.maxX)
-        let y = min(max(location.y + velocity.dy * projection, area.minY), area.maxY)
+        let point = projected(location, velocity)
+        let x = min(max(point.x, area.minX), area.maxX)
+        let y = min(max(point.y, area.minY), area.maxY)
         let distances: [(ToolbarDock, CGFloat)] = [
             (.top, y - area.minY), (.bottom, area.maxY - y), (.leading, x - area.minX), (.trailing, area.maxX - x),
         ]
         return distances.min { $0.1 < $1.1 }?.0 ?? .top
     }
 
-    /// The centre of the row docked on `dock` in `area`: centred on that edge, as GoodNotes' toolbar always is.
-    static func slotCentre(for dock: ToolbarDock, in area: CGRect) -> CGPoint {
+    /// Where along `dock`'s edge of `area` a palette dropped at `location` moving at `velocity` lands: 0 at the left
+    /// (or top) end, 1 at the right (or bottom), from the projected point.
+    static func along(for location: CGPoint, velocity: CGVector = .zero, on dock: ToolbarDock, in area: CGRect) -> Double {
+        guard area.width > 0, area.height > 0 else { return defaultAlong }
+        let point = projected(location, velocity)
+        let fraction = dock.isVertical ? (point.y - area.minY) / area.height : (point.x - area.minX) / area.width
+        return Double(min(max(fraction, 0), 1))
+    }
+
+    /// The floating palette's frame, `size` big, against `dock`'s edge of `area`: `margin` in from that edge, centred
+    /// `along` it, and moved in just enough to sit whole on the worksheet (centred if it is longer than the edge).
+    static func frame(for dock: ToolbarDock, along: Double, size: CGSize, in area: CGRect) -> CGRect {
+        let inner = area.insetBy(dx: margin, dy: margin)
+        let fraction = CGFloat(min(max(along, 0), 1))
+        func origin(centre: CGFloat, length: CGFloat, from low: CGFloat, to high: CGFloat) -> CGFloat {
+            guard high - low > length else { return (low + high - length) / 2 }
+            return min(max(centre - length / 2, low), high - length)
+        }
         switch dock {
-        case .top: CGPoint(x: area.midX, y: area.minY + dock.thickness / 2)
-        case .bottom: CGPoint(x: area.midX, y: area.maxY - dock.thickness / 2)
-        case .leading: CGPoint(x: area.minX + dock.thickness / 2, y: area.midY)
-        case .trailing: CGPoint(x: area.maxX - dock.thickness / 2, y: area.midY)
+        case .top, .bottom:
+            let x = origin(centre: area.minX + fraction * area.width, length: size.width, from: inner.minX, to: inner.maxX)
+            return CGRect(x: x, y: dock == .top ? inner.minY : inner.maxY - size.height, width: size.width, height: size.height)
+        case .leading, .trailing:
+            let y = origin(centre: area.minY + fraction * area.height, length: size.height, from: inner.minY, to: inner.maxY)
+            return CGRect(x: dock == .leading ? inner.minX : inner.maxX - size.width, y: y, width: size.width, height: size.height)
         }
     }
 
-    /// Where the row lands: the rectangle along `dock`'s edge of `area` that it fills.
+    /// What the palette floats in against `dock`: the worksheet, less the Teacher copy pull tab on `tabSide`, so a
+    /// palette down that side sits beside the tab and never hides it.
+    static func room(for dock: ToolbarDock, in worksheet: CGRect, tabSide: TeacherCopyPanelSide) -> CGRect {
+        let tab = TeacherCopyCardGeometry.tabSize.width
+        switch (dock, tabSide) {
+        case (.leading, .leading): return CGRect(x: worksheet.minX + tab, y: worksheet.minY, width: max(worksheet.width - tab, 0), height: worksheet.height)
+        case (.trailing, .trailing): return CGRect(x: worksheet.minX, y: worksheet.minY, width: max(worksheet.width - tab, 0), height: worksheet.height)
+        default: return worksheet
+        }
+    }
+
+    /// The band outlined while the palette is carried towards `dock`: the slot in the room the palette lands in, so it
+    /// never runs over the Teacher copy's pull tab.
+    static func band(for dock: ToolbarDock, in worksheet: CGRect, tabSide: TeacherCopyPanelSide) -> CGRect {
+        slot(for: dock, in: room(for: dock, in: worksheet, tabSide: tabSide))
+    }
+
+    /// The band along `dock`'s edge of `area` that lights up while the palette is carried towards it.
     static func slot(for dock: ToolbarDock, in area: CGRect) -> CGRect {
+        let inner = area.insetBy(dx: margin, dy: margin)
         let t = dock.thickness
         switch dock {
-        case .top: return CGRect(x: area.minX, y: area.minY, width: area.width, height: t)
-        case .bottom: return CGRect(x: area.minX, y: area.maxY - t, width: area.width, height: t)
-        case .leading: return CGRect(x: area.minX, y: area.minY, width: t, height: area.height)
-        case .trailing: return CGRect(x: area.maxX - t, y: area.minY, width: t, height: area.height)
+        case .top: return CGRect(x: inner.minX, y: inner.minY, width: inner.width, height: t)
+        case .bottom: return CGRect(x: inner.minX, y: inner.maxY - t, width: inner.width, height: t)
+        case .leading: return CGRect(x: inner.minX, y: inner.minY, width: t, height: inner.height)
+        case .trailing: return CGRect(x: inner.maxX - t, y: inner.minY, width: t, height: inner.height)
         }
     }
 
@@ -88,21 +135,34 @@ enum ToolbarDockDrag {
     static func snapAnimation(reduceMotion: Bool) -> Animation {
         reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.36, dampingFraction: 0.86)
     }
+}
 
-    /// How far a Teacher copy edge swipe may start outside the worksheet body on `side`: across the whole column when
-    /// the row is docked down that side, so a finger swiping in from the screen's edge still pulls the panel out
-    /// (EP97), and not at all otherwise.
-    static func edgeSwipeReach(dock: ToolbarDock, showsTools: Bool, side: TeacherCopyPanelSide) -> CGFloat {
-        guard showsTools else { return 0 }
-        switch (dock, side) {
-        case (.leading, .leading), (.trailing, .trailing): return ToolbarStrip.columnWidth
-        default: return 0
+/// EP101: lays the floating palette out over the worksheet: offered the worksheet less its margins, then placed by
+/// `ToolbarDockDrag.frame`, against `dock`'s edge, `along` it, clear of the Teacher copy pull tab on `tabSide`. Only
+/// the palette takes touches; the rest of the area is the page's.
+struct ToolbarFloatLayout: Layout {
+    var dock: ToolbarDock
+    var along: Double
+    var tabSide: TeacherCopyPanelSide
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let area = ToolbarDockDrag.room(for: dock, in: bounds, tabSide: tabSide)
+        let room = ProposedViewSize(width: max(area.width - 2 * ToolbarDockDrag.margin, 0),
+                                    height: max(area.height - 2 * ToolbarDockDrag.margin, 0))
+        for palette in subviews {
+            let size = palette.sizeThatFits(room)
+            let frame = ToolbarDockDrag.frame(for: dock, along: along, size: size, in: area)
+            palette.place(at: frame.origin, proposal: ProposedViewSize(size))
         }
     }
 }
 
-/// A row on its way to an edge: where the finger is (window coordinates) and the edge it would snap to now. Once the
-/// finger lifts it is `settling`, flying into its slot as the docked row appears there.
+/// A palette on its way to an edge: where the finger is (window coordinates) and the edge it would snap to now. Once
+/// the finger lifts it is `settling`, flying to where it lands as the palette appears there.
 struct ToolbarDragState: Equatable {
     var location: CGPoint
     var target: ToolbarDock
@@ -111,10 +171,17 @@ struct ToolbarDragState: Equatable {
 
 // MARK: - The finger's hold and drag
 
-/// One finger held on the row, then dragged. Only direct (finger) touches reach it, so Apple Pencil never picks the
-/// row up: a Pencil tap still chooses a tool and a Pencil stroke on the page is always ink. It sits on the window
-/// so it follows the finger anywhere once the row is lifted, and only takes a finger that lands on the row itself,
-/// in the editor's own views (never on a popover or sheet over them).
+/// One finger held on the palette, then dragged. Only direct (finger) touches reach it, so Apple Pencil never picks
+/// the palette up: a Pencil tap still chooses a tool and a Pencil stroke on the page is always ink. It sits on the
+/// window so it follows the finger anywhere once the palette is lifted, and only takes a finger that lands on the
+/// palette itself, in the editor's own views (never on a popover or sheet over them).
+///
+/// EP101: SwiftUI's own touch recogniser on the hosting view begins the moment a finger lands on a SwiftUI control,
+/// such as a tool's button, and a recogniser that begins fails every other one it is allowed to prevent. So this
+/// hold must never be prevented, or it fails within a millisecond of the touch, long before its hold, as it did on
+/// the iPad. Nothing else needs to stop it: a finger that moves first fails it by `allowableMovement`, and Pencil
+/// never reaches it. Once it picks the palette up it takes the touch from what began on it, so the tool under the
+/// finger is never tapped when the palette is let go.
 final class ToolbarDragRecognizer: UILongPressGestureRecognizer, UIGestureRecognizerDelegate {
     enum Phase: Equatable {
         case began(CGPoint)
@@ -125,9 +192,11 @@ final class ToolbarDragRecognizer: UILongPressGestureRecognizer, UIGestureRecogn
     }
 
     var onDrag: (Phase) -> Void = { _ in }
-    /// The row's frame in window coordinates.
+    /// The palette's frame in window coordinates.
     var region: () -> CGRect = { .null }
     private var samples: [(point: CGPoint, time: TimeInterval)] = []
+    /// The finger being held.
+    private weak var touch: UITouch?
 
     init() {
         super.init(target: nil, action: nil)
@@ -145,6 +214,29 @@ final class ToolbarDragRecognizer: UILongPressGestureRecognizer, UIGestureRecogn
         return !frame.isNull && frame.contains(touch.location(in: nil))
     }
 
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if touch == nil { touch = touches.first }
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func reset() {
+        super.reset()
+        touch = nil
+    }
+
+    /// Cancels whatever else in the editor began on the held finger (SwiftUI's touch on the tool under it), as a
+    /// lifted item takes the touch in iPadOS. Turning a recogniser off and on again cancels it and leaves it working.
+    private func takeTouch() {
+        guard let touch, let window = view as? UIWindow, let root = window.rootViewController?.view else { return }
+        for other in touch.gestureRecognizers ?? [] where other !== self && (other.state == .began || other.state == .changed) {
+            guard let owner = other.view, owner.isDescendant(of: root) else { continue }
+            other.isEnabled = false
+            other.isEnabled = true
+        }
+    }
+
     /// Points per second over the last few samples.
     var velocity: CGVector {
         guard let last = samples.last, let first = samples.first(where: { last.time - $0.time <= 0.08 }),
@@ -157,6 +249,7 @@ final class ToolbarDragRecognizer: UILongPressGestureRecognizer, UIGestureRecogn
         let point = location(in: nil)
         switch state {
         case .began:
+            takeTouch()
             samples = [(point, CACurrentMediaTime())]
             onDrag(.began(point))
         case .changed:
@@ -175,8 +268,8 @@ final class ToolbarDragRecognizer: UILongPressGestureRecognizer, UIGestureRecogn
     }
 }
 
-/// Installs `ToolbarDragRecognizer` on the window while the row is on screen. The view is the row's frame and takes
-/// no touches, so every tool under it works as before.
+/// Installs `ToolbarDragRecognizer` on the window while the palette is on screen. The view is the palette's frame and
+/// takes no touches, so every tool under it works as before.
 struct ToolbarDragHandle: UIViewRepresentable {
     var onDrag: (ToolbarDragRecognizer.Phase) -> Void
 
@@ -211,21 +304,23 @@ struct ToolbarDragHandle: UIViewRepresentable {
     }
 }
 
-// MARK: - The lifted row
+// MARK: - The lifted palette
 
-/// What follows the finger while the row is lifted: the target edge's slot, softly outlined, and the row's tools in
-/// a raised capsule that turns to lie along whichever edge it would snap to.
+/// What follows the finger while the palette is lifted: the target edge's band, softly outlined, and the palette's
+/// tools in a raised capsule that turns to lie along whichever edge it would snap to.
 struct ToolbarDragLayer: View {
     let drag: ToolbarDragState?
     let tools: ToolState
     /// The worksheet below the header, in window coordinates.
     let area: CGRect
+    /// The Teacher copy's side, whose pull tab the palette keeps clear of.
+    var tabSide: TeacherCopyPanelSide = .trailing
 
     var body: some View {
         GeometryReader { proxy in
             let origin = proxy.frame(in: .global).origin
             if let drag {
-                let slot = ToolbarDockDrag.slot(for: drag.target, in: area).offsetBy(dx: -origin.x, dy: -origin.y)
+                let slot = ToolbarDockDrag.band(for: drag.target, in: area, tabSide: tabSide).offsetBy(dx: -origin.x, dy: -origin.y)
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Theme.accentSoft.opacity(0.6))
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -244,7 +339,7 @@ struct ToolbarDragLayer: View {
     }
 }
 
-/// The lifted row: its tools in their order, the selected one marked, on a raised capsule.
+/// The lifted palette: its tools in their order, the selected one marked, on a raised capsule.
 struct ToolbarDragPreview: View {
     let tools: ToolState
     let vertical: Bool
