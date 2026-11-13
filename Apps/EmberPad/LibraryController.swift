@@ -386,6 +386,9 @@ final class LibraryController: ObservableObject {
                 drawings[index] = PageInkRotation.displayed(try PKDrawing(data: data), entry: page, page: pdf.page(at: index))
             }
         }
+        #if DEBUG
+        drawings = UITestLaunch.drawings(drawings, for: record)
+        #endif
         let session = DocumentSession(record: record, pdf: pdf, originalURL: url, pages: pages, drawings: drawings, store: store)
         sessions[id] = session
         return session

@@ -257,7 +257,7 @@ final class InkEditGateTests: XCTestCase {
         XCTAssertNil(pen.claim(id: id, startingNear: CGPoint(x: start.x + 100, y: start.y)), "the commit starts elsewhere")
         XCTAssertEqual(pen.claim(id: id, startingNear: CGPoint(x: start.x + 1, y: start.y + 1))?.id, id)
         XCTAssertNil(pen.claim(id: id, startingNear: nil), "claimed once")
-        pen.expire(now: 100)
+        pen.expire(now: 100) { _ in true }
         XCTAssertNotNil(pen.stroke(id: id), "owed: it stays drawn until its swap lands, however long that takes")
         pen.landed(id: id, now: 100)
         pen.rendered(page: 0)
@@ -280,7 +280,7 @@ final class InkEditGateTests: XCTestCase {
         pen.lift(samples: [], now: 0.2)
         XCTAssertTrue(pen.owe(id: id))
         XCTAssertFalse(pen.owe(id: id), "owed once")
-        pen.expire(now: 100)
+        pen.expire(now: 100) { _ in true }
         let landing = try? XCTUnwrap(pen.landingStroke(id: id))
         XCTAssertEqual(landing?.path.count, samples.count)
         XCTAssertEqual(landing?.ink.inkType, .fountainPen)

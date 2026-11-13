@@ -59,14 +59,17 @@ final class ScribbleInk {
 /// preview and the erase never disagree.
 final class ScribblePreview {
     let page: Int
+    /// The live pen's stroke for the scribble, by `LivePenStrokes` id: the ink hidden while its erase lands (EP108).
+    let liveID: UInt64?
     private(set) var samples: [CGPoint]
     private(set) var ink: ScribbleInk?
     private(set) var erased: [Int] = []
     private(set) var isFinished = false
 
-    init(page: Int, samples: [CGPoint]) {
+    init(page: Int, samples: [CGPoint], liveID: UInt64? = nil) {
         self.page = page
         self.samples = samples
+        self.liveID = liveID
     }
 
     func append(_ points: [CGPoint]) {
@@ -78,11 +81,29 @@ final class ScribblePreview {
     @discardableResult
     func update(ink: ScribbleInk) -> Bool {
         guard !isFinished else { return false }
+        let points = ScribbleErase.resampled(samples)
+        var next = ink.erased(by: points)
+        if !next.isEmpty {
+            erasingSince = points.count
+        } else if !erased.isEmpty, ink === self.ink, let since = erasingSince,
+                  CGFloat(points.count - since) * ScribbleErase.sampleSpacing <= Self.holdTravel {
+            // Judged on the same page as the strokes it outlines, so the set still names the same strokes.
+            next = erased
+        }
         self.ink = ink
-        let next = ink.erased(by: ScribbleErase.resampled(samples))
         defer { erased = next }
         return next != erased
     }
+
+    /// How many resampled points the stroke had when it last erased something.
+    private var erasingSince: Int?
+
+    /// A scribble that stops reading as one for a moment keeps what it outlined for this many more points of the
+    /// stroke (EP108). Right at the threshold, as a scribble first goes through enough ink, the judgement can flip back
+    /// and forth from one sample to the next, and the outline flickered on and off. A stroke that really stops being a
+    /// scribble, running on as a long line, goes on past this and its outline goes. Whatever the outline shows at the
+    /// lift is what the lift erases.
+    static let holdTravel: CGFloat = 32
 
     /// Judges the whole stroke against `ink` one last time and fixes the result.
     @discardableResult
@@ -111,10 +132,11 @@ final class ScribblePreview {
 
 extension PDFOverlayPageController {
     /// A fountain-pen stroke starts on `page`: with "Scribble to erase" on, the stroke is watched as a scribble.
-    func beginScribblePreview(page: Int, samples: [CGPoint]) {
+    /// `liveID` is the live pen's stroke for it.
+    func beginScribblePreview(page: Int, samples: [CGPoint], liveID: UInt64? = nil) {
         clearScribblePreview()
         guard !readOnly, tools.current == .pen, tools.settings.scribbleToErase, canvases[page] != nil else { return }
-        scribblePreview = ScribblePreview(page: page, samples: samples)
+        scribblePreview = ScribblePreview(page: page, samples: samples, liveID: liveID)
     }
 
     /// More of the stroke: the preview catches up once per turn of the run loop, however many samples came.
@@ -136,18 +158,20 @@ extension PDFOverlayPageController {
         if preview.update(ink: ink) { showScribbleOutline() }
     }
 
-    /// The Pencil lifted before PencilKit committed the stroke: the set is fixed now, and the outline stays on what
-    /// the commit will erase (nothing, if it erases nothing) until then.
+    /// The Pencil lifted before PencilKit committed the stroke: the set is fixed now, and what the commit will erase
+    /// leaves the page at once, with the scribble's own ink and the outline (EP108).
     func liftScribblePreview(samples: [CGPoint]) {
         guard let preview = scribblePreview, !preview.isFinished else { return }
         preview.append(samples)
         guard let ink = scribbleInk(page: preview.page) else { return clearScribblePreview() }
         // Kept even when it erases nothing, so the commit erases nothing too.
         preview.finish(ink: ink)
-        showScribbleOutline()
-        // If the commit never comes, neither the outline nor the stroke being watched stays behind.
+        hideScribbledInk(of: preview)
+        // If the commit never comes, neither the outline nor the stroke being watched stays behind, and what was
+        // hidden shows again.
         let expiry = DispatchWorkItem { [weak self, weak preview] in
             guard let self, let preview, self.scribblePreview === preview else { return }
+            self.pageInkView(preview.page)?.showScribbledInk(scribble: preview.liveID)
             self.clearScribblePreview()
         }
         scribbleExpiry = expiry
@@ -158,9 +182,12 @@ extension PDFOverlayPageController {
     static let scribbleCommitWait: TimeInterval = 1
 
     /// The strokes the just-committed `scribble` erases from `base` (the page before it), as the preview showed them
-    /// when there was one; nil when the preview was not of this stroke.
+    /// when there was one, hidden from now on if they were not already; nil when the preview was not of this stroke.
     func finishScribblePreview(page: Int, scribble: PKStroke, base: [PKStroke]) -> [Int]? {
         guard let preview = scribblePreview, preview.page == page, preview.matches(scribble) else { return nil }
+        // The commit came: the erase lands once PencilKit is idle, however long that takes.
+        scribbleExpiry?.cancel()
+        scribbleExpiry = nil
         if preview.isFinished, let ink = preview.ink, ink.count == base.count {
             let erased = preview.erased
             if erased.isEmpty { clearScribblePreview() }
@@ -173,15 +200,32 @@ extension PDFOverlayPageController {
         let erased: [Int]
         if preview.isFinished {
             // Lifted, but the page changed before the commit: judged again on the page as it is.
-            let again = ScribblePreview(page: page, samples: preview.samples)
+            let again = ScribblePreview(page: page, samples: preview.samples, liveID: preview.liveID)
             erased = again.finish(ink: ink)
             scribblePreview = again
         } else {
             erased = preview.finish(ink: ink)
         }
-        if erased.isEmpty { clearScribblePreview() } else { showScribbleOutline() }
+        if let preview = scribblePreview { hideScribbledInk(of: preview) }
+        if erased.isEmpty { clearScribblePreview() }
         return erased
     }
+
+    /// The ink a finished `preview` erases, and the scribble's own, leave the page at once, and the outline with them
+    /// (EP108): the erase lands a few frames later, and the page shows it later again. A preview that erases nothing
+    /// hides nothing, and shows again whatever it hid before.
+    private func hideScribbledInk(of preview: ScribblePreview) {
+        let strokes = preview.ink.map { ink in preview.erased.map { ink.strokes[$0] } } ?? []
+        pageInkView(preview.page)?.hideScribbledInk(strokes, scribble: preview.liveID)
+        guard scribbleOutline.superlayer != nil || scribbleOutline.path != nil else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        scribbleOutline.removeFromSuperlayer()
+        scribbleOutline.path = nil
+        CATransaction.commit()
+    }
+
+    func pageInkView(_ page: Int) -> PageInkView? { canvases[page]?.superview as? PageInkView }
 
     /// Takes the outline and the stroke being watched off the page.
     func clearScribblePreview() {

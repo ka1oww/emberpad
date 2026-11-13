@@ -99,7 +99,7 @@ final class ScribblePreviewTests: XCTestCase {
         let stroke = ScribbleFixtures.pencil(ScribbleFixtures.zigzag(from: 117, to: x1, top: 296, bottom: 324, peaks: 12),
                                              speed: 900, seed: 3)
 
-        let steps = await Self.draw(stroke, on: canvas, controller)
+        let steps = await Self.draw(stroke, on: canvas, controller, lift: false)
         XCTAssertEqual(steps.first?.erased, [], "a stroke just started is no scribble yet")
         XCTAssertFalse(steps.first?.outlined ?? true)
         let shown = steps.filter { !$0.erased.isEmpty }
@@ -117,6 +117,10 @@ final class ScribblePreviewTests: XCTestCase {
             XCTAssertTrue(path.boundingBox.contains(ScribbleErase.bounds(of: points)!), "the outline goes round every stroke it will erase")
         }
 
+        // EP108: at the lift the outlined ink leaves the page with the outline, before PencilKit commits the stroke.
+        Self.lift(stroke, controller)
+        XCTAssertNil(controller.scribbleOutline.superlayer, "the outline goes at the lift")
+        XCTAssertTrue(controller.pageInkView(0)?.hidesScribbledInk ?? false, "and the ink it went round with it")
         Self.commit(page + [ScribbleEraseTests.liveScribble(stroke)], on: canvas, controller, undo: undo, drawn: true)
         await Self.settle()
         XCTAssertTrue(canvas.drawing.strokes.isEmpty)
@@ -228,19 +232,27 @@ final class ScribblePreviewTests: XCTestCase {
         XCTAssertNil(controller.scribbleOutline.superlayer, "the worksheet leaving")
     }
 
-    func testALiftedOutlineDoesNotOutstayAMissingCommit() async throws {
+    /// EP108: the lift hides the ink a scribble erases, ahead of PencilKit's commit. When the commit never comes, the
+    /// ink shows again and stays on the page.
+    func testInkHiddenAtTheLiftShowsAgainWithoutACommit() async throws {
         let (controller, canvas, undo) = try await makePage()
         let word = ScribbleFixtures.handwriting("mown", at: CGPoint(x: 120, y: 300))
         Self.commit(Self.strokes(word), on: canvas, controller, undo: undo)
         let box = ScribbleFixtures.box(word)
         let stroke = ScribbleFixtures.pencil(ScribbleFixtures.zigzag(from: box.minX - 3, to: box.maxX + 3, top: 296, bottom: 324, peaks: 6),
                                              speed: 900, seed: 9)
-        _ = await Self.draw(stroke, on: canvas, controller)
-        XCTAssertNotNil(controller.scribbleOutline.superlayer, "lifted, waiting for PencilKit's commit")
-        let gone = expectation(description: "outline expires")
+        let steps = await Self.draw(stroke, on: canvas, controller)
+        XCTAssertTrue(steps.contains(where: \.outlined), "outlined while drawn")
+        let pageView = try XCTUnwrap(controller.pageInkView(0))
+        XCTAssertNil(controller.scribbleOutline.superlayer, "lifted: the outline goes")
+        XCTAssertTrue(pageView.hidesScribbledInk, "lifted, waiting for PencilKit's commit: the ink it went round is hidden")
+        XCTAssertNotNil(controller.scribblePreview)
+        let gone = expectation(description: "the wait for the commit ends")
         DispatchQueue.main.asyncAfter(deadline: .now() + PDFOverlayPageController.scribbleCommitWait + 0.2) { gone.fulfill() }
         await fulfillment(of: [gone], timeout: 3)
+        XCTAssertFalse(pageView.hidesScribbledInk, "the ink shows again")
         XCTAssertNil(controller.scribbleOutline.superlayer)
+        XCTAssertNil(controller.scribblePreview)
         XCTAssertEqual(canvas.drawing.strokes.count, word.count, "nothing erased without a commit")
     }
 

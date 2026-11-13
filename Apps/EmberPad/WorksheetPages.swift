@@ -169,9 +169,16 @@ enum PageInkRotation {
 
     /// The ink on screen to the ink to store, the reverse of `displayed`.
     static func stored(_ drawing: PKDrawing, entry: PageEntry?, page: PDFPage?) -> PKDrawing {
-        guard let entry, entry.quarterTurns != 0, let page, !drawing.strokes.isEmpty else { return drawing }
+        guard let turn = storedTransform(entry: entry, page: page), !drawing.strokes.isEmpty else { return drawing }
+        return drawing.transformed(using: turn)
+    }
+
+    /// The turn `stored` gives the ink on screen for `entry` shown as `page`; nil when it leaves the ink as it is. Read
+    /// from the page on the main thread, so the ink itself can be turned elsewhere (EP108).
+    static func storedTransform(entry: PageEntry?, page: PDFPage?) -> CGAffineTransform? {
+        guard let entry, entry.quarterTurns != 0, let page else { return nil }
         // Turning the displayed page the rest of the way round brings it back to unturned.
-        return drawing.transformed(using: transform(quarterTurns: 4 - entry.quarterTurns, unturned: page.displayedSize))
+        return transform(quarterTurns: 4 - entry.quarterTurns, unturned: page.displayedSize)
     }
 
     /// Stored ink, keyed by page index, as it shows on `pdf`'s turned pages. For export and backup, which read ink
