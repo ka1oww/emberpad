@@ -43,11 +43,12 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
 
     /// A slow run loop, as on a loaded CI runner: PencilKit then commits a burst late, groups its strokes' undo steps
     /// out of order, makes some steps only after their strokes have landed, and leaves a step that changes nothing
-    /// for a stroke it threw away. Every undo step still takes exactly one stroke (EP98). Before EP98, at 2 ms one
-    /// step in about 120 took none, and at 6 ms whole bursts fell back to PencilKit's steps, which then took none.
+    /// for a stroke it threw away. Every undo step still takes exactly one stroke (EP98). Before EP98, at 2 ms on a
+    /// busy page one step in about 120 took none, and at 6 ms whole bursts fell back to PencilKit's steps, which then
+    /// took none, on a short page too (kept short, as the slowest case, so the CI shard stays well inside its limit).
     func testOnASlowRunLoopEachUndoStepStillTakesOneStroke() throws {
-        for stall in [0.002, 0.006] {
-            let page = try writingPage(baseStrokes: 1500)
+        for (stall, baseStrokes) in [(0.002, 1500), (0.006, 150)] {
+            let page = try writingPage(baseStrokes: baseStrokes)
             page.slowingEachTurn(by: stall) {
                 page.write(count: 120, gaps: [0.005, 0.01, 0.02, 0.05, 0.3])
                 page.settle()
@@ -180,6 +181,65 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         await InkSettle.settle()
         XCTAssertFalse(undo.canRedo, "the dropped step leaves no redo behind")
         Self.assertOneUndoStepPerStroke(canvas, undo, count: 2, "a step made late")
+    }
+
+    /// On a slow device PencilKit can make a stroke's undo step only after the stroke has landed with its own, and
+    /// that late step takes the stroke back. It is dropped, as the page goes idle or as the next strokes land, so
+    /// every tap of undo still takes one stroke (EP98).
+    func testALateStepThatTakesBackALandedStrokeIsDropped() async throws {
+        for nextStrokeFirst in [false, true] {
+            let (controller, session) = try await PenFeelTests.makeController()
+            let canvas = try PenFeelTests.canvas(controller, session)
+            let undo = Self.pencilKitUndo(for: controller)
+            let strokes = (0..<3).map { Self.liveStroke(y: 100 + CGFloat($0) * 60, at: $0) }
+            Self.pencilKitStep(undo, on: canvas, removing: [strokes[0]])
+            strokes[..<2].forEach { Self.commit($0, on: canvas, controller) }
+            await InkSettle.settle()
+            Self.pencilKitStep(undo, on: canvas, removing: [canvas.drawing.strokes[1]])
+            if nextStrokeFirst {
+                Self.pencilKitStep(undo, on: canvas, removing: [strokes[2]])
+                Self.commit(strokes[2], on: canvas, controller)
+            }
+            await InkSettle.settle()
+            let label = nextStrokeFirst ? "dropped as the next stroke lands" : "dropped as the page goes idle"
+            let count = nextStrokeFirst ? 3 : 2
+            XCTAssertEqual(canvas.drawing.strokes.map(\.ink.inkType), Array(repeating: .fountainPen, count: count), label)
+            XCTAssertEqual(session.drawing(on: 0).strokes.count, count, "\(label): every stroke is saved")
+            XCTAssertFalse(undo.canRedo, "\(label): the dropped step leaves no redo behind")
+            Self.assertOneUndoStepPerStroke(canvas, undo, count: count, label)
+        }
+    }
+
+    /// On a slow device PencilKit can take a stroke it has committed back off the page as it commits the next one,
+    /// outside undo, in a change of its own or in that commit's. The stroke goes back on the page with the pen feel,
+    /// as its own undo step, and the strokes after it land too (EP98). Before, none landed (all stayed in PencilKit's
+    /// ink, their undo steps taking nothing) and the stroke taken back was lost: the class's bracket on the CI runner.
+    func testAStrokePencilKitTakesBackGoesBackOnThePage() async throws {
+        for inTheNextCommit in [false, true] {
+            let (controller, session) = try await PenFeelTests.makeController()
+            let canvas = try PenFeelTests.canvas(controller, session)
+            let undo = Self.pencilKitUndo(for: controller)
+            let strokes = (0..<3).map { Self.liveStroke(y: 100 + CGFloat($0) * 60, at: $0) }
+            Self.pencilKitStep(undo, on: canvas, removing: [strokes[0]])
+            Self.commit(strokes[0], on: canvas, controller)
+            if !inTheNextCommit {
+                canvas.drawing = PKDrawing()
+                controller.canvasViewDrawingDidChange(canvas)
+            }
+            Self.pencilKitStep(undo, on: canvas, removing: [strokes[1]])
+            canvas.drawing = PKDrawing(strokes: [strokes[1]])
+            controller.canvasViewDrawingDidChange(canvas)
+            Self.pencilKitStep(undo, on: canvas, removing: [strokes[2]])
+            Self.commit(strokes[2], on: canvas, controller)
+            await InkSettle.settle()
+
+            let label = inTheNextCommit ? "taken back in the next commit" : "taken back on its own"
+            XCTAssertEqual(Set(canvas.drawing.strokes.map(\.path.creationDate)), Set(strokes.map(\.path.creationDate)),
+                           "\(label): every stroke is on the page")
+            XCTAssertEqual(canvas.drawing.strokes.map(\.ink.inkType), Array(repeating: .fountainPen, count: 3), label)
+            XCTAssertEqual(session.drawing(on: 0).strokes.count, 3, "\(label): and saved")
+            Self.assertOneUndoStepPerStroke(canvas, undo, count: 3, label)
+        }
     }
 
     /// The undo manager is the window's, shared by every page: a step for another page is never taken as one that
