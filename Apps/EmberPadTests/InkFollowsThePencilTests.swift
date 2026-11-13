@@ -95,6 +95,9 @@ final class InkFollowsThePencilTests: XCTestCase {
     /// From the lift until it lands, the stroke stays in the layer it was written in, never hidden, and that layer
     /// draws the lifted stroke, end tip and all. Before EP103 the stroke moved to another layer at the lift, hidden in
     /// one before the other had drawn it, so it vanished for a moment.
+    /// EP107: the stroke lands once the writing has paused (`InkLandingTiming.pause`); on CI the runner once stalled
+    /// for longer than that within two turns of the run loop, so it landed before it could be watched. The pause is
+    /// held open, as by writing that goes on, until the watch has seen the lifted stroke drawn over a few turns.
     func testALiftedStrokeKeepsItsLayerAndStaysDrawnUntilItLands() throws {
         let page = try page(baseStrokes: 0)
         let inkView = try XCTUnwrap(page.canvas.superview as? PageInkView)
@@ -108,14 +111,23 @@ final class InkFollowsThePencilTests: XCTestCase {
         let lifted = try XCTUnwrap(page.controller.livePen.stroke(id: id)).revision
         var drewLifted = false
         var turns = 0
-        let deadline = CACurrentMediaTime() + 3
+        var held = true
+        let deadline = CACurrentMediaTime() + 5
         while page.controller.livePen.stroke(id: id)?.committedAt == nil, CACurrentMediaTime() < deadline {
+            // However long the runner stalls, the pause cannot run out while held.
+            if held { page.controller.inkTiming.lastLift = CACurrentMediaTime() + 60 }
             let layer = inkView.livePenLayer(id: id)
             XCTAssertTrue(layer?.view === view, "the stroke keeps its own layer through the lift")
             XCTAssertFalse(view.isHidden, "and is never hidden before it lands")
             XCTAssertNotNil(layer?.drawnRevision, "its layer still shows it")
             if layer?.drawnRevision == lifted { drewLifted = true }
             turns += 1
+            if held, drewLifted, turns > 10 {
+                // The writing pauses.
+                held = false
+                page.controller.inkTiming.lastLift = CACurrentMediaTime() - InkLandingTiming.pause
+                page.controller.scheduleInkLanding()
+            }
             RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.002))
         }
         XCTAssertNotNil(page.controller.livePen.stroke(id: id)?.committedAt, "it landed")

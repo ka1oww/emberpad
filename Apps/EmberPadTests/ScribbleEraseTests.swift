@@ -299,7 +299,13 @@ final class ScribbleEraseTests: XCTestCase {
         canvas.drawing = PKDrawing(strokes: word)
         controller.canvasViewDrawingDidChange(canvas)
         canvas.undoManager?.removeAllActions()
+        // The page is on screen before the Pencil comes down, as it is for a person: PencilKit throws away a stroke
+        // begun within about a frame of its drawing being set (EP94), and a frame can take 135 ms on a CI runner.
+        PencilStroke.waitForFrames(2)
         let hold = try XCTUnwrap(PDFOverlayPageController.holdRecognizer(on: canvas))
+        var latched = false
+        let onHold = hold.onHold
+        hold.onHold = { latched = true; onHold?($0) }
 
         let space = canvas.pageSpace
         let corners = Self.zigzagCorners()
@@ -308,15 +314,65 @@ final class ScribbleEraseTests: XCTestCase {
         stroke.down(at: space.convert(corners[0], to: nil))
         for corner in corners.dropFirst() { stroke.move(to: space.convert(corner, to: nil), steps: 6) }
         stroke.lift()
-        let deadline = Date().addingTimeInterval(3)
-        while canvas.undoManager?.undoActionName != "Scribble to Erase", Date() < deadline { PencilStroke.turn(0.05) }
+        Self.waitForTheScribbleToLand(on: canvas, controller)
 
-        XCTAssertTrue(session.drawing(on: 0).strokes.isEmpty, "the word and the scribble are gone")
+        // What the stroke became, should it not erase, so a failure on CI says which way it went (EP107).
+        let outcome = "hold latched: \(latched); page: \(session.drawing(on: 0).strokes.count) strokes; "
+            + "canvas: \(canvas.drawing.strokes.count); top step: \(canvas.undoManager?.undoActionName ?? "none")"
+        XCTAssertTrue(session.drawing(on: 0).strokes.isEmpty, "the word and the scribble are gone (\(outcome))")
         XCTAssertTrue(canvas.drawing.strokes.isEmpty)
-        XCTAssertEqual(canvas.undoManager?.undoActionName, "Scribble to Erase")
+        XCTAssertEqual(canvas.undoManager?.undoActionName, "Scribble to Erase", outcome)
         canvas.undoManager?.undo()
         XCTAssertEqual(session.drawing(on: 0).strokes.count, word.count, "one undo brings the word back, without the scribble")
         XCTAssertFalse(canvas.undoManager?.canUndo ?? true, "and that was the only step")
+    }
+
+    /// A main thread that stalls for longer than a hold while the Pencil goes on scribbling (a busy iPad, a loaded CI
+    /// runner) fires the hold's timer late, before the touches made meanwhile come in. That is not a hold: the scribble
+    /// still erases the word, and is never snapped into a straight line along its first stretch (EP107).
+    func testAStallWhileScribblingIsNotTakenForAHold() throws {
+        let tools = makeTools()
+        let session = try makeSession()
+        let controller = try host(session, tools: tools)
+        let canvas = try XCTUnwrap(controller.canvases[0])
+        let window = try XCTUnwrap(canvas.window)
+        let word = Self.word(at: CGPoint(x: 100, y: 300)).map { Self.penStroke($0) }
+        canvas.drawing = PKDrawing(strokes: word)
+        controller.canvasViewDrawingDidChange(canvas)
+        canvas.undoManager?.removeAllActions()
+        PencilStroke.waitForFrames(2)
+        let hold = try XCTUnwrap(PDFOverlayPageController.holdRecognizer(on: canvas))
+        var latched = false
+        let onHold = hold.onHold
+        hold.onHold = { latched = true; onHold?($0) }
+
+        let space = canvas.pageSpace
+        let corners = Self.zigzagCorners()
+        var stroke = PencilStroke(window: window, view: canvas,
+                                  recognizers: [canvas.drawingGestureRecognizer, controller.liveInk, hold], asksDelegates: true)
+        stroke.down(at: space.convert(corners[0], to: nil))
+        stroke.move(to: space.convert(corners[1], to: nil), steps: 6)
+        // The main thread stalls past a hold on the first straight stretch; the late timer then fires first.
+        Thread.sleep(forTimeInterval: HoldTracker.duration + 0.2)
+        PencilStroke.turn(0.001)
+        for corner in corners.dropFirst(2) { stroke.move(to: space.convert(corner, to: nil), steps: 6) }
+        stroke.lift()
+        Self.waitForTheScribbleToLand(on: canvas, controller)
+
+        XCTAssertFalse(latched, "a stall is not a hold")
+        XCTAssertEqual(canvas.undoManager?.undoActionName, "Scribble to Erase", "the scribble erases, never a straight line")
+        XCTAssertTrue(session.drawing(on: 0).strokes.isEmpty, "the word and the scribble are gone")
+        XCTAssertTrue(canvas.drawing.strokes.isEmpty)
+    }
+
+    /// Turns the run loop until a scribble's erase has landed, or nothing is left to land, however slow the runner:
+    /// PencilKit's commit and the landing's frame both come later on a loaded one.
+    private static func waitForTheScribbleToLand(on canvas: PKCanvasView, _ controller: PDFOverlayPageController,
+                                                 timeout: TimeInterval = 10) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while canvas.undoManager?.undoActionName != "Scribble to Erase" || controller.hasPendingInk, Date() < deadline {
+            PencilStroke.turn(0.05)
+        }
     }
 
     // MARK: - Fixtures: shapes

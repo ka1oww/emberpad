@@ -1,3 +1,4 @@
+import PDFKit
 import SwiftUI
 import XCTest
 import UIKit
@@ -79,7 +80,18 @@ final class DocumentTransitionTests: XCTestCase {
     /// The editor's own part of the open, without the library's cover: the bars stand where they settle from the first
     /// frame while the page grows in from the centre once it has loaded. The first editor of a launch starts PencilKit
     /// and PDFKit and is too slow to zoom (it just appears, as GoodNotes' slow page does), so the worksheet is opened
-    /// and closed once first, and the zoom is watched on its second open.
+    /// and closed once first, and the zoom is watched on a later open.
+    ///
+    /// EP107: the zoom is what is left of the 0.22 s entrance once the page has loaded, about 0.1 s here, and window
+    /// snapshots take 40 to 75 ms, so a fixed run of them caught one frame of it at best. The page area is now read as
+    /// it is drawn, from the presentation layers (the zoom runs in the render server), every few milliseconds, and one
+    /// snapshot is taken while it is part of the way in. The bars are everything above the page area, measured: the
+    /// old fixed 120 points took in the page area's top (it starts at about 92 since the tool palette floats), so no
+    /// frame of a zoom could pass. A page that loads too late to zoom just appears, by design
+    /// (`DocumentTransition.shortestPageZoom`), as it can on a loaded runner; up to three opens are watched for one
+    /// that zooms. On the CI runner the page loads too late on every open (EP107), so the watched opens stretch the
+    /// entrance (`DocumentTransition.entranceStretch`): the page zooms the same way, only slower, and its timing is
+    /// checked by `testOpenZoomsThePageFromTheCentreAndFadesTheBarsIn`.
     func testThePageZoomsInFromTheCentreOnceItHasLoaded() async throws {
         let (library, window, navigator) = try await hostLibrary(reduceMotion: false)
         try await goToTutorial(library)
@@ -88,21 +100,66 @@ final class DocumentTransitionTests: XCTestCase {
         await pause(1.0)
         close(navigator, in: window, reduceMotion: false)
         await pause(1.0)
-        try open("Synthetic Sheet 6", library, navigator, reduceMotion: false)
-        var openFrames: [UIImage] = []
-        for _ in 0..<40 {
-            await pause(0.012)
-            openFrames.append(snapshot(window))
+        DocumentTransition.entranceStretch = 4
+        defer { DocumentTransition.entranceStretch = 1 }
+        for _ in 0..<3 {
+            try open("Synthetic Sheet 6", library, navigator, reduceMotion: false)
+            var drawn: [(rect: CGRect, opacity: Float)] = []
+            var midway: UIImage?
+            let watchUntil = CACurrentMediaTime() + DocumentTransition.openPageEntrance + 0.6
+            while CACurrentMediaTime() < watchUntil {
+                await pause(0.004)
+                guard let shown = Self.drawnPageArea(in: window) else { continue }
+                drawn.append(shown)
+                if midway == nil, shown.opacity > 0.15, shown.opacity < 0.85 { midway = snapshot(window, scale: 1) }
+            }
+            await pause(1.0)
+            let pageArea = try XCTUnwrap(Self.pdfView(in: window), "the page area")
+            let settled = pageArea.convert(pageArea.bounds, to: nil)
+            let entering = drawn.filter { $0.opacity > 0.01 && ($0.opacity < 0.99 || $0.rect.width < settled.width - 1) }
+            guard !entering.isEmpty else {
+                // It just appeared: it loaded too late to zoom.
+                close(navigator, in: window, reduceMotion: false)
+                await pause(1.0)
+                continue
+            }
+            let growing = entering.filter {
+                $0.rect.width < settled.width - 1 && $0.rect.width >= settled.width * DocumentTransition.openPageScale - 1
+                    && abs($0.rect.midX - settled.midX) < 1 && abs($0.rect.midY - settled.midY) < 1
+            }
+            XCTAssertFalse(growing.isEmpty, "the page grows in from the centre, from about half size: \(entering)")
+            let first = try XCTUnwrap(entering.first)
+            XCTAssertLessThan(first.rect.width, settled.width * 0.9, "it starts small, not at its full size")
+            let snapshot = try XCTUnwrap(midway, "a snapshot part of the way in: \(entering)")
+            let opened = self.snapshot(window, scale: 1)
+            let bars = CGRect(x: 0, y: 0, width: window.bounds.width, height: settled.minY)
+            let page = CGRect(x: 0, y: 160, width: window.bounds.width, height: window.bounds.height - 260)
+            XCTAssertGreaterThan(settled.minY, 40, "the page area starts below the bars")
+            XCTAssertLessThan(difference(snapshot, opened, in: bars), 0.002, "the bars are already in place")
+            XCTAssertGreaterThan(difference(snapshot, opened, in: page), 0.01, "while the page is still growing in")
+            return
         }
-        await pause(1.0)
-        let opened = snapshot(window)
-        let bars = CGRect(x: 0, y: 0, width: window.bounds.width, height: 120)
-        let page = CGRect(x: 0, y: 160, width: window.bounds.width, height: window.bounds.height - 260)
-        let zooming = openFrames.filter {
-            difference($0, opened, in: bars) < 0.002 && difference($0, opened, in: page) > 0.01
-                && difference($0, openFrames[0], in: page) > 0.01
+        XCTFail("the page just appeared on three opens: too slow to zoom on this runner")
+    }
+
+    /// The page area as the screen draws it now, in window coordinates, with its opacity, from the presentation
+    /// layers; nil before the editor has one.
+    private static func drawnPageArea(in window: UIWindow) -> (rect: CGRect, opacity: Float)? {
+        guard let pdf = pdfView(in: window), let layer = pdf.layer.presentation(),
+              let root = window.layer.presentation() else { return nil }
+        var opacity: Float = 1
+        var node: CALayer? = pdf.layer
+        while let current = node {
+            opacity *= (current.presentation() ?? current).opacity
+            node = current.superlayer
         }
-        XCTAssertFalse(zooming.isEmpty, "the page grows in under bars that are already in place")
+        return (layer.convert(layer.bounds, to: root), opacity)
+    }
+
+    private static func pdfView(in view: UIView) -> PDFView? {
+        if let pdf = view as? PDFView { return pdf }
+        for subview in view.subviews { if let pdf = pdfView(in: subview) { return pdf } }
+        return nil
     }
 
     /// The PR's frame strip: open and close sampled every 40 ms. Written to `EP87_SHOTS_DIR` when the test runner has it
@@ -320,9 +377,12 @@ final class DocumentTransitionTests: XCTestCase {
         try? await Task.sleep(for: .seconds(seconds))
     }
 
-    /// What is on screen now, including a move in progress.
-    private func snapshot(_ window: UIWindow) -> UIImage {
-        UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+    /// What is on screen now, including a move in progress; at `scale` (the screen's by default), as a lower one is
+    /// quicker to take.
+    private func snapshot(_ window: UIWindow, scale: CGFloat? = nil) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.preferred()
+        if let scale { format.scale = scale }
+        return UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
         }
     }

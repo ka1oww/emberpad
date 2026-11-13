@@ -71,8 +71,14 @@ struct LibraryView: View {
                                      toggleSidebar: { navigator.columns.toggleSidebar() },
                                      animatesEntrance: navigator.openedFromCard,
                                      onClose: { pageFrame in navigator.close(pageFrame: pageFrame, reduceMotion: reduceMotion) })
-                            .onAppear { navigator.columns.worksheetOpened() }
-                            .onDisappear { navigator.columns.worksheetClosed() }
+                            .onAppear {
+                                navigator.columns.worksheetOpened()
+                                navigator.editorSwitched()
+                            }
+                            .onDisappear {
+                                navigator.columns.worksheetClosed()
+                                navigator.editorSwitched()
+                            }
                     }
             }
         }
@@ -508,6 +514,8 @@ final class WorksheetNavigator {
     var columns = LibraryColumnState()
     /// Covers the leaving screen while the transition plays.
     @ObservationIgnored let cover = DocumentTransitionCover()
+    /// Whether a switch is keeping UIKit animations off until it has reached UIKit.
+    @ObservationIgnored private var holdingAnimations = false
 
     /// A card tap. The editor is pushed in this same update, without the slide, so it starts loading exactly as soon
     /// as a push did.
@@ -541,13 +549,27 @@ final class WorksheetNavigator {
 
     /// Makes `change` without the navigation slide or the sidebar's slide. SwiftUI's `disablesAnimations` alone does
     /// not reach the UIKit navigation controller every time, so UIKit animations are also off until the change has
-    /// been applied. The covers' fades were added before, so they still run.
+    /// reached UIKit: until the editor has appeared or gone (`editorSwitched`). Both callers change `openWorksheet`, so
+    /// it always does, however long the editor takes to load. The covers' fades were added before, so they still run.
     private func switchInstantly(_ change: () -> Void) {
         var instant = Transaction()
         instant.disablesAnimations = true
         UIView.setAnimationsEnabled(false)
+        holdingAnimations = true
         withTransaction(instant, change)
-        DispatchQueue.main.async { UIView.setAnimationsEnabled(true) }
+    }
+
+    /// The editor appeared (on open) or went (on close), so the switch has reached UIKit. SwiftUI can hand a switch to
+    /// UIKit a frame after it was made, and the main queue can turn in between: animations turned back on at that turn
+    /// let UIKit slide the editor in and the sidebar away, past the cover and over the zooming page (EP107: about one
+    /// open in five in the hosted tests). The sidebar is hidden or shown in the same update as the editor appears or
+    /// goes, so animations come back on at the main queue's next turn.
+    func editorSwitched() {
+        guard holdingAnimations else { return }
+        DispatchQueue.main.async {
+            self.holdingAnimations = false
+            UIView.setAnimationsEnabled(true)
+        }
     }
 }
 

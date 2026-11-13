@@ -99,4 +99,21 @@ struct PencilStroke {
     }
 
     static func turn(_ seconds: TimeInterval = 0.016) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+
+    /// Turns the run loop until the display has drawn `count` more frames, however long each takes (on a loaded CI
+    /// runner a frame can take 135 ms), or `timeout` passes.
+    static func waitForFrames(_ count: Int, timeout: TimeInterval = 5) {
+        let frames = DisplayFrames()
+        let link = CADisplayLink(target: frames, selector: #selector(DisplayFrames.frame))
+        link.add(to: .main, forMode: .common)
+        defer { link.invalidate() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while frames.count < count, Date() < deadline { turn(0.005) }
+    }
+}
+
+/// Counts the display's frames for `PencilStroke.waitForFrames`.
+private final class DisplayFrames: NSObject {
+    var count = 0
+    @objc func frame(_ link: CADisplayLink) { count += 1 }
 }

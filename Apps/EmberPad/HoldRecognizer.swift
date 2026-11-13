@@ -92,6 +92,10 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     private weak var touch: UITouch?
     private var tracker: HoldTracker?
     private var timer: Timer?
+    /// When `timer` was due to fire, in `systemUptime`.
+    private var timerDue: TimeInterval = 0
+    /// The timer fired late and is giving the touches that came in meanwhile a turn to arrive (EP107).
+    private var waitingOutStall = false
 
     init() {
         super.init(target: nil, action: nil)
@@ -135,6 +139,7 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         heldAtEnd = false
         pencilStroke = true
         wasCancelled = false
+        waitingOutStall = false
         schedule(after: HoldTracker.duration)
     }
 
@@ -197,12 +202,27 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+        timerDue = ProcessInfo.processInfo.systemUptime + interval
     }
+
+    /// How late the timer may fire before the main thread counts as having stalled.
+    static let stallSlack: TimeInterval = 0.1
+    /// How long a late timer waits for the touches that came in during the stall.
+    static let stallCatchUp: TimeInterval = 0.05
 
     private func timerFired() {
         timer = nil
         guard touch != nil, var tracker else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        // EP107: a timer that fires long after it was due ran on a main thread that had stalled, and the touches the
+        // Pencil made meanwhile are still queued behind it. Checking now would take the stroke as still since the
+        // last touch before the stall: a scribble stalled on its first straight stretch became a held straight
+        // line. So the touches come in first, once; a Pencil really held still sends none, and latches then.
+        if now - timerDue > Self.stallSlack, !waitingOutStall {
+            waitingOutStall = true
+            return schedule(after: Self.stallCatchUp)
+        }
+        waitingOutStall = false
         if tracker.check(at: now) {
             self.tracker = tracker
             latch()

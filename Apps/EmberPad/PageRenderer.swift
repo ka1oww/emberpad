@@ -372,7 +372,7 @@ struct EditorScreen: View {
             if pageContentReady { enterPage(); return }
             // A page still loading when the entrance would have ended shows its progress as it always did.
             try? await Task.sleep(for: .seconds(reduceMotion ? DocumentTransition.reduceMotionDuration
-                                                           : DocumentTransition.openPageDuration))
+                                                           : DocumentTransition.openPageEntrance))
             enterPage()
         }
         .onChange(of: pageContentReady) { _, ready in if ready, entranceStartedAt > 0 { enterPage() } }
