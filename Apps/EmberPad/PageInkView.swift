@@ -272,7 +272,7 @@ final class PageInkView: UIView {
         // EP108: a handover still waiting is given its full patience again. PencilKit leaves the page as it is while it
         // draws a stroke, so strokes that landed as the Pencil came down are redrawn only after that stroke's commit.
         if !handovers.isEmpty { handoverStarted = CACurrentMediaTime() }
-        if scribbleCutsLanded != nil { scribbleCutsLanded?.since = CACurrentMediaTime() }
+        for index in scribbleCuts.indices where scribbleCuts[index].landed != nil { scribbleCuts[index].landed?.since = CACurrentMediaTime() }
     }
 
     /// The page's tiles now, before a change to its drawing.
@@ -336,7 +336,7 @@ final class PageInkView: UIView {
         }
         if CACurrentMediaTime() - handoverStarted > Self.handoverPatience { handovers = [:] }
         checkScribbleCuts()
-        if handovers.isEmpty, scribbleCutsLanded == nil {
+        if handovers.isEmpty, !scribbleCutLanded {
             handoverWatch?.stop()
             handoverWatch = nil
         }
@@ -360,13 +360,14 @@ final class PageInkView: UIView {
         /// What the lines cover, in page points.
         let bounds: CGRect
         let generation: Int
+        /// Once this scribble's erase has landed: the tiles' seeds before it did, whether the page was idle then, and
+        /// when it landed or the page's drawing last changed.
+        var landed: (seeds: [ObjectIdentifier: UInt32], idle: Bool, since: CFTimeInterval)?
     }
 
     private var scribbleCuts: [ScribbleCut] = []
     private var scribbleCutGeneration = 0
-    /// Once the cuts' erase has landed: the tiles' seeds before it did, whether the page was idle then, and when it
-    /// landed or the page's drawing last changed.
-    private var scribbleCutsLanded: (seeds: [ObjectIdentifier: UInt32], idle: Bool, since: CFTimeInterval)?
+    private var scribbleCutLanded: Bool { scribbleCuts.contains { $0.landed != nil } }
     /// The cuts drawn once for every change to them, over `frame` in page points: clear where ink is cut, opaque
     /// elsewhere.
     private var scribbleCutPicture: (image: CGImage, frame: CGRect)?
@@ -392,9 +393,8 @@ final class PageInkView: UIView {
         let bounds = lines.reduce(CGRect.null) { $0.union($1.path.boundingBoxOfPath.insetBy(dx: -$1.width / 2, dy: -$1.width / 2)) }
         scribbleCuts.append(ScribbleCut(scribble: scribble, strokes: Set(strokes.map(InkStrokeID.init)), lines: lines,
                                         bounds: bounds, generation: generation))
-        scribbleCutsLanded = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.scribbleCutPatience) { [weak self] in
-            guard let self, self.scribbleCutsLanded == nil, self.scribbleCuts.contains(where: { $0.generation == generation }) else { return }
+            guard let self, self.scribbleCuts.contains(where: { $0.generation == generation && $0.landed == nil }) else { return }
             self.showScribbledInk(scribble: scribble)
         }
         if let scribble, let layer = livePenLayers.first(where: { $0.id == scribble }) {
@@ -411,27 +411,34 @@ final class PageInkView: UIView {
         guard !shown.isEmpty else { return }
         scribbleCuts.removeAll { $0.scribble == scribble }
         if let scribble, let layer = livePenLayers.first(where: { $0.id == scribble }) { layer.view.isHidden = false }
-        if scribbleCuts.isEmpty { scribbleCutsLanded = nil }
         drawScribbleCuts()
     }
 
-    /// The page's queued ink edits have just landed, and its strokes are now `strokes`; its tiles were `tiles` before.
-    /// A cut whose strokes are all off the page leaves each tile as the page redraws it; one whose strokes are still
-    /// on it was not erased, and shows again at once. While the page was still drawing an earlier change, the cuts wait
-    /// for the page's report instead.
-    func scribbledInkLanded(on strokes: [PKStroke], since tiles: PageTiles) {
-        guard !scribbleCuts.isEmpty else { return }
+    /// The page's queued ink edits, among them the scribbles with live strokes `scribbles`, have just landed, and its
+    /// strokes are now `strokes`; its tiles were `tiles` before. Of the cuts, only those of the scribbles that landed
+    /// are judged: one whose strokes are all off the page leaves each tile as the page redraws it; one whose strokes
+    /// are still on it was not erased, and shows again at once. The rest stay as they are. While the page was still
+    /// drawing an earlier change, the cuts wait for the page's report instead.
+    func scribbledInkLanded(scribbles: Set<UInt64>, on strokes: [PKStroke], since tiles: PageTiles) {
+        let judged = scribbleCuts.filter { $0.landed == nil && ($0.scribble.map(scribbles.contains) ?? true) }
+        guard !judged.isEmpty else { return }
         let onPage = Set(strokes.map(InkStrokeID.init))
-        for cut in scribbleCuts where !cut.strokes.isDisjoint(with: onPage) { showScribbledInk(scribble: cut.scribble) }
-        guard !scribbleCuts.isEmpty else { return }
-        scribbleCutsLanded = (tiles.seeds, tiles.idle && !tiles.seeds.isEmpty, CACurrentMediaTime())
+        let landed = (seeds: tiles.seeds, idle: tiles.idle && !tiles.seeds.isEmpty, since: CACurrentMediaTime())
+        for cut in judged {
+            if !cut.strokes.isDisjoint(with: onPage) {
+                showScribbledInk(scribble: cut.scribble)
+            } else if let index = scribbleCuts.firstIndex(where: { $0.generation == cut.generation }) {
+                scribbleCuts[index].landed = landed
+            }
+        }
+        guard scribbleCutLanded else { return }
         if handoverWatch == nil { handoverWatch = HandoverWatch(self) }
         checkScribbleCuts()
     }
 
     /// PencilKit reports the page drawn: a landed erase is on screen everywhere.
     func pageDidFinishRendering() {
-        guard scribbleCutsLanded != nil else { return }
+        guard scribbleCutLanded else { return }
         releaseScribbleCuts()
     }
 
@@ -439,26 +446,42 @@ final class PageInkView: UIView {
     /// still to land is cut again for the new zoom.
     private func scribbleCutsDidChangeZoom() {
         guard !scribbleCuts.isEmpty else { return }
-        if scribbleCutsLanded != nil { releaseScribbleCuts() } else { drawScribbleCuts() }
+        releaseScribbleCuts()
     }
 
-    /// Takes a landed erase's cut off every tile the page has redrawn since, and off the page once none is left.
+    /// Takes each landed erase's cut off every tile the page has redrawn since, and off the page once none is left.
+    /// A tile under a cut still to land stays cut.
     private func checkScribbleCuts() {
-        guard let landed = scribbleCutsLanded else { return }
-        guard CACurrentMediaTime() - landed.since <= Self.handoverPatience else { return releaseScribbleCuts() }
-        // While the page was still drawing an earlier change, a tile redrawn next may not have the erase yet.
-        guard landed.idle, let frame = scribbleCutPicture?.frame else { return }
-        // A tile counts once it has been redrawn since the erase landed. Where no tile is left, nothing is drawn.
-        let pending = tileLayers().filter { tile in
-            tile.frame.intersects(frame) && landed.seeds[ObjectIdentifier(tile.layer)].map { $0 == tile.seed } ?? true
+        guard scribbleCutLanded else { return }
+        let now = CACurrentMediaTime()
+        let tiles = tileLayers()
+        func pending(_ cut: ScribbleCut) -> [CGRect]? {
+            guard let landed = cut.landed else { return nil }
+            // While the page was still drawing an earlier change, a tile redrawn next may not have the erase yet.
+            return tiles.filter { tile in
+                tile.frame.intersects(cut.bounds) && (!landed.idle || landed.seeds[ObjectIdentifier(tile.layer)].map { $0 == tile.seed } ?? true)
+            }.map(\.frame)
         }
-        guard !pending.isEmpty else { return releaseScribbleCuts() }
-        maskScribbleCuts(pending: pending.map(\.frame))
+        // A tile counts once it has been redrawn since the erase landed. Where no tile is left, nothing is drawn.
+        let finished = scribbleCuts.filter { cut in
+            guard let landed = cut.landed else { return false }
+            return now - landed.since > Self.handoverPatience || landed.idle && pending(cut)?.isEmpty == true
+        }
+        if !finished.isEmpty {
+            let generations = Set(finished.map(\.generation))
+            scribbleCuts.removeAll { generations.contains($0.generation) }
+            drawScribbleCuts()
+        }
+        guard scribbleCutLanded else { return }
+        let waiting = scribbleCuts.flatMap { cut in
+            cut.landed?.idle == true ? pending(cut) ?? [] : [cut.bounds]
+        }
+        maskScribbleCuts(pending: waiting)
     }
 
+    /// Lets go of every cut whose erase has landed, and keeps those still to land.
     private func releaseScribbleCuts() {
-        scribbleCuts = []
-        scribbleCutsLanded = nil
+        scribbleCuts.removeAll { $0.landed != nil }
         drawScribbleCuts()
     }
 

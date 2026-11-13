@@ -1642,7 +1642,8 @@ extension PDFOverlayPageController {
             // EP108: ink a scribble hid from its lift is erased now, or shows again. Before the handover, so a scribble
             // that stayed as ink is handed over from its own layer.
             if let pageView, pageView.hidesScribbledInk, let tiles, let canvas = canvases[page] {
-                pageView.scribbledInkLanded(on: canvas.drawing.strokes, since: tiles)
+                let scribbles = Set(edits.filter { $0.page == page }.flatMap { [$0.liveID, $0.scribblePreview?.liveID] }.compactMap { $0 })
+                pageView.scribbledInkLanded(scribbles: scribbles, on: canvas.drawing.strokes, since: tiles)
             }
             var landed: [UInt64] = []
             for id in edits.lazy.filter({ $0.page == page }).compactMap(\.liveID) where livePen.stroke(id: id) != nil {
