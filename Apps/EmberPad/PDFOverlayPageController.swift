@@ -323,6 +323,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
+        (canvasView.superview as? PageInkView)?.pageDrawingDidChange()
         scribbleRevisions[page, default: 0] += 1
         guard !isReplacingStroke else { return }
         // EP94: a change to the drawing lands only on a later display frame than this.
@@ -754,8 +755,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// Draws the live pen's strokes on `page` above its committed ink.
     private func showLivePen(page: Int) {
         guard let view = canvases[page]?.superview as? PageInkView else { return }
-        view.showLivePen(liftedIDs: livePen.liftedIDs(page: page), lifted: { self.livePen.liftedDrawing(page: page) },
-                         writing: livePen.writingDrawing(page: page))
+        view.showLivePen(livePen.shown(page: page)) { livePen.stroke(id: $0)?.shaped }
     }
 
     /// Clears live strokes whose commit or page drawing never came, once they are due.
@@ -1597,11 +1597,22 @@ extension PDFOverlayPageController {
         let now = livePenClock()
         let pages = Set(edits.map(\.page)).union(recovered.map(\.page)).union(restore)
         for page in pages.sorted() {
+            let pageView = canvases[page]?.superview as? PageInkView
+            // EP103: the page's tiles before the swap, so the live strokes it lands are handed over as it redraws them.
+            let tiles = pageView?.pageTiles()
             land(edits.filter { $0.page == page }, recovered: recovered.filter { $0.page == page }, page: page,
                  restoringClearInk: restore.contains(page))
-            for id in edits.lazy.filter({ $0.page == page }).compactMap(\.liveID) { livePen.landed(id: id, now: now) }
-            for item in recovered where item.page == page { livePen.landed(id: item.liveID, now: now) }
+            var landed: [UInt64] = []
+            for id in edits.lazy.filter({ $0.page == page }).compactMap(\.liveID) where livePen.stroke(id: id) != nil {
+                livePen.landed(id: id, now: now)
+                landed.append(id)
+            }
+            for item in recovered where item.page == page && livePen.stroke(id: item.liveID) != nil {
+                livePen.landed(id: item.liveID, now: now)
+                landed.append(item.liveID)
+            }
             showLivePen(page: page)
+            if let pageView, let tiles { pageView.handOver(landed, since: tiles) }
         }
         for edit in edits {
             if let preview = edit.scribblePreview, scribblePreview === preview { clearScribblePreview() }

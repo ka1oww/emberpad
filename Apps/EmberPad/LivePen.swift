@@ -34,6 +34,9 @@ struct LivePenStrokes {
         fileprivate(set) var liftedShape: PKStroke?
         /// Draw and hold latched a straight line (EP96): from then on the stroke is drawn, and lifted, as that line.
         fileprivate(set) var line: HeldLine?
+        /// Goes up whenever the stroke's drawn shape changes (a Pencil move, the hold latching, the lift), so its
+        /// layer is given a new drawing only then (EP103).
+        fileprivate(set) var revision = 0
 
         var isLifted: Bool { liftedAt != nil }
         /// Neither owed nor waiting on PencilKit's stroke for the same touch.
@@ -101,6 +104,7 @@ struct LivePenStrokes {
         guard let index = strokes.lastIndex(where: { $0.liftedAt == nil }), strokes[index].page == page,
               let line = HeldLine(samples: strokes[index].samples) else { return false }
         strokes[index].line = line
+        strokes[index].revision += 1
         return true
     }
 
@@ -108,6 +112,7 @@ struct LivePenStrokes {
         guard let index = strokes.lastIndex(where: { $0.liftedAt == nil }) else { return }
         strokes[index].samples += samples
         strokes[index].predicted = predicted
+        strokes[index].revision += 1
     }
 
     mutating func lift(samples: [LiveInkSample], now: TimeInterval) {
@@ -116,6 +121,7 @@ struct LivePenStrokes {
             strokes[index].predicted = []
             strokes[index].liftedAt = now
             strokes[index].liftedShape = strokes[index].stroke(lifted: true)
+            strokes[index].revision += 1
         }
     }
 
@@ -219,15 +225,16 @@ struct LivePenStrokes {
         PKDrawing(strokes: strokes.filter { $0.page == page }.compactMap(\.shaped))
     }
 
-    /// The lifted strokes on `page`, oldest first: they change only on a lift or when strokes leave, not on every
-    /// Pencil move, so their layer is redrawn only then (EP94).
-    func liftedIDs(page: Int) -> [UInt64] { strokes.filter { $0.page == page && $0.isLifted }.map(\.id) }
-    func liftedDrawing(page: Int) -> PKDrawing {
-        PKDrawing(strokes: strokes.filter { $0.page == page && $0.isLifted }.compactMap(\.liftedShape))
+    /// A live stroke as its layer shows it: which stroke, and which revision of its shape.
+    struct Shown: Equatable {
+        let id: UInt64
+        let revision: Int
     }
-    /// The stroke being written on `page`, if any.
-    func writingDrawing(page: Int) -> PKDrawing {
-        PKDrawing(strokes: strokes.filter { $0.page == page && !$0.isLifted }.compactMap(\.shaped))
+
+    /// The live strokes on `page`, oldest first. Each has a layer of its own (EP103), redrawn only when its revision
+    /// changes: a lifted stroke's never does, so a long burst of writing does not redraw the waiting strokes (EP94).
+    func shown(page: Int) -> [Shown] {
+        strokes.filter { $0.page == page }.map { Shown(id: $0.id, revision: $0.revision) }
     }
 
     /// The pages that have live ink.
