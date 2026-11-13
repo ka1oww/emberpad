@@ -4,8 +4,8 @@ import XCTest
 
 /// EP100, EP101: the tool palette floats over the page against the top, bottom, left or right edge of the worksheet,
 /// as GoodNotes 6's Writing Tools menu does. These cover the pure rules: which edge a drop snaps to, where along it the
-/// palette lands and how it fits, that the finger's hold can never be prevented, and that the place is stored with the
-/// other tool settings.
+/// palette lands and how it fits, that a finger carries it with no hold (EP102) and its drag can never be prevented,
+/// and that the place is stored with the other tool settings.
 @MainActor
 final class ToolbarDockTests: XCTestCase {
     /// An iPad landscape worksheet below the header.
@@ -244,26 +244,93 @@ final class ToolbarDockTests: XCTestCase {
         XCTAssertEqual(tools.current, .eraser)
     }
 
-    // MARK: The finger's hold
+    // MARK: The finger's drag
 
-    /// Only a finger picks the row up, after a short hold; Apple Pencil never does, so it keeps writing.
-    func testOnlyAFingerHeldOnTheRowPicksItUp() {
+    /// EP102: only a finger carries the palette, and it needs no hold: a drag of a few points picks it up, as in
+    /// GoodNotes 6, while a tap's drift does not. Apple Pencil never does, so it keeps writing.
+    func testOnlyAFingerCarriesThePaletteAndNeedsNoHold() {
         let drag = ToolbarDragRecognizer()
         XCTAssertEqual(drag.allowedTouchTypes, [NSNumber(value: UITouch.TouchType.direct.rawValue)])
         XCTAssertFalse(drag.allowedTouchTypes.contains(NSNumber(value: UITouch.TouchType.pencil.rawValue)))
-        XCTAssertEqual(drag.minimumPressDuration, ToolbarDockDrag.holdDuration)
-        XCTAssertEqual(drag.allowableMovement, ToolbarDockDrag.holdSlop)
+        XCTAssertFalse((drag as UIGestureRecognizer) is UILongPressGestureRecognizer, "no hold before the drag")
+        XCTAssertGreaterThanOrEqual(ToolbarDockDrag.startSlop, 4, "a tap's drift is still a tap on a tool")
+        XCTAssertLessThanOrEqual(ToolbarDockDrag.startSlop, 8, "a short drag already carries it")
         XCTAssertGreaterThanOrEqual(ToolbarDockDrag.holdDuration, 0.25, "a tap on a tool is never a pick-up")
     }
 
-    /// EP101: SwiftUI's touch recogniser begins as soon as a finger lands on a tool, and a hold that it may prevent
-    /// fails at once (the iPad bug). No other recogniser may prevent the hold either.
-    func testNothingCanPreventTheHold() {
+    /// EP101: SwiftUI's touch recogniser begins as soon as a finger lands on a tool, and a drag that it may prevent
+    /// fails at once (the iPad bug). No other recogniser may prevent the drag either.
+    func testNothingCanPreventTheDrag() {
         let drag = ToolbarDragRecognizer()
-        let began = UILongPressGestureRecognizer()
-        XCTAssertFalse(drag.canBePrevented(by: began))
+        XCTAssertFalse(drag.canBePrevented(by: UILongPressGestureRecognizer()))
         XCTAssertFalse(drag.canBePrevented(by: UIPanGestureRecognizer()))
         XCTAssertFalse(drag.canBePrevented(by: UITapGestureRecognizer()))
+    }
+
+    /// EP102: the palette itself is carried, moved exactly by the finger's travel, and lifted about the point the
+    /// finger holds, so the tool the finger landed on stays under it.
+    func testTheCarriedPaletteKeepsTheHeldToolUnderTheFinger() {
+        let carry = ToolbarCarry()
+        let palette = CGRect(x: 230, y: 84, width: 733, height: 48)
+        let eraser = CGPoint(x: 300, y: 108)
+        carry.pickUp(at: eraser, palette: palette, finger: CGPoint(x: 306, y: 108))
+        XCTAssertEqual(carry.translation, CGSize(width: 6, height: 0), "it catches up with the finger as it picks up")
+        XCTAssertEqual(carry.anchor.x, (300 - 230) / 733, accuracy: 0.0001)
+        XCTAssertEqual(carry.anchor.y, 0.5, accuracy: 0.0001)
+        for finger in [CGPoint(x: 420, y: 500), CGPoint(x: 1100, y: 700), CGPoint(x: -20, y: 30)] {
+            carry.follow(finger)
+            XCTAssertEqual(carry.translation.width, finger.x - eraser.x, accuracy: 0.0001)
+            XCTAssertEqual(carry.translation.height, finger.y - eraser.y, accuracy: 0.0001)
+            // Grown about the held point and then moved, the held point is drawn where the finger is.
+            let scale = ToolbarDockDrag.liftScale
+            let anchor = CGPoint(x: palette.minX + carry.anchor.x * palette.width, y: palette.minY + carry.anchor.y * palette.height)
+            let held = CGPoint(x: anchor.x + (eraser.x - anchor.x) * scale + carry.translation.width,
+                               y: anchor.y + (eraser.y - anchor.y) * scale + carry.translation.height)
+            XCTAssertEqual(held.x, finger.x, accuracy: 0.0001)
+            XCTAssertEqual(held.y, finger.y, accuracy: 0.0001)
+        }
+    }
+
+    /// EP102: let go, the palette snaps to the edge nearest the finger, and along it lands where it was carried to.
+    func testALetGoPaletteLandsWhereItWasCarried() {
+        let top = CGRect(x: 230, y: 84, width: 733, height: 48)
+        let eraser = CGPoint(x: 300, y: 108)
+        // Carried by the eraser straight down to the bottom, a little left: it drops straight onto the bottom edge,
+        // centred where its centre was carried, not on the finger.
+        var landing = ToolbarDockDrag.landing(from: eraser, palette: top, dock: .top, to: CGPoint(x: 250, y: 800), in: area)
+        XCTAssertEqual(landing.dock, .bottom)
+        XCTAssertEqual(landing.along, Double((top.midX - 50) / area.width), accuracy: 0.0001)
+        // Carried across to the right side it turns upright, centred on the finger.
+        landing = ToolbarDockDrag.landing(from: eraser, palette: top, dock: .top, to: CGPoint(x: 1170, y: 74 + 190), in: area)
+        XCTAssertEqual(landing.dock, .trailing)
+        XCTAssertEqual(landing.along, 0.25, accuracy: 0.0001)
+        // Upright on the right, carried to the left by its top end: still upright, at the height it was carried to.
+        let right = CGRect(x: 1128, y: 200, width: 56, height: 500)
+        landing = ToolbarDockDrag.landing(from: CGPoint(x: 1150, y: 230), palette: right, dock: .trailing,
+                                          to: CGPoint(x: 30, y: 330), in: area)
+        XCTAssertEqual(landing.dock, .leading)
+        XCTAssertEqual(landing.along, Double((450 + 100 - 74) / area.height), accuracy: 0.0001)
+        // Let go where it was picked up, it stays put.
+        let centre = CGPoint(x: top.midX, y: top.midY)
+        landing = ToolbarDockDrag.landing(from: eraser, palette: top, dock: .top, to: eraser, in: area)
+        XCTAssertEqual(landing.dock, .top)
+        XCTAssertEqual(ToolbarDockDrag.frame(for: .top, along: landing.along, size: top.size, in: area).midX, centre.x, accuracy: 0.001)
+        // A flick still carries it to the edge it was heading for.
+        landing = ToolbarDockDrag.landing(from: eraser, palette: top, dock: .top, to: CGPoint(x: 640, y: 460),
+                                          velocity: CGVector(dx: -6000, dy: 0), in: area)
+        XCTAssertEqual(landing.dock, .leading)
+    }
+
+    /// A palette too long for its edge scrolls: a drag along it scrolls it, a drag across it carries it. One that fits
+    /// is carried whichever way it is dragged.
+    func testADragAlongAScrollingPaletteScrollsIt() {
+        let row = CGSize(width: 500, height: 48)
+        XCTAssertTrue(ToolbarDockDrag.scrolls(dx: 8, dy: 2, content: CGSize(width: 760, height: 48), bounds: row))
+        XCTAssertFalse(ToolbarDockDrag.scrolls(dx: 2, dy: 8, content: CGSize(width: 760, height: 48), bounds: row))
+        XCTAssertFalse(ToolbarDockDrag.scrolls(dx: 8, dy: 2, content: row, bounds: row))
+        let column = CGSize(width: 56, height: 600)
+        XCTAssertTrue(ToolbarDockDrag.scrolls(dx: 0, dy: -7, content: CGSize(width: 56, height: 820), bounds: column))
+        XCTAssertFalse(ToolbarDockDrag.scrolls(dx: 7, dy: 0, content: CGSize(width: 56, height: 820), bounds: column))
     }
 
     func testReduceMotionSnapsWithAFade() {

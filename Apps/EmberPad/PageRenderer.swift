@@ -297,10 +297,9 @@ struct EditorScreen: View {
     @State private var entranceStartedAt: CFTimeInterval = 0
     /// The page area in window coordinates, for the close transition.
     @State private var pageAreaFrame: CGRect = .zero
-    /// The tool palette while a finger has it lifted, and as it lands (EP100).
-    @State private var toolbarDrag: ToolbarDragState?
-    /// The palette's size across the top or bottom (false) and down a side (true), for where a lifted one lands.
-    @State private var toolbarSizes: [Bool: CGSize] = [:]
+    /// The tool palette while a finger carries it (EP102). Only the palette and its drop band read it, so a move of
+    /// the finger never rebuilds the editor.
+    @State private var toolbarCarry = ToolbarCarry()
 
     private var entrance: DocumentTransition.Entrance {
         DocumentTransition.entrance(pageEntered: pageEntered, reduceMotion: reduceMotion)
@@ -366,7 +365,7 @@ struct EditorScreen: View {
             // EP101: the tool palette floats over the page (see `pageArea`), so the page keeps the whole worksheet.
             pageArea
         }
-        .overlay { ToolbarDragLayer(drag: toolbarDrag, tools: tools, area: pageAreaFrame, tabSide: teacherCard.side) }
+        .overlay { ToolbarDropBand(carry: toolbarCarry, area: pageAreaFrame, tabSide: teacherCard.side) }
         // Not in onAppear: that runs inside the library's no-animation push, which would settle the page at once.
         .task {
             guard !pageEntered else { return }
@@ -462,6 +461,8 @@ extension EditorScreen {
                 if showsTools {
                     ToolbarFloatLayout(dock: dock, along: tools.settings.toolbarAlong, tabSide: teacherCard.side) { toolRow }
                         .transition(.opacity)
+                        // Carried, it passes over the Teacher copy's pull tab rather than under it.
+                        .zIndex(toolbarCarry.isCarrying ? 1 : 0)
                 }
                 // iPad main scene only: the external scene never draws this, and it has no answer URL.
                 if let session {
@@ -479,65 +480,65 @@ extension EditorScreen {
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { pageAreaFrame = $0 }
     }
 
-    /// The tool palette. While it is lifted it stays in place, faded, until it lands.
+    /// The tool palette, which a finger carries (EP102).
     private var toolRow: some View {
         ToolbarStrip(tools: tools, dock: dock, onDrag: { phase in dragToolRow(phase) },
                      onMove: { target in moveToolRow(to: target) })
-            .opacity(toolbarDrag == nil || toolbarDrag?.settling == true ? 1 : 0.35)
-            .onGeometryChange(for: CGSize.self) { $0.size } action: { toolbarSizes[dock.isVertical] = $0 }
+            .modifier(ToolbarCarried(carry: toolbarCarry))
     }
 
-    /// EP100, EP101: a finger held on the palette lifts it; it follows the finger, the band of the nearest edge lights
-    /// up, and on release it snaps against that edge where it was let go, and stays there across worksheets and
-    /// launches.
+    /// EP100, EP101, EP102: a finger that touches the palette and drags carries it, with no hold, the tool it landed
+    /// on staying under the finger; the band of the edge it would snap to lights up, and when it is let go it snaps
+    /// against that edge where it was let go, and stays there across worksheets and launches.
     private func dragToolRow(_ phase: ToolbarDragRecognizer.Phase) {
+        let carry = toolbarCarry
         switch phase {
-        case .began(let point):
+        case .began(let start, let point, let palette):
             tools.settingsTool = nil
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            carry.pickUp(at: start, palette: palette, finger: point)
             withAnimation(.easeOut(duration: 0.15)) {
-                toolbarDrag = ToolbarDragState(location: point, target: ToolbarDockDrag.target(for: point, in: pageAreaFrame))
+                carry.isCarrying = true
+                carry.target = ToolbarDockDrag.target(for: point, in: pageAreaFrame)
             }
         case .moved(let point):
-            guard var drag = toolbarDrag, !drag.settling else { return }
+            guard carry.isCarrying else { return }
+            // No animation: the palette is exactly where the finger is, every frame.
+            carry.follow(point)
             let target = ToolbarDockDrag.target(for: point, in: pageAreaFrame)
-            drag.location = point
-            if target != drag.target {
+            if target != carry.target {
                 UISelectionFeedbackGenerator().selectionChanged()
-                drag.target = target
-                withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) { toolbarDrag = drag }
-            } else {
-                toolbarDrag = drag
+                withAnimation(.easeOut(duration: 0.15)) { carry.target = target }
             }
         case .ended(let point, let velocity):
-            guard toolbarDrag != nil else { return }
-            let target = ToolbarDockDrag.target(for: point, velocity: velocity, in: pageAreaFrame)
-            moveToolRow(to: target, along: ToolbarDockDrag.along(for: point, velocity: velocity, on: target, in: pageAreaFrame))
+            guard carry.isCarrying else { return }
+            carry.follow(point)
+            let landing = ToolbarDockDrag.landing(from: carry.start, palette: carry.palette, dock: dock, to: point,
+                                                  velocity: velocity, in: pageAreaFrame)
+            moveToolRow(to: landing.dock, along: landing.along)
         case .cancelled:
-            guard toolbarDrag != nil else { return }
-            withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) { toolbarDrag = nil }
+            guard carry.isCarrying else { return }
+            withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) { putDown() }
         }
     }
 
     /// Puts the palette against `target`'s edge, `along` it (where it already was along an edge when nil), with the
-    /// snap, the lifted palette flying to where it lands as it fades.
+    /// snap. A carried palette flies on from where the finger let it go to where it lands, turning as it goes.
     private func moveToolRow(to target: ToolbarDock, along: Double? = nil) {
         tools.settingsTool = nil
         let along = along ?? tools.settings.toolbarAlong
-        let lifted = toolbarDrag != nil
-        if lifted { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        if toolbarCarry.isCarrying { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
         withAnimation(ToolbarDockDrag.snapAnimation(reduceMotion: reduceMotion)) {
             tools.setToolbarPosition(target, along: along)
-            if lifted {
-                let size = toolbarSizes[target.isVertical]
-                    ?? (target.isVertical ? CGSize(width: ToolbarStrip.columnWidth, height: 480) : CGSize(width: 480, height: ToolbarStrip.height))
-                let landing = ToolbarDockDrag.frame(for: target, along: along, size: size,
-                                                    in: ToolbarDockDrag.room(for: target, in: pageAreaFrame, tabSide: teacherCard.side))
-                toolbarDrag = ToolbarDragState(location: CGPoint(x: landing.midX, y: landing.midY), target: target, settling: true)
-            }
-        } completion: {
-            if toolbarDrag?.settling == true { toolbarDrag = nil }
+            putDown()
         }
+    }
+
+    /// The finger has let the palette go: it lies where its edge and place put it.
+    private func putDown() {
+        toolbarCarry.translation = .zero
+        toolbarCarry.isCarrying = false
+        toolbarCarry.target = nil
     }
 }
 
