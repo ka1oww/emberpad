@@ -734,6 +734,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 livePen.lift(samples: samples, now: livePenClock())
                 showLivePen(page: liveStroke.page)
                 scheduleLivePenExpiry()
+                // EP108: the next stroke's layer is made now, while the Pencil is up, not as it comes down.
+                let page = liveStroke.page
+                DispatchQueue.main.async { [weak self] in self?.pageInkView(page)?.prepareSpareLivePenLayer() }
             }
             liftScribblePreview(samples: samples.map(\.location))
             inkTiming.lastLift = CACurrentMediaTime()

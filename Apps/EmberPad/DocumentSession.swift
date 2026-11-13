@@ -98,9 +98,9 @@ final class DocumentSession: ObservableObject {
             }
             for value in pages {
                 guard let entry = self.page(at: value.page) else { continue }
-                let stored = PageInkRotation.stored(value.drawing, entry: entry, page: pdf.page(at: value.page))
-                try await store.saveDrawing(stored.dataRepresentation(), documentID: record.id,
-                                            pageID: entry.id, hasInk: !value.drawing.strokes.isEmpty)
+                let turn = PageInkRotation.storedTransform(entry: entry, page: pdf.page(at: value.page))
+                let stored = await Self.encoded(value.drawing, turn: turn)
+                try await store.saveDrawing(stored.data, documentID: record.id, pageID: entry.id, hasInk: stored.hasInk)
                 if pageRevisions[value.page] == value.revision { dirty.remove(value.page) }
             }
             saveError = nil
@@ -116,5 +116,17 @@ final class DocumentSession: ObservableObject {
             throw error
         }
         if !dirty.isEmpty { try await flush() }
+    }
+
+    /// `drawing` as the library stores it, turned by `turn` when there is one, and whether it holds any ink, worked out
+    /// off the main thread (EP108). Encoding a page full of ink took about 30 ms there; the save comes a second after
+    /// the last change, so when writing went on after a short pause it landed in the middle of the next stroke and
+    /// the ink stopped following the Pencil for two frames or more.
+    nonisolated static func encoded(_ drawing: PKDrawing, turn: CGAffineTransform?) async -> (data: Data, hasInk: Bool) {
+        await Task.detached(priority: .userInitiated) {
+            let hasInk = !drawing.strokes.isEmpty
+            let stored = hasInk ? turn.map { drawing.transformed(using: $0) } ?? drawing : drawing
+            return (stored.dataRepresentation(), hasInk)
+        }.value
     }
 }

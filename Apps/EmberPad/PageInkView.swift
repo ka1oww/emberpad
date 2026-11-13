@@ -159,6 +159,24 @@ final class PageInkView: UIView {
         return layer
     }
 
+    /// Makes a blank layer ready for the next stroke when no spare one is ready (EP108), so the Pencil coming down
+    /// never waits for a new PencilKit canvas. Every stroke written since the last pause in the writing keeps its own
+    /// layer until its ink lands, so in steady writing no layer is ever spare, and every pen-down made a new canvas,
+    /// 3 to 8 ms of the pen-down itself. Made, hidden, while the Pencil is up.
+    func prepareSpareLivePenLayer() {
+        guard window != nil, !livePenLayers.contains(where: { $0.id == nil && $0.rendering == nil }) else { return }
+        let layer = LivePenLayer(view: makeLivePenView())
+        livePenLayers.append(layer)
+        layer.view.isHidden = true
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else { return }
+        // Not while the page is being put on screen: once that pass is over.
+        DispatchQueue.main.async { [weak self] in self?.prepareSpareLivePenLayer() }
+    }
+
     /// Hides `layer` at once and clears it while hidden, so it is blank when it is next used; or, past the spares
     /// kept, removes it.
     private func retire(_ layer: LivePenLayer) {
