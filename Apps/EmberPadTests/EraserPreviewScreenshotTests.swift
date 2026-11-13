@@ -112,7 +112,10 @@ final class EraserPreviewScreenshotTests: XCTestCase {
         host.addSublayer(layer)
         try save(window, "\(name)-after")
         stroke.lift()
-        await pause(0.6)
+        // PencilKit's partial erase and the whole-stroke erase (which waits for PencilKit's commit, up to 4 s) both land
+        // after the lift; a loaded runner needs longer than a fixed pause.
+        await wait { canvas.drawing.dataRepresentation() != ink.dataRepresentation() }
+        await pause(0.3)
         XCTAssertFalse(renderer.eraserCircleVisible)
         XCTAssertNotEqual(canvas.drawing.dataRepresentation(), ink.dataRepresentation(), "the eraser erased")
         if name.hasSuffix("large") { try save(window, name.hasPrefix("ep99") ? "\(name)-after-lift" : "ep68-07-after-lift") }
