@@ -514,10 +514,8 @@ final class WorksheetNavigator {
     var columns = LibraryColumnState()
     /// Covers the leaving screen while the transition plays.
     @ObservationIgnored let cover = DocumentTransitionCover()
-    /// The switch keeping UIKit animations off until it has reached UIKit, if one is; switches are counted so that a
-    /// late release for one cannot turn them back on under a newer one.
-    @ObservationIgnored private var heldSwitch: Int?
-    @ObservationIgnored private var switches = 0
+    /// Whether a switch is keeping UIKit animations off until it has reached UIKit.
+    @ObservationIgnored private var holdingAnimations = false
 
     /// A card tap. The editor is pushed in this same update, without the slide, so it starts loading exactly as soon
     /// as a push did.
@@ -551,17 +549,14 @@ final class WorksheetNavigator {
 
     /// Makes `change` without the navigation slide or the sidebar's slide. SwiftUI's `disablesAnimations` alone does
     /// not reach the UIKit navigation controller every time, so UIKit animations are also off until the change has
-    /// reached UIKit: until the editor has appeared or gone (`editorSwitched`), or a second has passed in case it never
-    /// does. The covers' fades were added before, so they still run.
+    /// reached UIKit: until the editor has appeared or gone (`editorSwitched`). Both callers change `openWorksheet`, so
+    /// it always does, however long the editor takes to load. The covers' fades were added before, so they still run.
     private func switchInstantly(_ change: () -> Void) {
         var instant = Transaction()
         instant.disablesAnimations = true
         UIView.setAnimationsEnabled(false)
-        switches += 1
-        let held = switches
-        heldSwitch = held
+        holdingAnimations = true
         withTransaction(instant, change)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.releaseAnimations(held) }
     }
 
     /// The editor appeared (on open) or went (on close), so the switch has reached UIKit. SwiftUI can hand a switch to
@@ -570,14 +565,11 @@ final class WorksheetNavigator {
     /// open in five in the hosted tests). The sidebar is hidden or shown in the same update as the editor appears or
     /// goes, so animations come back on at the main queue's next turn.
     func editorSwitched() {
-        guard let held = heldSwitch else { return }
-        DispatchQueue.main.async { self.releaseAnimations(held) }
-    }
-
-    private func releaseAnimations(_ held: Int) {
-        guard heldSwitch == held else { return }
-        heldSwitch = nil
-        UIView.setAnimationsEnabled(true)
+        guard holdingAnimations else { return }
+        DispatchQueue.main.async {
+            self.holdingAnimations = false
+            UIView.setAnimationsEnabled(true)
+        }
     }
 }
 
