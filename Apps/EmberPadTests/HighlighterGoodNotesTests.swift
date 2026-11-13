@@ -336,7 +336,8 @@ final class HighlighterGoodNotesTests: XCTestCase {
         XCTAssertTrue(PDFOverlayPageController.showsHoldGuide(tool: .highlighter, settings: settings, held: true, lineLike: true),
                       "draw and hold still shows where the line will go")
         XCTAssertFalse(PDFOverlayPageController.showsHoldGuide(tool: .highlighter, settings: settings, held: false, lineLike: true))
-        XCTAssertTrue(PDFOverlayPageController.showsHoldGuide(tool: .pen, settings: settings, held: true, lineLike: true), "the pen is unchanged")
+        XCTAssertFalse(PDFOverlayPageController.showsHoldGuide(tool: .pen, settings: settings, held: true, lineLike: true),
+                       "a held pen line is drawn as the line itself, in its own ink, not as a guide (EP96)")
     }
 
     // MARK: H3 and H5: straightening
