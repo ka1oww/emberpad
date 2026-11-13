@@ -84,6 +84,15 @@ final class ToolbarStripScreenshotTests: XCTestCase {
             let image = try render(view, size: CGSize(width: 360, height: 70), style: scheme)
             try save(image, "tool-toast-\(name(scheme))")
         }
+        // Back to the fountain pen: its toast shows the nib drawing (EP105).
+        tools.handlePencil(.switchEraser, gesture: .doubleTap)
+        let penToast = try XCTUnwrap(tools.toast)
+        XCTAssertEqual(penToast.icon, WorksheetTool.pen.icon)
+        for scheme: UIUserInterfaceStyle in [.light, .dark] {
+            let view = ToolToastLabel(toast: penToast).padding(12).background(Theme.canvas)
+            let image = try render(view, size: CGSize(width: 360, height: 70), style: scheme)
+            try save(image, "tool-toast-pen-\(name(scheme))")
+        }
     }
 
     // MARK: - Helpers

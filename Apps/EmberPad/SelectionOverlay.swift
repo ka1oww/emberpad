@@ -236,7 +236,7 @@ final class InkSelectionController {
         }
         host.session.update(canvas.drawing, page: page)
         guard show(indices, page: page, outline: loop) else { return false }
-        host.tools.showToast(symbol: WorksheetTool.lasso.symbol, text: "Circle to lasso · selected")
+        host.tools.showToast(icon: WorksheetTool.lasso.icon, text: "Circle to lasso · selected")
         return true
     }
 
