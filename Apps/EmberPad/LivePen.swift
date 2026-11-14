@@ -34,6 +34,8 @@ struct LivePenStrokes {
         fileprivate(set) var liftedShape: PKStroke?
         /// Draw and hold latched a straight line (EP96): from then on the stroke is drawn, and lifted, as that line.
         fileprivate(set) var line: HeldLine?
+        /// Draw and hold latched a clean shape (EP116): from then on the stroke is drawn, and lifted, as that shape.
+        fileprivate(set) var shape: HeldShape?
         /// Goes up whenever the stroke's drawn shape changes (a Pencil move, the hold latching, the lift), so its
         /// layer is given a new drawing only then (EP103).
         fileprivate(set) var revision = 0
@@ -51,6 +53,10 @@ struct LivePenStrokes {
         func stroke(lifted: Bool, creationDate date: Date? = nil) -> PKStroke? {
             let all = lifted ? samples : samples + predicted
             guard let start = all.first?.time else { return nil }
+            if let shape, let last = all.last {
+                return PenFeel.stroke(shape.points(to: last, startTime: start), color: color, settings: shape.feel(settings),
+                                      toolWidth: toolWidth, lifted: lifted, creationDate: date ?? creationDate)
+            }
             if let line, let last = all.last {
                 return PenFeel.stroke(line.points(to: last, startTime: start), color: color, settings: settings,
                                       toolWidth: toolWidth, lifted: lifted, creationDate: date ?? creationDate)
@@ -109,6 +115,17 @@ struct LivePenStrokes {
         guard let index = strokes.lastIndex(where: { $0.liftedAt == nil }), strokes[index].page == page,
               let line = HeldLine(samples: strokes[index].samples) else { return false }
         strokes[index].line = line
+        strokes[index].revision += 1
+        return true
+    }
+
+    /// Draw and hold latched a clean shape on the stroke being written on `page` (EP116): from now until lift it is
+    /// drawn as `shape` follows the Pencil, in its own pen ink, and it lifts as that shape. Returns false when no
+    /// stroke is being written there.
+    @discardableResult
+    mutating func holdShape(page: Int, _ shape: HeldShape) -> Bool {
+        guard let index = strokes.lastIndex(where: { $0.liftedAt == nil }), strokes[index].page == page else { return false }
+        strokes[index].shape = shape
         strokes[index].revision += 1
         return true
     }
@@ -281,6 +298,89 @@ struct HeldLine: Equatable {
     func points(to last: LiveInkSample, startTime: TimeInterval) -> [PKStrokePoint] {
         let line = ends(to: last.location)
         let locations = StrokeSnap.linePoints(from: line.start, to: line.end)
+        let duration = max(last.time - startTime, 0)
+        let size = CGSize(width: 2, height: 2)
+        return locations.enumerated().map { index, location in
+            let fraction = Double(index) / Double(max(locations.count - 1, 1))
+            return PKStrokePoint(location: location, timeOffset: duration * fraction, size: size, opacity: 1,
+                                 force: force, azimuth: azimuth, altitude: altitude, secondaryScale: 1)
+        }
+    }
+}
+
+/// A pen stroke held into a clean shape (EP116, GoodNotes' Draw and Hold): the shape recognised when the hold
+/// latched, and, as for a held line, the Pencil's force and angles taken from the stroke so far. While the Pencil
+/// stays down the shape follows it, as GoodNotes lets the scale and angle be changed before lifting: a closed shape
+/// turns and scales about its middle so the point where the Pencil was held stays under it, and an open one (a
+/// curve, an arrow) about its far end, so its near end stays at the Pencil, as a held line's end does.
+struct HeldShape: Equatable {
+    /// The shape as recognised at the hold, in page space.
+    let shape: InkShape
+    /// Where the Pencil was when the hold latched.
+    let anchor: CGPoint
+    /// What the shape turns and scales about.
+    let pivot: CGPoint
+    let force: CGFloat
+    let azimuth: CGFloat
+    let altitude: CGFloat
+
+    /// A closed shape keeps its recognised angle until the Pencil has turned it more than this, in radians (4°), and
+    /// its size until scaled by more than `scaleSlack`, so the small drift of a hand holding still does not tilt a
+    /// level square or resize a circle.
+    static let turnSlack: CGFloat = 4 * .pi / 180
+    static let scaleSlack: CGFloat = 0.03
+    /// The smallest a held shape is scaled to.
+    static let minimumScale: CGFloat = 0.1
+
+    /// Nil for a stroke with no samples.
+    init?(shape: InkShape, samples: [LiveInkSample]) {
+        guard let template = HeldLine(samples: samples), let last = samples.last else { return nil }
+        self.shape = shape
+        anchor = last.location
+        force = template.force
+        azimuth = template.azimuth
+        altitude = template.altitude
+        if let center = shape.center {
+            pivot = center
+        } else {
+            // The open shape's end farther from the Pencil.
+            let ends = shape.keyPoints
+            pivot = ends.max { ShapeRecognizer.distance($0, last.location) < ShapeRecognizer.distance($1, last.location) }
+                ?? template.start
+        }
+    }
+
+    var isClosed: Bool { shape.isClosed }
+    /// The undo step's name: the shape's.
+    var actionName: String { shape.kind.title }
+
+    /// The shape with the Pencil at `pencil`.
+    func shape(to pencil: CGPoint) -> InkShape {
+        let from = CGPoint(x: anchor.x - pivot.x, y: anchor.y - pivot.y), to = CGPoint(x: pencil.x - pivot.x, y: pencil.y - pivot.y)
+        let reach = hypot(from.x, from.y)
+        guard reach >= 1 else { return shape }
+        var scale = max(hypot(to.x, to.y) / reach, Self.minimumScale)
+        var rotation = atan2(to.y, to.x) - atan2(from.y, from.x)
+        if rotation > .pi { rotation -= 2 * .pi } else if rotation < -.pi { rotation += 2 * .pi }
+        if isClosed {
+            if abs(rotation) <= Self.turnSlack { rotation = 0 }
+            if abs(scale - 1) <= Self.scaleSlack { scale = 1 }
+        }
+        return shape.transformed(about: pivot, scale: scale, rotation: rotation)
+    }
+
+    /// The pen feel a held shape is drawn with: a closed shape has no start or end tip, so its outline is as wide
+    /// where it closes as everywhere else; an open one tapers at its ends like the pen's other strokes.
+    func feel(_ settings: PenFeelSettings) -> PenFeelSettings {
+        guard isClosed else { return settings }
+        var even = settings
+        even.tipSharpness = 0
+        return even
+    }
+
+    /// The shape's outline points, `StrokeSnap.pointSpacing` apart, timed evenly from the stroke's start to `last`.
+    func points(to last: LiveInkSample, startTime: TimeInterval) -> [PKStrokePoint] {
+        let locations = shape(to: last.location).outline()
         let duration = max(last.time - startTime, 0)
         let size = CGSize(width: 2, height: 2)
         return locations.enumerated().map { index, location in

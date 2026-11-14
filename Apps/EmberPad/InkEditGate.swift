@@ -179,10 +179,11 @@ struct PendingInkEdit {
         case penFeel(PenFeelSettings, toolWidth: CGFloat, color: UIColor)
         /// The stroke becomes `strokes`, as one undo step named `actionName`: the pen feel, a straight line, a shape.
         case replace([PKStroke], actionName: String)
-        /// A pen stroke held into a straight line (EP96): it becomes the line the live pen drew while the Pencil was
-        /// down, worked out once the live pen has seen the lift, as one undo step named "Straight Line". `fallback`,
-        /// the committed stroke straightened, is used when the live pen has no line for it.
-        case straightLine(fallback: PKStroke)
+        /// A pen stroke held into a straight line (EP96) or a clean shape (EP116): it becomes the line or shape the
+        /// live pen drew while the Pencil was down, worked out once the live pen has seen the lift, as one undo step
+        /// named `actionName` ("Straight Line", or the shape's name). `fallback`, the committed stroke straightened or
+        /// made the shape, is used when the live pen has none for it.
+        case held(fallback: PKStroke, actionName: String)
         /// The scribble and the strokes at these indices (of the page as it was before the scribble) go, as one undo
         /// step named "Scribble to Erase" (EP82).
         case scribble(erasing: [Int])
@@ -215,7 +216,7 @@ struct PendingInkEdit {
         switch kind {
         case .penFeel: return false
         case .replace(_, let actionName): return actionName != PendingInkEdit.inkActionName
-        case .straightLine: return true
+        case .held: return true
         case .scribble: return true
         case .keep(let lasso): return lasso
         }
@@ -281,8 +282,8 @@ enum InkEditReplay {
             switch edits[index] {
             case .replace(let replacements, let actionName)? where !replacements.isEmpty:
                 append(replacements.map(PenFeel.visible), from: index, named: actionName)
-            case .straightLine(let fallback)?:
-                append([PenFeel.visible(fallback)], from: index, named: PendingInkEdit.straightLineActionName)
+            case .held(let fallback, let actionName)?:
+                append([PenFeel.visible(fallback)], from: index, named: actionName)
             case .scribble(let erasing)?:
                 let erased = Set(erasing)
                 let before = page
