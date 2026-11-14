@@ -213,17 +213,21 @@ final class DeviceDrawingStressTests: XCTestCase {
         scenario.check("each held shape is in the pen's ink", clean.allSatisfy { $0.ink.inkType == .fountainPen },
                        clean.map { "\($0.ink.inkType.rawValue)" }.joined(separator: ", "))
         // Each stroke kept is the clean shape the hand drew: on the recognised outline, not on the hand's path.
-        var off: [String] = []
-        for (n, shape) in shapes.enumerated() {
-            guard let ideal = ShapeRecognizer.heldShape(shape.2, lineLike: StrokeSnap.isLineLike(shape.2)), ideal.kind == shape.1 else {
-                off.append("\(shape.0) is not recognised from the hand")
-                continue
+        // The comparison is the test's own work on the main thread, so it is not charged to the app as a stall (EP124).
+        let off: [String] = StressHarnessTime.measure {
+            var off: [String] = []
+            for (n, shape) in shapes.enumerated() {
+                guard let ideal = ShapeRecognizer.heldShape(shape.2, lineLike: StrokeSnap.isLineLike(shape.2)), ideal.kind == shape.1 else {
+                    off.append("\(shape.0) is not recognised from the hand")
+                    continue
+                }
+                guard n < clean.count else { continue }
+                let outline = ideal.outline(spacing: 1)
+                let stray = clean[n].path.interpolatedPoints(by: .distance(2)).map { $0.location.applying(clean[n].transform) }
+                    .map { p in outline.map { StressInk.distance($0, p) }.min() ?? .infinity }.max() ?? .infinity
+                if stray > 3 { off.append("\(shape.0) strays " + String(format: "%.1f", stray) + " pt from its clean \(ideal.kind) outline") }
             }
-            guard n < clean.count else { continue }
-            let outline = ideal.outline(spacing: 1)
-            let stray = clean[n].path.interpolatedPoints(by: .distance(2)).map { $0.location.applying(clean[n].transform) }
-                .map { p in outline.map { StressInk.distance($0, p) }.min() ?? .infinity }.max() ?? .infinity
-            if stray > 3 { off.append("\(shape.0) strays " + String(format: "%.1f", stray) + " pt from its clean \(ideal.kind) outline") }
+            return off
         }
         scenario.check("each held shape is drawn clean", off.isEmpty,
                        off.isEmpty ? "all \(shapes.count) on their clean outlines" : off.joined(separator: "; "))
@@ -295,14 +299,18 @@ final class DeviceDrawingStressTests: XCTestCase {
         let clean = Array(scenario.page.saved(0).dropFirst(scenario.bystanderCount))
         scenario.check("each shape is one stroke", clean.count == 3, "\(clean.count) strokes for 3 shapes")
         // Each stroke kept is the clean shape the hand drew: on the recognised outline, not on the hand's path.
-        var off: [String] = []
-        for (n, shape) in shapes.enumerated() {
-            guard let ideal = ShapeRecognizer.recognize(shape.1) else { off.append("\(shape.0) is not recognised from the hand"); continue }
-            guard n < clean.count else { continue }
-            let outline = ideal.outline(spacing: 1)
-            let stray = clean[n].path.interpolatedPoints(by: .distance(2)).map { $0.location.applying(clean[n].transform) }
-                .map { p in outline.map { StressInk.distance($0, p) }.min() ?? .infinity }.max() ?? .infinity
-            if stray > 2.5 { off.append("\(shape.0) strays " + String(format: "%.1f", stray) + " pt from its clean \(ideal.kind) outline") }
+        // The comparison is the test's own work on the main thread, so it is not charged to the app as a stall (EP124).
+        let off: [String] = StressHarnessTime.measure {
+            var off: [String] = []
+            for (n, shape) in shapes.enumerated() {
+                guard let ideal = ShapeRecognizer.recognize(shape.1) else { off.append("\(shape.0) is not recognised from the hand"); continue }
+                guard n < clean.count else { continue }
+                let outline = ideal.outline(spacing: 1)
+                let stray = clean[n].path.interpolatedPoints(by: .distance(2)).map { $0.location.applying(clean[n].transform) }
+                    .map { p in outline.map { StressInk.distance($0, p) }.min() ?? .infinity }.max() ?? .infinity
+                if stray > 2.5 { off.append("\(shape.0) strays " + String(format: "%.1f", stray) + " pt from its clean \(ideal.kind) outline") }
+            }
+            return off
         }
         scenario.check("each shape is drawn clean", off.isEmpty, off.isEmpty ? "all 3 on their clean outlines" : off.joined(separator: "; "))
         // The clean shapes stay on the screen.

@@ -90,6 +90,8 @@ final class PageInkView: UIView {
         var latest: PKStroke?
         /// The drawing PencilKit is drawing now, by revision, until it reports it has drawn it.
         var rendering: (revision: Int, since: CFTimeInterval, generation: Int)?
+        /// The generation of the drawing being made off the main thread for this layer (EP124), until it is given.
+        var making: Int?
         /// The newest shape, waiting for that render to finish (EP103): PencilKit is given at most one drawing at a
         /// time, so drawings asked for faster than it draws them never queue up behind each other.
         var waiting: (stroke: PKStroke?, revision: Int)?
@@ -116,6 +118,11 @@ final class PageInkView: UIView {
     static let livePenInterval: TimeInterval = 1.0 / 60
     /// Hidden live layers kept for the next strokes, so a pen-down rarely makes a new one.
     static let spareLivePenLayers = 8
+    /// Where the live strokes' drawings are made (EP124), off the main thread. Making a drawing given strokes checks it
+    /// into PencilKit's replica record, and while PencilKit saves that record (every few seconds while ink changes,
+    /// longer the larger the record) the call waits for the save. Made on the main thread, the live pen froze the page
+    /// for that long: 104 to 129 ms on the iPad Air late in the stress test. Here only the live ink waits.
+    static let livePenDrawings = DispatchQueue(label: "EmberPad.livePenDrawings", qos: .userInteractive)
 
     private var livePenLayers: [LivePenLayer] = []
     /// The live strokes shown, oldest first.
@@ -238,7 +245,26 @@ final class PageInkView: UIView {
         livePenGeneration += 1
         let generation = livePenGeneration
         layer.rendering = (revision, time, generation)
-        layer.view.drawing = stroke.map { PKDrawing(strokes: [$0]) } ?? PKDrawing()
+        if let stroke {
+            // EP124: made off the main thread, given on it, unless a newer drawing or a clear has replaced it meanwhile.
+            layer.making = generation
+            Self.livePenDrawings.async { [weak self, weak layer] in
+                let drawing = PKDrawing(strokes: [stroke])
+                DispatchQueue.main.async {
+                    guard let self, let layer, layer.making == generation else { return }
+                    layer.making = nil
+                    self.give(drawing, to: layer, generation: generation)
+                }
+            }
+        } else {
+            // A blank drawing holds no strokes, so PencilKit records nothing and it never waits.
+            layer.making = nil
+            give(PKDrawing(), to: layer, generation: generation)
+        }
+    }
+
+    private func give(_ drawing: PKDrawing, to layer: LivePenLayer, generation: Int) {
+        layer.view.drawing = drawing
         // Should PencilKit never report this render, the next drawing goes ahead after a while all the same.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.livePenRenderPatience) { [weak self, weak layer] in
             guard let self, let layer, layer.rendering?.generation == generation else { return }
@@ -259,7 +285,8 @@ final class PageInkView: UIView {
     }
 
     private func livePenLayerDidRender(_ layer: LivePenLayer) {
-        guard let rendering = layer.rendering else { return }
+        // A report while the next drawing is still being made is for the drawing before it (EP124).
+        guard let rendering = layer.rendering, layer.making == nil else { return }
         layer.rendering = nil
         if layer.id != nil { layer.drawnRevision = rendering.revision }
         guard layer.waiting != nil else { return }

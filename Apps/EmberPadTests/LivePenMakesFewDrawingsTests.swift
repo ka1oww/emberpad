@@ -103,6 +103,38 @@ final class LivePenMakesFewDrawingsTests: XCTestCase {
         XCTAssertEqual(inkView.livePenStrokes.first?.renderBounds, Self.line(from: start, to: end(last)).renderBounds)
     }
 
+    /// EP124: PencilKit saves its replica record every few seconds while ink changes, and a drawing given strokes waits
+    /// for the save, longer the larger the record. The live pen made its drawings on the main thread, so on the iPad Air
+    /// late in the stress test the page froze for 104 to 129 ms while the Pencil wrote. Each checkout is held up here
+    /// as a save holds it: the page goes on at once, and the live ink is still drawn when the drawing is ready.
+    func testALiveDrawingHeldUpByPencilKitNeverStallsThePage() throws {
+        let page = try page()
+        let inkView = try XCTUnwrap(page.canvas.superview as? PageInkView)
+        let start = CGPoint(x: 80, y: 200)
+        func show(_ revision: Int) {
+            let end = CGPoint(x: 120 + CGFloat(revision) * 3, y: 260 + CGFloat(revision % 7) * 4)
+            inkView.showLivePen([LivePenStrokes.Shown(id: 1, revision: revision)]) { _ in Self.line(from: start, to: end) }
+        }
+        func drawn() -> Int? { inkView.livePenLayer(id: 1)?.drawnRevision }
+
+        let save: TimeInterval = 0.25
+        let held = try ReplicaCheckouts(delay: save)
+        defer { held.remove() }
+        var longest = 0.0
+        for revision in 0..<3 {
+            let began = CACurrentMediaTime()
+            show(revision)
+            longest = max(longest, CACurrentMediaTime() - began)
+            let next = CACurrentMediaTime() + PageInkView.livePenInterval
+            Self.wait(until: { CACurrentMediaTime() >= next }, timeout: 1)
+        }
+        XCTAssertLessThan(longest, save / 5, "a live drawing held up by PencilKit's record never holds up the page")
+        Self.wait(until: { drawn() == 2 }, timeout: 5)
+        XCTAssertEqual(drawn(), 2, "the newest shape is still drawn")
+        XCTAssertEqual(inkView.livePenStrokes.first?.renderBounds,
+                       Self.line(from: start, to: CGPoint(x: 126, y: 268)).renderBounds, "the layer holds the newest shape")
+    }
+
     private static func line(from start: CGPoint, to end: CGPoint) -> PKStroke {
         let points = StrokeSnap.linePoints(from: start, to: end, spacing: StrokeSnap.pointSpacing).enumerated().map { i, p in
             PKStrokePoint(location: p, timeOffset: Double(i) * 0.01, size: CGSize(width: 2, height: 2), opacity: 1, force: 1,
@@ -144,45 +176,67 @@ final class LivePenMakesFewDrawingsTests: XCTestCase {
     }
 }
 
-/// Counts the replicas PencilKit checks out on the main thread, one for each new drawing given strokes, by wrapping
-/// its private `-[PKReplicaManager checkoutReplicaUUIDForDrawing:]` for the test (tests only; skipped when it is
-/// gone). `remove` puts PencilKit's own method back.
+/// Counts the replicas PencilKit checks out for EmberPad, on the main thread and on the live pen's own queue (EP124), one
+/// for each new drawing given strokes, by wrapping its private `-[PKReplicaManager checkoutReplicaUUIDForDrawing:]` for
+/// the test (tests only; skipped when it is gone). With a `delay`, each of those checkouts first waits that long, as one
+/// does while PencilKit saves its record. `remove` puts PencilKit's own method back.
 @MainActor
 private final class ReplicaCheckouts {
     private typealias Checkout = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
     private let method: Method
     private let original: IMP
     nonisolated(unsafe) private static var count = 0
+    nonisolated(unsafe) private static var delay: TimeInterval = 0
+    private static let lock = NSLock()
+    private static let livePenQueue = DispatchSpecificKey<Bool>()
 
-    init() throws {
+    init(delay: TimeInterval = 0) throws {
         _ = PKDrawing()
         let selector = NSSelectorFromString("checkoutReplicaUUIDForDrawing:")
         guard let manager = NSClassFromString("PKReplicaManager"),
               let method = class_getInstanceMethod(manager, selector) else {
             throw XCTSkip("PencilKit has no -[PKReplicaManager checkoutReplicaUUIDForDrawing:] to count")
         }
+        PageInkView.livePenDrawings.setSpecific(key: Self.livePenQueue, value: true)
+        Self.delay = delay
         self.method = method
         original = method_getImplementation(method)
         method_setImplementation(method, Self.counting(original, selector: selector))
     }
 
-    /// PencilKit's method, counting each call on the main thread. Not isolated to the main actor: PencilKit checks
-    /// out replicas from other threads too.
+    /// PencilKit's method, counting each call EmberPad makes. Not isolated to the main actor: PencilKit checks out
+    /// replicas from other threads too, and those are not counted.
     nonisolated private static func counting(_ original: IMP, selector: Selector) -> IMP {
         let call = unsafeBitCast(original, to: Checkout.self)
         let counted: @convention(block) (AnyObject, AnyObject) -> AnyObject? = { manager, drawing in
-            if Thread.isMainThread { ReplicaCheckouts.count += 1 }
+            if Thread.isMainThread || DispatchQueue.getSpecific(key: ReplicaCheckouts.livePenQueue) == true {
+                ReplicaCheckouts.lock.lock()
+                ReplicaCheckouts.count += 1
+                let delay = ReplicaCheckouts.delay
+                ReplicaCheckouts.lock.unlock()
+                if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            }
             return call(manager, selector, drawing)
         }
         return imp_implementationWithBlock(counted)
     }
 
-    /// How many replicas `body` checked out on the main thread.
-    func counting(_ body: () -> Void) -> Int {
-        let before = Self.count
-        body()
-        return Self.count - before
+    private static var total: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
     }
 
-    func remove() { method_setImplementation(method, original) }
+    /// How many replicas `body` checked out, including the drawings it left the live pen making.
+    func counting(_ body: () -> Void) -> Int {
+        let before = Self.total
+        body()
+        PageInkView.livePenDrawings.sync {}
+        return Self.total - before
+    }
+
+    func remove() {
+        method_setImplementation(method, original)
+        Self.delay = 0
+    }
 }
