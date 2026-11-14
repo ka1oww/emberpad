@@ -249,6 +249,10 @@ final class EraserPhase4Tests: XCTestCase {
         let (controller, session) = try await makeController()
         let canvas = try canvas(controller, session)
         controller.focus(canvas)
+        // EP120: a clear happens only with an undo step for it; an off-window canvas has no undo manager of its own.
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        controller.inkSelection.undoManagerOverride = undo
         controller.tools.select(.eraser)
         controller.tools.tap(.eraser)
         XCTAssertEqual(controller.tools.settingsTool, .eraser)
@@ -261,6 +265,7 @@ final class EraserPhase4Tests: XCTestCase {
         controller.canvasViewDrawingDidChange(canvas)
         controller.tools.clearPage()
         XCTAssertTrue(session.drawing(on: 0).strokes.isEmpty)
+        XCTAssertEqual(undo.undoActionName, "Clear Page")
     }
 
     // MARK: - Fixtures

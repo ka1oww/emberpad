@@ -53,6 +53,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private(set) var wholeStrokeErase: WholeStrokeEraseStroke?
     /// The page ink space of the eraser stroke in progress, fixed at pen-down.
     private weak var eraserStrokeSpace: UIView?
+    /// EP120: a confirmed Clear Page waiting for PencilKit to commit a stroke it still holds. Internal for tests.
+    var pendingClearPage: DispatchWorkItem?
     private var currentPage = 0
     /// Off from the moment the worksheet starts leaving, so a late throttled frame cannot put a page back on the
     /// student view after the editor has cleared it.
@@ -677,6 +679,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     func retire() {
         saveReadingPosition()
+        pendingClearPage?.cancel()
+        pendingClearPage = nil
         landInkEdits()
         cancelInkLandingWaits()
         setPageInput(false)
@@ -2307,17 +2311,55 @@ extension PDFOverlayPageController {
         scheduleInkLanding()
     }
 
-    /// Clear Page: removes all ink on the focused page as one undo step.
-    func clearPage(undoManager: UndoManager? = nil) {
-        guard !readOnly else { return }
-        landInkEdits()
-        finishHighlighterErase()
-        let page = activeCanvas.flatMap { canvas in canvases.first(where: { $0.value === canvas })?.key } ?? currentPage
+    /// How often a confirmed Clear Page that has to wait for PencilKit looks again, in seconds; and the longest it
+    /// waits (PencilKit gives up on a stroke within 3 s, `InkFlights`).
+    static let clearPageRetry: TimeInterval = 0.05
+    static let clearPageMaxWait: TimeInterval = 4
+
+    /// Clear Page, as in GoodNotes: removes all the ink on a page (pen writing, highlighter and shapes, which are all
+    /// strokes) as one undo step named "Clear Page", keeping the page and its PDF. `page` is zero-based; without it,
+    /// the focused page, as the eraser's own Clear Page clears. The cleared page saves like any other ink change.
+    ///
+    /// EP120: never while PencilKit still holds a stroke it has not committed (a Pencil touch is down, or a stroke
+    /// just written has not landed): setting the page then would make PencilKit throw that stroke away outside the
+    /// undo step, so undo could not bring it back. The clear waits until the stroke is on the page, then takes it
+    /// with the rest. Nothing is cleared unless the undo step can be recorded.
+    func clearPage(_ page: Int? = nil, undoManager: UndoManager? = nil) {
+        pendingClearPage?.cancel()
+        pendingClearPage = nil
+        guard !readOnly, !session.isRetired else { return }
+        let target = page ?? activeCanvas.flatMap { canvas in canvases.first(where: { $0.value === canvas })?.key }
+            ?? currentPage
+        guard session.page(at: target) != nil else { return }
+        let deadline = Date().addingTimeInterval(Self.clearPageMaxWait)
+        func attempt() {
+            pendingClearPage = nil
+            guard !readOnly, !session.isRetired else { return }
+            if pencilIsDown || !inkFlights.isEmpty || isReplacingStroke, Date() < deadline {
+                let work = DispatchWorkItem { MainActor.assumeIsolated { attempt() } }
+                pendingClearPage = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.clearPageRetry, execute: work)
+                return
+            }
+            finishWholeStrokeErase()
+            landInkEdits()
+            finishHighlighterErase()
+            clearPageNow(target, undoManager: undoManager)
+        }
+        attempt()
+    }
+
+    /// More › Clear Page, once the teacher confirms: page `index`, the page in view the confirmation named.
+    func clearInk(onPage index: Int) { clearPage(index) }
+
+    private func clearPageNow(_ page: Int, undoManager: UndoManager?) {
         let before = session.drawing(on: page)
-        guard !before.strokes.isEmpty else { return }
+        guard !before.strokes.isEmpty,
+              let undoManager = undoManager ?? inkSelection.undoManagerOverride ?? canvases[page]?.undoManager
+                ?? activeCanvas?.undoManager,
+              !undoManager.isUndoing, !undoManager.isRedoing else { return }
         let empty = PKDrawing()
         setDrawing(empty, page: page)
-        guard let undoManager = undoManager ?? canvases[page]?.undoManager else { return }
         undoManager.beginUndoGrouping()
         registerDrawingSwap(on: undoManager, page: page, restoring: before, then: empty)
         undoManager.setActionName("Clear Page")

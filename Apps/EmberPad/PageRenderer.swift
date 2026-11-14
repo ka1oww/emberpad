@@ -30,6 +30,8 @@ protocol WorksheetPageRenderer: AnyObject {
     var startPage: Int? { get set }
     /// EP121: the store the worksheet's position is remembered in, set before the view appears.
     var readingPositions: ReadingPositions? { get set }
+    /// More › Clear Page (EP120): removes all the ink on page `index` (zero-based) as one undo step, keeping the page.
+    func clearInk(onPage index: Int)
 }
 
 /// This is the replacement point for report option B. Ink and persistence belong to DocumentSession.
@@ -174,6 +176,9 @@ final class PageChromeState: ObservableObject {
     @Published var goToPageOpen = false
     /// More › Change Template's paper picker is up for the page in view (EP62).
     @Published var changeTemplateOpen = false
+    /// More › Clear Page's confirmation is up for this zero-based page (EP120). It names the page it was asked for, so
+    /// a scroll while it is up never clears another page.
+    @Published var pageToClear: Int?
     /// The page tools for the page in view, as their buttons call them; the editor sets them (EP62).
     var toggleBookmark: (() -> Void)?
     var rotatePage: ((_ clockwise: Bool) -> Void)?
@@ -400,6 +405,14 @@ struct EditorScreen: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Page \(PageNumberField.range(pageCount: session?.pdf.pageCount ?? 0))")
+        }
+        .alert(ClearPageText.title(chrome.pageToClear ?? 0),
+               isPresented: Binding(get: { chrome.pageToClear != nil }, set: { if !$0 { chrome.pageToClear = nil } }),
+               presenting: chrome.pageToClear) { page in
+            Button("Clear Page", role: .destructive) { renderer?.clearInk(onPage: page) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text(ClearPageText.message)
         }
         .task {
             do {
@@ -764,7 +777,7 @@ extension EditorScreen {
     }
 
     /// GoodNotes' page section at the top of More (EP62): the page in view's Rotate Page, Change Template (added
-    /// paper only) and Go to Page.
+    /// paper only), Go to Page and Clear Page (EP120).
     @ViewBuilder
     private var pageRows: some View {
         Section("Page \(chrome.currentPage + 1)") {
@@ -785,6 +798,12 @@ extension EditorScreen {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { chrome.goToPageOpen = true }
             }
             .disabled(session == nil || renderer == nil)
+            // EP120: GoodNotes' Clear Page, in its place in More, after Go to Page.
+            if let session {
+                ClearPageMenuButton(session: session, page: chrome.currentPage, enabled: canAddPages) {
+                    chrome.pageToClear = chrome.currentPage
+                }
+            }
         }
     }
 
@@ -807,6 +826,27 @@ extension EditorScreen {
         }
         .disabled(session?.record.role != .student || flattenedExport.isExporting)
     }
+}
+
+/// More › Clear Page for the page in view (EP120). Off while the page holds no ink, as there is nothing to clear, and
+/// wherever the page takes no edits (read-only, a Teacher copy, a page edit saving).
+private struct ClearPageMenuButton: View {
+    @ObservedObject var session: DocumentSession
+    let page: Int
+    let enabled: Bool
+    let ask: () -> Void
+
+    var body: some View {
+        Button("Clear Page", systemImage: "eraser", role: .destructive, action: ask)
+            .disabled(!enabled || session.drawing(on: page).strokes.isEmpty)
+    }
+}
+
+/// The wording of Clear Page's confirmation (EP120), shared by More and the eraser's options.
+enum ClearPageText {
+    static func title(_ page: Int) -> String { "Clear page \(page + 1)?" }
+    static let eraserTitle = "Clear this page?"
+    static let message = "All writing, highlights and shapes on this page are removed. The page and its PDF stay. You can undo it."
 }
 
 /// The header's bookmark for the page in view: an outline, filled once the page is bookmarked (EP62).
