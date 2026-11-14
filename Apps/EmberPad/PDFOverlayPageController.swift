@@ -1734,9 +1734,9 @@ extension PDFOverlayPageController {
         if !recoveredInk.isEmpty { scheduleInkLanding() }
     }
 
-    /// Asks for the queued changes to land at the next safe moment: on a display frame after PencilKit's latest
-    /// commit, while it holds no stroke and the Pencil is up, and, for the pen's own swaps, once the writing has
-    /// paused (`InkLandingTiming`). Meanwhile the live pen keeps drawing each waiting pen stroke.
+    /// Asks for the queued changes to land at the next safe moment: on a display frame once PencilKit's latest
+    /// commit has settled, while it holds no stroke and the Pencil is up, and, for the pen's own swaps, once the
+    /// writing has paused (`InkLandingTiming`). Meanwhile the live pen keeps drawing each waiting pen stroke.
     func scheduleInkLanding() {
         guard hasPendingInk else { return }
         claimLivePen(final: false)
@@ -1747,12 +1747,21 @@ extension PDFOverlayPageController {
         inkLandingFrame = link
     }
 
-    /// A display frame: lands the queued changes if this frame comes after PencilKit's latest commit.
+    /// A display frame: lands the queued changes if PencilKit's latest commit has settled by this frame.
     fileprivate func inkLandingFrameDidFire(_ link: CADisplayLink) {
-        guard inkTiming.frameIsAfterCommit(link.timestamp) else { return }
-        link.invalidate()
+        if inkLandingFrame(shownAt: link.timestamp) { link.invalidate() }
+    }
+
+    /// A display frame shown at `timestamp` (`CACurrentMediaTime` seconds): lands the queued changes, and returns true,
+    /// if PencilKit's latest commit has settled by then. On the iPad the first frame after a commit can come a
+    /// millisecond after it, just before the next quick stroke begins (EP123).
+    @discardableResult
+    func inkLandingFrame(shownAt timestamp: CFTimeInterval) -> Bool {
+        guard inkTiming.frameIsClearOfCommit(timestamp) else { return false }
+        inkLandingFrame?.invalidate()
         inkLandingFrame = nil
         landInkEdits(force: false)
+        return true
     }
 
     /// Stops waiting for a frame, a pause or a commit: the controller is leaving.
