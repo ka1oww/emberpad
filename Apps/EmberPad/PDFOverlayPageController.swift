@@ -1203,9 +1203,17 @@ extension PDFOverlayPageController {
     /// with its own lasso and pastes from its own menu, and PencilKit's selection and "Insert Space" would move the
     /// page's ink outside both and outside EmberPad's undo. These are PencilKit's recognisers inside the canvas, by the
     /// names PencilKit gives them.
+    ///
+    /// EP117: the Pencil's side of PencilKit's selection goes too: its Pencil long-press, its own lasso pan and the
+    /// drags and taps on a selection it made. They stayed on with every tool and cancel the touches they take, so a
+    /// Pencil held still (draw and hold for a straight line is exactly that) could start PencilKit's selection, which
+    /// then took the next Pencil touch from EmberPad's lasso: the lasso was cancelled and selected nothing. EmberPad's
+    /// own hold (`HoldRecognizer`) and lasso (`LassoCaptureRecognizer`) do all of this instead.
     static let pencilKitSelectionRecognizers: Set<String> = [
         "com.apple.PencilKit.progressiveTaps", "com.apple.PencilKit.longPressToSelectToken",
         "com.apple.PencilKit.modifySelection",
+        "com.apple.PencilKit.pencilLongPress", "com.apple.PencilKit.lasso", "com.apple.PencilKit.knobDrag",
+        "com.apple.PencilKit.knobBrush", "com.apple.PencilKit.noOpTap",
     ]
 
     /// Turns PencilKit's own selection off on `canvas`, each time the input rules settle (every touch focuses its

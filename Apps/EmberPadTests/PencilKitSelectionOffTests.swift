@@ -45,6 +45,34 @@ final class PencilKitSelectionOffTests: XCTestCase {
         }
     }
 
+    /// EP117: the Pencil's side of PencilKit's selection (its Pencil long-press, its lasso and the drags on a selection
+    /// it made) is off too, with the lasso chosen and after the pages' canvases are redrawn for a zoom or a new page
+    /// comes on screen, so a Pencil held still for a straight line can never start PencilKit's selection and take the
+    /// next touch from EmberPad's lasso.
+    func testPencilKitsPencilSelectionStaysOffAfterZoomAndPageChange() throws {
+        let (controller, tools) = try page()
+        for name in ["com.apple.PencilKit.pencilLongPress", "com.apple.PencilKit.lasso", "com.apple.PencilKit.knobDrag",
+                     "com.apple.PencilKit.knobBrush", "com.apple.PencilKit.noOpTap"] {
+            XCTAssertTrue(PDFOverlayPageController.pencilKitSelectionRecognizers.contains(name), "\(name) is turned off")
+        }
+        tools.select(.lasso)
+        HoldPage.turn(0.1)
+        check(controller, "with the lasso chosen")
+        let fit = controller.pdfView.scaleFactor
+        for zoom in [2.0, 1.0] {
+            controller.pdfView.scaleFactor = fit * zoom
+            controller.updateInkScale()
+            HoldPage.turn(0.3)
+            check(controller, "after a zoom to \(zoom)x")
+        }
+        controller.goToPage(1)
+        HoldPage.turn(0.5)
+        check(controller, "after going to page 2")
+        tools.select(.pen)
+        HoldPage.turn(0.1)
+        check(controller, "with the pen chosen on page 2")
+    }
+
     private func check(_ controller: PDFOverlayPageController, _ when: String, file: StaticString = #filePath,
                        line: UInt = #line) {
         XCTAssertFalse(controller.canvases.isEmpty, file: file, line: line)
