@@ -594,11 +594,13 @@ final class DeviceDrawingStressTests: XCTestCase {
     func test16_LaserPointer() throws {
         let scenario = try StressScenario(tool: "laser", title: "Laser pointer, dot and trail", self)
         var kept = scenario.bystanderCount
+        // The pen's rows; each laser runs 60 pt above its pen.
+        let rows = scenario.fit([320, 470])
         for (n, mode) in [LaserMode.dot, .trail].enumerated() {
             scenario.tools.select(.laser)
             scenario.tools.setLaserMode(mode)
             var shownWhileDown = 0, samples = 0
-            scenario.drive(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 100, y: 260 + CGFloat(n) * 150), width: 300, seed: n),
+            scenario.drive(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 100, y: rows[n] - 60), width: 300, seed: n),
                                              speed: 600, seed: UInt64(n))) { k in
                 guard k > 10, k % 6 == 0 else { return }
                 samples += 1
@@ -608,7 +610,7 @@ final class DeviceDrawingStressTests: XCTestCase {
                            "shown on \(shownWhileDown) of \(samples) checks")
             StressPage.pump(0.005)
             scenario.tools.select(.pen)
-            scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 100, y: 320 + CGFloat(n) * 150), seed: n), speed: 450,
+            scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 100, y: rows[n]), seed: n), speed: 450,
                                            seed: UInt64(n + 10)), "pen after the \(mode) laser")
             kept += 1
             scenario.settle()
@@ -628,8 +630,10 @@ final class DeviceDrawingStressTests: XCTestCase {
     func test17_UndoRedoBursts() throws {
         let scenario = try StressScenario(tool: "undoRedo", title: "Undo and redo bursts", self)
         var ids: [Int] = []
+        // Two rows of six, and the stroke written after the undos below them.
+        let rows = scenario.fit([220, 310, 480])
         for n in 0..<12 {
-            ids.append(scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 50 + CGFloat(n % 6) * 90, y: 220 + CGFloat(n / 6) * 90),
+            ids.append(scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 50 + CGFloat(n % 6) * 90, y: rows[n / 6]),
                                                                          width: 50, seed: n), speed: 450, seed: UInt64(n)),
                                     "stroke \(n + 1)"))
             StressPage.pump(0.012)
@@ -670,7 +674,7 @@ final class DeviceDrawingStressTests: XCTestCase {
             StressPage.pump(0.03)
         }
         scenario.sampler.releaseAll()
-        scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 60, y: 480), width: 50, seed: 30), speed: 450, seed: 30),
+        scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 60, y: rows[2]), width: 50, seed: 30), speed: 450, seed: 30),
                      "stroke after undo")
         scenario.settle()
         scenario.check("writing after an undo ends redo", !(scenario.undoManager?.canRedo ?? true),
@@ -689,8 +693,9 @@ final class DeviceDrawingStressTests: XCTestCase {
         var inks: [PKInk.InkType] = []
         var eraserInk: [String] = []
         let gaps: [TimeInterval] = [0.06, 0.1, 0.15, 0.2]
+        let rows = scenario.fit((0..<8).map { 170 + CGFloat($0) * 66 })
         for n in 0..<8 {
-            let y = 170 + CGFloat(n) * 66
+            let y = rows[n]
             scenario.tools.select(.pen)
             scenario.tools.selectPenColor(n % 3)
             scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 50, y: y), width: 60, seed: n), speed: 450, seed: UInt64(n)),
@@ -739,13 +744,14 @@ final class DeviceDrawingStressTests: XCTestCase {
         let scenario = try StressScenario(tool: "toolbarDrag", title: "Palette moved between strokes", self)
         var written = 0
         let places: [(ToolbarDock, Double)] = [(.leading, 0.3), (.bottom, 0.7), (.trailing, 0.5), (.top, 0.2), (.top, 0.8), (.bottom, 0.1)]
+        let rows = scenario.fit(places.indices.map { 170 + CGFloat($0) * 80 })
         for (n, place) in places.enumerated() {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
                 scenario.tools.settingsTool = nil
                 scenario.tools.setToolbarPosition(place.0, along: place.1)
             }
             for k in 0..<3 {
-                let origin = CGPoint(x: 80 + CGFloat(k) * 150, y: 170 + CGFloat(n) * 80)
+                let origin = CGPoint(x: 80 + CGFloat(k) * 150, y: rows[n])
                 scenario.pen(StressInk.samples(StressInk.squiggle(at: origin, width: 60, seed: n * 3 + k), speed: 450,
                                                seed: UInt64(n * 3 + k)), "after palette move \(n + 1) #\(k + 1)")
                 written += 1
@@ -895,6 +901,10 @@ final class StressScenario {
         sampler.scenarioStart = CACurrentMediaTime()
         notes.append(String(format: "began at %.3f (Unix time)", Date().timeIntervalSince1970))
         notes.append(String(format: "PencilKit replica record %.1f MB at the start", Double(StressRun.pencilKitReplicaBytes) / 1_000_000))
+        if StressGate.landscape {
+            let frame = page.window.frame
+            notes.append("laid out in a landscape-shaped window, \(Int(frame.width)) by \(Int(frame.height)) points")
+        }
         if StressPage.earlierStillAlive > 0 {
             notes.append("\(StressPage.earlierStillAlive) pages from earlier scenarios were still alive when this one began")
         }
@@ -935,6 +945,20 @@ final class StressScenario {
             mark.firstSeen = Array(repeating: nil, count: mark.points.count)
             mark.landedAt = nil
         }
+    }
+
+    /// The part of page `index` the screen shows, in page points, as the frame sampler reads it.
+    func shownPart(page index: Int = 0) -> CGRect {
+        guard let canvas = page.canvas(index), let window = canvas.window else { return .null }
+        let pdfView = controller.pdfView
+        let shown = pdfView.convert(pdfView.bounds, to: window).intersection(window.bounds)
+        return shown.isNull ? .null : canvas.pageSpace.convert(shown, from: window).intersection(canvas.pageSpace.bounds)
+    }
+
+    /// The heights `ys` of a scenario's rows of writing, kept on the part of page 0 the screen shows (`StressGate.fit`).
+    func fit(_ ys: [CGFloat]) -> [CGFloat] {
+        let shown = shownPart()
+        return shown.isNull ? ys : StressGate.fit(ys, above: shown.maxY - StressGate.rowMargin)
     }
 
     /// The centre of what the screen shows of `index`, in page points.
@@ -1228,6 +1252,18 @@ final class StressScenario {
         let landings = landed.map(\.time)
         let slowest = landed.max { $0.time < $1.time }
         let unlanded = lifted.filter { $0.pageDrawnAt == nil }.map(\.label)
+        // A stroke the screen never showed was never read, so it cannot be seen to land: it still fails, named apart
+        // from one the screen showed and the page never drew (EP122: written below a landscape screen).
+        let unseen = lifted.filter { $0.pageDrawnAt == nil && !$0.everOnScreen }.map(\.label)
+        let undrawn = lifted.filter { $0.pageDrawnAt == nil && $0.everOnScreen }.map(\.label)
+        var missing: [String] = []
+        if !undrawn.isEmpty {
+            missing.append("\(undrawn.count) of \(lifted.count) never drawn by the page itself: " + undrawn.prefix(4).joined(separator: ", "))
+        }
+        if !unseen.isEmpty {
+            missing.append("\(unseen.count) of \(lifted.count) written where the screen does not show them, so never seen to land: "
+                           + unseen.prefix(4).joined(separator: ", "))
+        }
         if !lifted.isEmpty {
             let worst = landings.max() ?? 0
             metrics["landingMaxMs"] = worst * 1000
@@ -1239,7 +1275,7 @@ final class StressScenario {
             }
             check("every stroke lands on the page", unlanded.isEmpty && worst <= StressBounds.landing,
                   unlanded.isEmpty ? String(format: "slowest landing %.0f ms after the pause began", worst * 1000) + " (\(slowest?.label ?? "-"))"
-                      : "\(unlanded.count) of \(lifted.count) never drawn by the page itself: \(unlanded.prefix(4).joined(separator: ", "))")
+                      : missing.joined(separator: "; "))
         }
         // Removal.
         if !removals.isEmpty {
