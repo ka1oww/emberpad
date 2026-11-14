@@ -4,6 +4,8 @@ import Foundation
 /// What the Shape tool made of a stroke (EP64), in drawing space.
 enum ShapeKind: String, Equatable, Sendable {
     case line, arrow, triangle, rectangle, square, polygon, ellipse, circle
+    /// A smooth curve, from the pen's draw and hold only (EP116); the Shape tool keeps a curve as drawn.
+    case curve
 
     var title: String {
         switch self {
@@ -15,6 +17,7 @@ enum ShapeKind: String, Equatable, Sendable {
         case .polygon: "Polygon"
         case .ellipse: "Ellipse"
         case .circle: "Circle"
+        case .curve: "Curve"
         }
     }
 }
@@ -28,11 +31,14 @@ enum InkShape: Equatable, Sendable {
     case polygon(kind: ShapeKind, vertices: [CGPoint])
     /// An ellipse with semi-axes `radii`, its first axis turned `angle` radians from horizontal.
     case ellipse(kind: ShapeKind, center: CGPoint, radii: CGSize, angle: CGFloat)
+    /// A cubic Bézier curve from `start` to `end` with control points `control1` and `control2` (EP116).
+    case curve(start: CGPoint, control1: CGPoint, control2: CGPoint, end: CGPoint)
 
     var kind: ShapeKind {
         switch self {
         case .line: .line
         case .arrow: .arrow
+        case .curve: .curve
         case .polygon(let kind, _), .ellipse(let kind, _, _, _): kind
         }
     }
@@ -40,7 +46,7 @@ enum InkShape: Equatable, Sendable {
     /// Closed shapes can be filled.
     var isClosed: Bool {
         switch self {
-        case .line, .arrow: false
+        case .line, .arrow, .curve: false
         case .polygon, .ellipse: true
         }
     }
@@ -50,6 +56,7 @@ enum InkShape: Equatable, Sendable {
         switch self {
         case .line(let start, let end): [start, end]
         case .arrow(let tail, let tip, _): [tail, tip]
+        case .curve(let start, _, _, let end): [start, end]
         case .polygon(_, let vertices): vertices
         case .ellipse: []
         }
@@ -76,6 +83,45 @@ enum InkShape: Equatable, Sendable {
                 let t = CGFloat(step % count) / CGFloat(count) * 2 * .pi
                 return ShapeRecognizer.ellipsePoint(center: center, radii: radii, angle: angle, t: t)
             }
+        case .curve(let start, let control1, let control2, let end):
+            // About every `spacing` points along the control polygon, which is never shorter than the curve.
+            let reach = ShapeRecognizer.pathLength([start, control1, control2, end])
+            let count = max(16, Int((reach / max(spacing, 0.5)).rounded(.up)))
+            return (0...count).map { step in
+                ShapeRecognizer.bezierPoint(start, control1, control2, end, t: CGFloat(step) / CGFloat(count))
+            }
+        }
+    }
+
+    /// `self` turned `rotation` radians and scaled `scale` times about `pivot` (EP116: a held shape follows the
+    /// Pencil). The kind stays as recognised.
+    func transformed(about pivot: CGPoint, scale: CGFloat, rotation: CGFloat) -> InkShape {
+        guard scale != 1 || rotation != 0 else { return self }
+        let cosine = cos(rotation) * scale, sine = sin(rotation) * scale
+        func map(_ p: CGPoint) -> CGPoint {
+            let x = p.x - pivot.x, y = p.y - pivot.y
+            return CGPoint(x: pivot.x + x * cosine - y * sine, y: pivot.y + x * sine + y * cosine)
+        }
+        switch self {
+        case .line(let start, let end): return .line(start: map(start), end: map(end))
+        case .arrow(let tail, let tip, let head): return .arrow(tail: map(tail), tip: map(tip), head: head * scale)
+        case .polygon(let kind, let vertices): return .polygon(kind: kind, vertices: vertices.map(map))
+        case .ellipse(let kind, let center, let radii, let angle):
+            return .ellipse(kind: kind, center: map(center), radii: CGSize(width: radii.width * scale, height: radii.height * scale),
+                            angle: angle + rotation)
+        case .curve(let start, let control1, let control2, let end):
+            return .curve(start: map(start), control1: map(control1), control2: map(control2), end: map(end))
+        }
+    }
+
+    /// Where a closed shape is turned and scaled about: its middle. Nil for an open shape.
+    var center: CGPoint? {
+        switch self {
+        case .ellipse(_, let center, _, _): return center
+        case .polygon(_, let vertices):
+            guard let box = LassoGeometry.bounds(of: vertices) else { return nil }
+            return CGPoint(x: box.midX, y: box.midY)
+        case .line, .arrow, .curve: return nil
         }
     }
 
@@ -126,7 +172,7 @@ enum InkShape: Equatable, Sendable {
             // Two corners snapped onto one point would fold the shape; keep it as recognised.
             guard Set(moved.map { "\($0.x),\($0.y)" }).count == moved.count else { return self }
             return .polygon(kind: kind, vertices: moved)
-        case .ellipse:
+        case .ellipse, .curve:
             return self
         }
     }
@@ -532,6 +578,130 @@ enum ShapeRecognizer {
     static func ellipsePoint(center: CGPoint, radii: CGSize, angle: CGFloat, t: CGFloat) -> CGPoint {
         let x = radii.width * cos(t), y = radii.height * sin(t)
         return CGPoint(x: center.x + x * cos(angle) - y * sin(angle), y: center.y + x * sin(angle) + y * cos(angle))
+    }
+
+    // MARK: Draw and hold (EP116)
+
+    /// A line-like held stroke is a curve, not a line, when it bows away from the straight line between its ends by
+    /// at least this share of that distance (a 46° arc does) and a curve fits it far better than the line does.
+    static let curveBow: CGFloat = 0.1
+    /// A curve fits a stroke when the stroke strays from it by at most these shares of the stroke's size: on
+    /// average, and at most anywhere.
+    static let curveMeanErrorLimit: CGFloat = 0.03
+    static let curveMaxErrorLimit: CGFloat = 0.08
+    /// A curve turns at most this far from end to end, in degrees: a half circle and a parabola do; a spiral, a
+    /// nearly closed loop or a letter's double bend does not, and stays as written.
+    static let curveTurnLimit: CGFloat = 200
+
+    /// What a pen stroke held still at its end becomes (EP116, GoodNotes' Draw and Hold), from the points drawn so
+    /// far: a closed stroke the Shape tool's closed shapes (triangle, rectangle or square, polygon, ellipse or
+    /// circle), an arrow, or a smooth curve. `lineLike`: the stroke was close to a line at the hold, so it is the
+    /// draw-and-hold straight line unless it is plainly a curve. Nil when the stroke is none of these (a scribble, a
+    /// word, a spiral), or for a line: the caller then keeps its straight line, or the stroke as written.
+    static func heldShape(_ raw: [CGPoint], lineLike: Bool) -> InkShape? {
+        var points: [CGPoint] = []
+        for point in raw where point != points.last { points.append(point) }
+        guard points.count >= 3, let first = points.first, let box = LassoGeometry.bounds(of: points) else { return nil }
+        let size = max(box.width, box.height)
+        guard size >= minimumSize else { return nil }
+        if lineLike { return bowedCurve(points) }
+        let closing = trimmedToClosure(points)
+        if let end = closing.last, distance(first, end) < closureRatio * pathLength(closing) {
+            return closedShape(closing, size: size)
+        }
+        if let arrow = arrow(points, size: size) { return arrow }
+        return curve(points)?.shape
+    }
+
+    /// The curve a line-like stroke is, when it bows clearly to one side (`curveBow`) and the curve fits it at least
+    /// twice as closely as the straight line between its ends does. A wobbly straight line stays a line.
+    static func bowedCurve(_ points: [CGPoint]) -> InkShape? {
+        guard let first = points.first, let last = points.last else { return nil }
+        let chord = distance(first, last)
+        guard chord > 0 else { return nil }
+        let even = resampled(points, count: 48)
+        let offsets = even.map { distance(from: $0, toSegment: first, last) }
+        guard let bow = offsets.max(), bow >= curveBow * chord, let fit = curve(points) else { return nil }
+        let lineError = offsets.reduce(0, +) / CGFloat(offsets.count)
+        return fit.meanError <= 0.5 * lineError ? fit.shape : nil
+    }
+
+    /// The cubic Bézier curve that best fits an open stroke, with its ends at the stroke's ends, and how far the
+    /// stroke strays from it on average; nil when it does not fit (`curveMeanErrorLimit`, `curveMaxErrorLimit`) or
+    /// turns too far (`curveTurnLimit`).
+    static func curve(_ points: [CGPoint]) -> (shape: InkShape, meanError: CGFloat)? {
+        guard let box = LassoGeometry.bounds(of: points) else { return nil }
+        let size = max(box.width, box.height)
+        let even = resampled(points, count: 48)
+        guard size > 0, even.count >= 4, let p0 = even.first, let p3 = even.last, distance(p0, p3) > 0 else { return nil }
+        // Chord-length parameters, then twice refined to each point's nearest place on the curve.
+        let along = PenFeel.arcLengths(even)
+        guard let total = along.last, total > 0 else { return nil }
+        var ts = along.map { $0 / total }
+        var controls: (CGPoint, CGPoint)?
+        for _ in 0..<3 {
+            guard let fitted = bezierControls(even, start: p0, end: p3, parameters: ts) else { return nil }
+            controls = fitted
+            ts = zip(even, ts).map { nearestParameter(of: $0.0, on: p0, fitted.0, fitted.1, p3, near: $0.1) }
+        }
+        guard let (c1, c2) = controls else { return nil }
+        let drawn = (0...96).map { bezierPoint(p0, c1, c2, p3, t: CGFloat($0) / 96) }
+        let errors = even.map { point in
+            zip(drawn, drawn.dropFirst()).map { distance(from: point, toSegment: $0.0, $0.1) }.min() ?? 0
+        }
+        let mean = errors.reduce(0, +) / CGFloat(errors.count)
+        guard mean <= curveMeanErrorLimit * size, (errors.max() ?? 0) <= curveMaxErrorLimit * size else { return nil }
+        var turning: CGFloat = 0
+        for i in 1..<(drawn.count - 1) where distance(drawn[i - 1], drawn[i]) > 1e-6 && distance(drawn[i], drawn[i + 1]) > 1e-6 {
+            turning += turn(from: drawn[i - 1], at: drawn[i], to: drawn[i + 1])
+        }
+        guard turning <= curveTurnLimit else { return nil }
+        return (.curve(start: p0, control1: c1, control2: c2, end: p3), mean)
+    }
+
+    /// The two inner control points of the cubic Bézier from `start` to `end` closest, by least squares, to `points`
+    /// at `parameters`. Nil when the points do not pin them down.
+    static func bezierControls(_ points: [CGPoint], start: CGPoint, end: CGPoint,
+                               parameters: [CGFloat]) -> (CGPoint, CGPoint)? {
+        var a11: CGFloat = 0, a12: CGFloat = 0, a22: CGFloat = 0
+        var x1 = CGPoint.zero, x2 = CGPoint.zero
+        for (p, t) in zip(points, parameters) {
+            let u = 1 - t
+            let b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t
+            let rx = p.x - b0 * start.x - b3 * end.x, ry = p.y - b0 * start.y - b3 * end.y
+            a11 += b1 * b1; a12 += b1 * b2; a22 += b2 * b2
+            x1.x += b1 * rx; x1.y += b1 * ry
+            x2.x += b2 * rx; x2.y += b2 * ry
+        }
+        let determinant = a11 * a22 - a12 * a12
+        guard abs(determinant) > 1e-9 else { return nil }
+        let c1 = CGPoint(x: (a22 * x1.x - a12 * x2.x) / determinant, y: (a22 * x1.y - a12 * x2.y) / determinant)
+        let c2 = CGPoint(x: (a11 * x2.x - a12 * x1.x) / determinant, y: (a11 * x2.y - a12 * x1.y) / determinant)
+        return (c1, c2)
+    }
+
+    /// The point at `t` on the cubic Bézier through `p0`, `p1`, `p2`, `p3`.
+    static func bezierPoint(_ p0: CGPoint, _ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint, t: CGFloat) -> CGPoint {
+        let u = 1 - t
+        let b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t
+        return CGPoint(x: b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x, y: b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y)
+    }
+
+    /// One Newton step from `t` towards the parameter of the curve's point nearest `point`, kept within 0…1.
+    private static func nearestParameter(of point: CGPoint, on p0: CGPoint, _ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint,
+                                         near t: CGFloat) -> CGFloat {
+        let u = 1 - t
+        let q = bezierPoint(p0, p1, p2, p3, t: t)
+        // First and second derivatives.
+        let d1 = CGPoint(x: 3 * u * u * (p1.x - p0.x) + 6 * u * t * (p2.x - p1.x) + 3 * t * t * (p3.x - p2.x),
+                         y: 3 * u * u * (p1.y - p0.y) + 6 * u * t * (p2.y - p1.y) + 3 * t * t * (p3.y - p2.y))
+        let d2 = CGPoint(x: 6 * u * (p2.x - 2 * p1.x + p0.x) + 6 * t * (p3.x - 2 * p2.x + p1.x),
+                         y: 6 * u * (p2.y - 2 * p1.y + p0.y) + 6 * t * (p3.y - 2 * p2.y + p1.y))
+        let dx = q.x - point.x, dy = q.y - point.y
+        let numerator = dx * d1.x + dy * d1.y
+        let denominator = d1.x * d1.x + d1.y * d1.y + dx * d2.x + dy * d2.y
+        guard abs(denominator) > 1e-9 else { return t }
+        return min(max(t - numerator / denominator, 0), 1)
     }
 
     // MARK: Geometry

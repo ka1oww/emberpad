@@ -84,6 +84,9 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     /// (`StrokeSnap.isLineLike`). Movement after the hold only moves the
     /// line's end, so it does not count. Settable in the module for tests.
     var lineLikeAtHold = false
+    /// The pen's draw and hold made the stroke a clean shape when the hold latched (EP116), set by the owner. Like
+    /// `lineLikeAtHold`, it lasts until the next touch begins. Settable in the module for tests.
+    var heldShape: HeldShape?
     /// The current touch has been held still long enough to count as a hold.
     var isHeld: Bool { tracker?.held ?? false }
     /// The tracked touch was cancelled rather than lifted.
@@ -136,6 +139,7 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         currentLocation = point
         travelled = 0
         lineLikeAtHold = false
+        heldShape = nil
         heldAtEnd = false
         pencilStroke = true
         wasCancelled = false

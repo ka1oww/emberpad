@@ -1107,22 +1107,47 @@ extension PDFOverlayPageController {
     }
 
     /// Whether the pen stroke `hold` tracks is held into a straight line: the pen's "Draw and hold" switch is on and
-    /// the stroke was close to a line when the hold latched (`StrokeSnap.isLineLike`). A held letter, curve or closed
-    /// loop stays as written.
+    /// the stroke was close to a line when the hold latched (`StrokeSnap.isLineLike`) and the hold made no shape of it
+    /// (EP116: a clearly bowed line is a curve). A held letter or scribble stays as written.
     func isHeldPenLine(_ hold: HoldRecognizer) -> Bool {
-        tools.current == .pen && hold.heldAtEnd && hold.lineLikeAtHold && tools.settings.penDrawAndHold
+        tools.current == .pen && hold.heldAtEnd && hold.lineLikeAtHold && hold.heldShape == nil && tools.settings.penDrawAndHold
     }
 
-    /// Draw and hold, as GoodNotes (EP96): the moment the hold latches on a pen stroke close to a line, the stroke is
-    /// drawn as a straight line in its own ink, from where it began to the Pencil, and while the Pencil stays down
-    /// the line's end follows it. The lift commits that line. From here on the stroke is a line, never a scribble,
-    /// so the scribble preview stops watching it.
+    /// Whether the pen stroke `hold` tracks is held into a clean shape (EP116): the pen's "Draw and hold" switch is
+    /// on and the hold latched a shape (`heldPenShape`).
+    func isHeldPenShape(_ hold: HoldRecognizer) -> Bool {
+        tools.current == .pen && hold.heldAtEnd && hold.heldShape != nil && tools.settings.penDrawAndHold
+    }
+
+    /// Draw and hold, as GoodNotes (EP96, EP116): the moment the hold latches on a pen stroke, the stroke is drawn in
+    /// its own ink as the clean shape it was drawn as (`heldPenShape`), or, close to a line, as a straight line from
+    /// where it began to the Pencil. While the Pencil stays down the line's end follows it, and the shape turns and
+    /// scales with it (`HeldShape`). The lift commits that line or shape. From here on the stroke is a line or a
+    /// shape, never a scribble, so the scribble preview stops watching it.
     private func holdPenLine(_ hold: HoldRecognizer) {
-        guard !readOnly, isHeldPenLine(hold), let canvas = hold.view as? PKCanvasView,
-              let page = canvases.first(where: { $0.value === canvas })?.key,
-              livePen.holdStraight(page: page) else { return }
+        guard !readOnly, tools.current == .pen, hold.heldAtEnd, tools.settings.penDrawAndHold,
+              let canvas = hold.view as? PKCanvasView,
+              let page = canvases.first(where: { $0.value === canvas })?.key else { return }
+        if let shape = heldPenShape(hold, page: page) {
+            guard livePen.holdShape(page: page, shape) else { return }
+            hold.heldShape = shape
+        } else {
+            guard isHeldPenLine(hold), livePen.holdStraight(page: page) else { return }
+        }
         if scribblePreview?.page == page { clearScribblePreview() }
         showLivePen(page: page)
+    }
+
+    /// The clean shape the pen stroke being written on `page` is held into (EP116): what `ShapeRecognizer.heldShape`
+    /// makes of the stroke so far. Nil for a line (drawn as the straight line), for a stroke that is no shape (kept
+    /// as written), and for a closed loop round ink with "Circle to lasso" on, which still selects that ink.
+    private func heldPenShape(_ hold: HoldRecognizer, page: Int) -> HeldShape? {
+        guard let writing = livePen.writing, writing.page == page else { return nil }
+        let points = writing.samples.map(\.location)
+        guard let shape = ShapeRecognizer.heldShape(points, lineLike: hold.lineLikeAtHold) else { return nil }
+        if shape.isClosed, tools.settings.circleToLasso, LassoGeometry.isClosedLoop(points),
+           !LassoGeometry.selectedIndices(in: session.drawing(on: page), lasso: points).isEmpty { return nil }
+        return HeldShape(shape: shape, samples: writing.samples)
     }
 
     private func updateHoldGuide(_ hold: HoldRecognizer) {
@@ -1231,8 +1256,9 @@ extension PDFOverlayPageController {
 
     /// After PencilKit commits a stroke, swap it for a straight one when it
     /// is a line-like highlighter stroke with "Always straight" on, or a highlighter or
-    /// pen stroke held still at its end with its draw-and-hold switch on. A
-    /// held closed pen loop is circle to lasso instead. The swap waits, queued,
+    /// pen stroke held still at its end with its draw-and-hold switch on; a pen
+    /// stroke the hold made a clean shape becomes that shape (EP116). A held
+    /// closed pen loop round ink is circle to lasso instead. The swap waits, queued,
     /// until PencilKit has committed every stroke it holds (EP94); the ink was
     /// already drawn, so nothing here can delay it. `strokes` is the page as
     /// PencilKit committed it. Returns whether the stroke is taken (a
@@ -1249,11 +1275,18 @@ extension PDFOverlayPageController {
         }
         guard held || hold.pencilStroke else { return false }
         let lineLike = hold.lineLikeAtHold
+        let heldShape = held && isHeldPenShape(hold) ? hold.heldShape : nil
         // A hold or stroke applies to the one drawing change it ended, whatever that change was.
         hold.consumeHold()
         // Undo and redo bring strokes back exactly as they were.
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         if let undoManager, undoManager.isUndoing || undoManager.isRedoing { return true }
+        if let heldShape, let stroke = newStroke, PenFeel.isPenInk(stroke.ink.inkType), stroke.mask == nil {
+            // Held into a clean shape (EP116): it lands as the shape the live pen drew while the Pencil was down.
+            enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke,
+                           kind: .held(fallback: heldShapeStroke(heldShape, for: stroke), actionName: heldShape.actionName))
+            return true
+        }
         if held, let stroke = newStroke, inkSelection.isLassoLoop(stroke) {
             // Circle to lasso (EP-29): the same wait for PencilKit's commit as the snap below.
             enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke, kind: .keep(lasso: true))
@@ -1268,12 +1301,26 @@ extension PDFOverlayPageController {
             straight = PenFeel.reshaped(straight, settings: tools.settings.penFeel, toolWidth: tools.settings.penWidth,
                                         color: tools.settings.penColor) ?? straight
             // It lands as the line the live pen drew while the Pencil was down (EP96); this is only its fallback.
-            enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke, kind: .straightLine(fallback: straight))
+            enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke,
+                           kind: .held(fallback: straight, actionName: PendingInkEdit.straightLineActionName))
             return true
         }
         enqueueInkEdit(page: page, index: strokes.count - 1, stroke: stroke,
                        kind: .replace([straight], actionName: PendingInkEdit.straightLineActionName))
         return true
+    }
+
+    /// The held shape as the committed `stroke` ends, in the pen's ink, colour, width and feel: the fallback for when
+    /// the live pen has no shape for the stroke.
+    private func heldShapeStroke(_ shape: HeldShape, for stroke: PKStroke) -> PKStroke {
+        let path = stroke.path
+        let start = path.first?.timeOffset ?? 0
+        let last = path.last.map { LiveInkSample(location: $0.location.applying(stroke.transform), time: $0.timeOffset) }
+            ?? LiveInkSample(location: shape.anchor, time: 0)
+        let settings = tools.settings
+        return PenFeel.stroke(shape.points(to: last, startTime: start), color: settings.penColor,
+                              settings: shape.feel(settings.penFeel), toolWidth: settings.penWidth, lifted: true,
+                              creationDate: path.creationDate, randomSeed: stroke.randomSeed)
     }
 
     /// Whether a just-committed stroke becomes a straight line.
@@ -1288,8 +1335,8 @@ extension PDFOverlayPageController {
             if settings.highlighterAlwaysStraight { return StrokeSnap.isLineLike(stroke) }
             return held && settings.straightHighlighter
         case .fountainPen, PenFeel.liveInkType:
-            // Only a stroke already close to a line when held snaps; a held letter,
-            // curve or closed loop stays as written (shapes come later).
+            // Only a stroke already close to a line when held snaps straight; a held shape (EP116) is taken before
+            // this, and a held letter or scribble stays as written.
             return tools.current == .pen && held && lineLike && settings.penDrawAndHold
         default:
             return false
@@ -1562,7 +1609,7 @@ extension PDFOverlayPageController {
         return dropped.filter { !onPage.contains(InkStrokeID($0.stroke)) }.flatMap { edit -> [PKStroke] in
             switch edit.kind {
             case .replace(let replacements, _) where !replacements.isEmpty: return replacements
-            case .straightLine(let fallback): return [fallback]
+            case .held(let fallback, _): return [fallback]
             case .scribble: return []
             case .penFeel, .replace, .keep: return [edit.stroke]
             }
@@ -1694,10 +1741,11 @@ extension PDFOverlayPageController {
             guard live != nil || final else { continue }
             pendingInkEdits[index].claimsLive = false
             pendingInkEdits[index].liveID = live?.id
-            if case .straightLine(let fallback) = edit.kind {
-                // Exactly the line drawn while the Pencil was down (EP96), with its end tip.
-                let line = live.flatMap { $0.line == nil ? nil : $0.stroke(lifted: true, creationDate: edit.stroke.path.creationDate) }
-                pendingInkEdits[index].kind = .replace([line ?? fallback], actionName: PendingInkEdit.straightLineActionName)
+            if case .held(let fallback, let actionName) = edit.kind {
+                // Exactly the line (EP96) or shape (EP116) drawn while the Pencil was down, with its end tip.
+                let held = live.flatMap { $0.line == nil && $0.shape == nil
+                    ? nil : $0.stroke(lifted: true, creationDate: edit.stroke.path.creationDate) }
+                pendingInkEdits[index].kind = .replace([held ?? fallback], actionName: actionName)
                 continue
             }
             guard case .penFeel(let settings, let toolWidth, let color) = edit.kind else { continue }
@@ -2049,8 +2097,9 @@ extension PDFOverlayPageController {
         // The live pen's stroke for this one, whose ink and erase may be hidden since its lift (EP108).
         let liveID = scribblePreview.flatMap { $0.page == page && $0.matches(scribble) ? $0.liveID : nil } ?? committingLiveID
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
-        // A stroke held into a straight line is a line (EP96), however the Pencil moved its end about while held.
-        let heldLine = Self.holdRecognizer(on: canvas).map(isHeldPenLine) ?? false
+        // A stroke held into a straight line is a line (EP96), and one held into a shape a shape (EP116), however the
+        // Pencil moved about while held.
+        let heldLine = Self.holdRecognizer(on: canvas).map { isHeldPenLine($0) || isHeldPenShape($0) } ?? false
         guard drawn, !readOnly, tools.current == .pen, tools.settings.scribbleToErase, !heldLine,
               undoManager?.isUndoing != true, undoManager?.isRedoing != true,
               PenFeel.isPenInk(scribble.ink.inkType) else {

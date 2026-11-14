@@ -182,6 +182,57 @@ final class DeviceDrawingStressTests: XCTestCase {
         scenario.finish(expectedStrokes: [0: scenario.bystanderCount + 4])
     }
 
+    /// The pen's draw and hold makes shapes (EP116): a square, a triangle, a circle and a curve, each held still at its
+    /// end straight after the last, become their clean shapes in the pen's ink, one stroke and one undo step each.
+    func test06b_PenHoldToShape() throws {
+        let scenario = try StressScenario(tool: "fountainPen.holdToShape", title: "Pen, hold to shape", self)
+        scenario.tools.setPenDrawAndHold(true)
+        let arc = (0...40).map { k -> CGPoint in
+            let angle = CGFloat.pi * (200 + 140 * CGFloat(k) / 40) / 180
+            return CGPoint(x: 420 + 130 * cos(angle), y: 560 + 130 * sin(angle))
+        }
+        let shapes: [(String, ShapeKind, [CGPoint])] = [
+            ("square", .square, ShapeToolTests.hand([CGPoint(x: 80, y: 180), CGPoint(x: 230, y: 180), CGPoint(x: 230, y: 330),
+                                                     CGPoint(x: 80, y: 330)], closed: true)),
+            ("triangle", .triangle, ShapeToolTests.hand([CGPoint(x: 360, y: 320), CGPoint(x: 450, y: 180), CGPoint(x: 540, y: 320)],
+                                                        closed: true)),
+            ("circle", .circle, ShapeToolTests.handEllipse(center: CGPoint(x: 160, y: 470), radii: CGSize(width: 80, height: 80))),
+            ("curve", .curve, arc),
+        ]
+        for (n, shape) in shapes.enumerated() {
+            // A held shape is redrawn clean the moment the hold latches, so the hand's own path is not judged after it.
+            let id = scenario.pen(StressInk.samples(shape.2, speed: 600, seed: UInt64(n)), "held \(shape.0)",
+                                  hold: HoldTracker.duration + 0.25)
+            scenario.sampler.release(id)
+            StressPage.pump(0.03)
+        }
+        scenario.settle()
+        let clean = Array(scenario.page.saved(0).dropFirst(scenario.bystanderCount))
+        scenario.check("each held shape is one stroke", clean.count == shapes.count,
+                       "\(clean.count) strokes for \(shapes.count) shapes")
+        scenario.check("each held shape is in the pen's ink", clean.allSatisfy { $0.ink.inkType == .fountainPen },
+                       clean.map { "\($0.ink.inkType.rawValue)" }.joined(separator: ", "))
+        // Each stroke kept is the clean shape the hand drew: on the recognised outline, not on the hand's path.
+        var off: [String] = []
+        for (n, shape) in shapes.enumerated() {
+            guard let ideal = ShapeRecognizer.heldShape(shape.2, lineLike: StrokeSnap.isLineLike(shape.2)), ideal.kind == shape.1 else {
+                off.append("\(shape.0) is not recognised from the hand")
+                continue
+            }
+            guard n < clean.count else { continue }
+            let outline = ideal.outline(spacing: 1)
+            let stray = clean[n].path.interpolatedPoints(by: .distance(2)).map { $0.location.applying(clean[n].transform) }
+                .map { p in outline.map { StressInk.distance($0, p) }.min() ?? .infinity }.max() ?? .infinity
+            if stray > 3 { off.append("\(shape.0) strays " + String(format: "%.1f", stray) + " pt from its clean \(ideal.kind) outline") }
+        }
+        scenario.check("each held shape is drawn clean", off.isEmpty,
+                       off.isEmpty ? "all \(shapes.count) on their clean outlines" : off.joined(separator: "; "))
+        scenario.markStrokes(clean, label: "held shape")
+        StressPage.pump(0.8)
+        scenario.checkUndoTakesOneStrokeEach(shapes.count)
+        scenario.finish(expectedStrokes: [0: scenario.bystanderCount + shapes.count])
+    }
+
     // MARK: - Highlighter
 
     /// The highlighter: straight on its own (the default), freehand with that off, and straightened by a hold.
