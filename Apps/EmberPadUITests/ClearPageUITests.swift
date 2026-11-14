@@ -144,10 +144,15 @@ final class ClearPageUITests: XCTestCase {
     func testTheEraserTappedTwiceAlsoOffersClearPage() throws {
         let eraser = app.buttons["Eraser"]
         XCTAssertTrue(eraser.waitForExistence(timeout: 10))
-        eraser.tap()
-        // The second tap opens the options only once the first has chosen the eraser, which a loaded simulator delays.
-        let chosen = expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: eraser)
-        wait(for: [chosen], timeout: 15)
+        // The second tap opens the options only once the first has chosen the eraser. A loaded simulator can drop that
+        // first tap, so the eraser is tapped again while it is not chosen, at most three times.
+        let chosen = NSPredicate(format: "isSelected == true")
+        for _ in 0..<3 where !eraser.isSelected {
+            eraser.tap()
+            let selected = XCTNSPredicateExpectation(predicate: chosen, object: eraser)
+            if XCTWaiter().wait(for: [selected], timeout: 15) == .completed { break }
+        }
+        XCTAssertTrue(eraser.isSelected, "the eraser is chosen")
         let row = app.buttons["Clear Page"]
         for _ in 0..<2 where !row.exists {
             eraser.tap()
