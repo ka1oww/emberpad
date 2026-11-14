@@ -85,22 +85,35 @@ final class PageInkView: UIView {
         let view: PKCanvasView
         /// The live stroke shown, by `LivePenStrokes` id; nil for a spare layer.
         var id: UInt64?
-        /// The revision of the stroke last given to the layer, and its drawing.
+        /// The revision of the stroke last given to the layer, and its shape.
         var revision = -1
-        var latest = PKDrawing()
+        var latest: PKStroke?
         /// The drawing PencilKit is drawing now, by revision, until it reports it has drawn it.
         var rendering: (revision: Int, since: CFTimeInterval, generation: Int)?
-        /// The newest drawing, waiting for that render to finish (EP103): PencilKit is given at most one drawing at a
+        /// The newest shape, waiting for that render to finish (EP103): PencilKit is given at most one drawing at a
         /// time, so drawings asked for faster than it draws them never queue up behind each other.
-        var waiting: (drawing: PKDrawing, revision: Int)?
+        var waiting: (stroke: PKStroke?, revision: Int)?
+        /// Where `latest` draws, in page points: `PKDrawing.bounds` of a drawing of it alone, null for none.
+        var latestBounds: CGRect { latest?.renderBounds ?? .null }
         /// The newest revision PencilKit has reported drawing.
         var drawnRevision: Int?
+        /// When the layer was last given a drawing, and whether the newest shape is already set to go when the next
+        /// one may (EP114, `livePenInterval`).
+        var lastGiven: CFTimeInterval = -.infinity
+        var flushScheduled = false
 
         init(view: PKCanvasView) { self.view = view }
     }
 
     /// How long a live layer waits for PencilKit to report a render before it is given its next drawing anyway.
     static let livePenRenderPatience: TimeInterval = 0.3
+    /// The least time between two drawings given to one live layer (EP114): the live stroke is reshaped up to 60 times
+    /// a second, not on every Pencil move (120 a second). Each drawing stays in PencilKit's replica record until the
+    /// app is next launched, and the main thread waits while PencilKit saves that record, so one drawing per move
+    /// stalled the page for a fifth of a second after a few minutes of writing. Chosen over letting PencilKit draw the
+    /// live stroke itself, which would look different until the lift; 30 a second kept the record smaller still, but
+    /// held each point back long enough to make pen to ink slow (p95 over 50 ms).
+    static let livePenInterval: TimeInterval = 1.0 / 60
     /// Hidden live layers kept for the next strokes, so a pen-down rarely makes a new one.
     static let spareLivePenLayers = 8
 
@@ -111,7 +124,7 @@ final class PageInkView: UIView {
 
     /// Every live pen stroke shown, oldest first: the latest drawing each layer was given.
     var livePenStrokes: [PKStroke] {
-        livePenOrder.compactMap { id in livePenLayers.first { $0.id == id } }.flatMap(\.latest.strokes)
+        livePenOrder.compactMap { id in livePenLayers.first { $0.id == id } }.compactMap(\.latest)
     }
 
     /// Every live pen layer, spare ones included.
@@ -127,6 +140,12 @@ final class PageInkView: UIView {
 
     /// Shows the pen's live strokes `shown`, oldest first, each in its own layer. `stroke` gives a stroke's shape when
     /// its revision differs from the one its layer has. A stroke no longer shown has its layer hidden at once.
+    ///
+    /// EP114: this runs for every Pencil move, so it makes no `PKDrawing` itself; `render` makes one only when it gives
+    /// PencilKit the next drawing. PencilKit records every drawing given strokes (`PKDrawing(strokes:)`, or setting or
+    /// appending strokes) in its replica record, which only grows while the app runs, and the main thread waits on
+    /// that record while PencilKit saves it whole, longer the larger it is: one drawing per move grew it to megabytes
+    /// in minutes of writing and stalled the page for up to a fifth of a second.
     func showLivePen(_ shown: [LivePenStrokes.Shown], stroke: (UInt64) -> PKStroke?) {
         let ids = Set(shown.map(\.id))
         for layer in livePenLayers where layer.id.map({ !ids.contains($0) }) ?? false {
@@ -137,7 +156,7 @@ final class PageInkView: UIView {
             let layer = livePenLayers.first { $0.id == item.id } ?? takeLivePenLayer(id: item.id)
             guard layer.revision != item.revision else { continue }
             layer.revision = item.revision
-            render(PKDrawing(strokes: stroke(item.id).map { [$0] } ?? []), revision: item.revision, on: layer)
+            render(stroke(item.id), revision: item.revision, on: layer)
         }
     }
 
@@ -154,6 +173,8 @@ final class PageInkView: UIView {
         layer.id = id
         layer.revision = -1
         layer.drawnRevision = nil
+        // The pen-down is drawn at once, however recently the layer was cleared.
+        layer.lastGiven = -.infinity
         layer.view.layer.mask = nil
         layer.view.isHidden = false
         return layer
@@ -192,28 +213,48 @@ final class PageInkView: UIView {
             livePenLayers.removeAll { $0 === layer }
             return
         }
-        render(PKDrawing(), revision: -1, on: layer, now: true)
+        render(nil, revision: -1, on: layer, now: true)
     }
 
-    /// Gives `layer` `drawing` once PencilKit has drawn the one before (EP103). PencilKit draws a whole stroke again
-    /// for every drawing it is given, and asked for more than it can draw it queues them all, so a long held line,
-    /// redrawn on every Pencil move, fell seconds behind the Pencil. Waiting, only the newest drawing is ever next.
-    private func render(_ drawing: PKDrawing, revision: Int, on layer: LivePenLayer, now: Bool = false) {
-        layer.latest = drawing
+    /// Gives `layer` a drawing of `stroke` (none: a blank one) once PencilKit has drawn the one before (EP103).
+    /// PencilKit draws a whole stroke again for every drawing it is given, and asked for more than it can draw it
+    /// queues them all, so a long held line, redrawn on every Pencil move, fell seconds behind the Pencil. Waiting,
+    /// only the newest shape is ever next, and its drawing is made only when it goes (EP114), at most once every
+    /// `livePenInterval`.
+    private func render(_ stroke: PKStroke?, revision: Int, on layer: LivePenLayer, now: Bool = false) {
+        layer.latest = stroke
         let time = CACurrentMediaTime()
         if !now, let rendering = layer.rendering, time - rendering.since < Self.livePenRenderPatience {
-            layer.waiting = (drawing, revision)
+            layer.waiting = (stroke, revision)
+            return
+        }
+        if !now, time < layer.lastGiven + Self.livePenInterval {
+            layer.waiting = (stroke, revision)
+            renderWaiting(on: layer, at: layer.lastGiven + Self.livePenInterval)
             return
         }
         layer.waiting = nil
+        layer.lastGiven = time
         livePenGeneration += 1
         let generation = livePenGeneration
         layer.rendering = (revision, time, generation)
-        layer.view.drawing = drawing
+        layer.view.drawing = stroke.map { PKDrawing(strokes: [$0]) } ?? PKDrawing()
         // Should PencilKit never report this render, the next drawing goes ahead after a while all the same.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.livePenRenderPatience) { [weak self, weak layer] in
             guard let self, let layer, layer.rendering?.generation == generation else { return }
             self.livePenLayerDidRender(layer)
+        }
+    }
+
+    /// Gives `layer` its waiting shape at `time`, unless PencilKit is still drawing then: its report gives it instead.
+    private func renderWaiting(on layer: LivePenLayer, at time: CFTimeInterval) {
+        guard !layer.flushScheduled else { return }
+        layer.flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, time - CACurrentMediaTime())) { [weak self, weak layer] in
+            guard let self, let layer else { return }
+            layer.flushScheduled = false
+            guard layer.rendering == nil, let waiting = layer.waiting else { return }
+            self.render(waiting.stroke, revision: waiting.revision, on: layer)
         }
     }
 
@@ -225,7 +266,7 @@ final class PageInkView: UIView {
         // Not from inside PencilKit's report: a drawing given there is drawn, but PencilKit often never reports it.
         DispatchQueue.main.async { [weak self, weak layer] in
             guard let self, let layer, layer.rendering == nil, let waiting = layer.waiting else { return }
-            self.render(waiting.drawing, revision: waiting.revision, on: layer)
+            self.render(waiting.stroke, revision: waiting.revision, on: layer)
         }
     }
 
@@ -303,7 +344,7 @@ final class PageInkView: UIView {
         guard let layer = livePenLayers.first(where: { $0.id == id }) else { return true }
         guard !layer.view.isHidden else { return true }
         guard let before = seedsAtChange else { return false }
-        let bounds = layer.latest.bounds.insetBy(dx: -1, dy: -1)
+        let bounds = layer.latestBounds.insetBy(dx: -1, dy: -1)
         let under = tileLayers().filter { $0.frame.intersects(bounds) }
         return !under.isEmpty && under.allSatisfy { tile in before[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false }
     }
@@ -323,7 +364,7 @@ final class PageInkView: UIView {
                 handovers[id] = nil
                 continue
             }
-            let bounds = layer.latest.bounds.insetBy(dx: -1, dy: -1)
+            let bounds = layer.latestBounds.insetBy(dx: -1, dy: -1)
             let under = tiles.filter { $0.frame.intersects(bounds) }
             // A tile counts once it has been redrawn since the stroke landed. One made since may not be drawn yet.
             let redrawn = under.filter { tile in seeds[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false }
