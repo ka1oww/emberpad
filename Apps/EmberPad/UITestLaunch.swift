@@ -13,9 +13,18 @@ enum UITestLaunch {
     static let className = "UI Test"
     static let title = "Toolbar Drag"
 
+    /// EP121: launched with this as well, the library also holds a second notebook and a Teacher copy paired with the
+    /// worksheet, each of several pages, so a test can scroll, leave and come back.
+    static let notebooksArgument = "-EmberPadUITestNotebooks"
+    /// EP121: a relaunch with this keeps the library and every remembered place from the launch before.
+    static let keepArgument = "-EmberPadUITestKeepLibrary"
+    static let secondTitle = "Second Notebook"
+    static let notebookPages = 6
+
     /// Call before the library opens.
     static func prepareIfRequested() {
-        guard ProcessInfo.processInfo.arguments.contains(worksheetArgument) else { return }
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains(worksheetArgument), !arguments.contains(keepArgument) else { return }
         let files = FileManager.default
         guard let support = try? files.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true),
               let documents = try? files.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
@@ -23,12 +32,42 @@ enum UITestLaunch {
         for name in ["Library", "Sync", "Backup"] { try? files.removeItem(at: support.appendingPathComponent(name)) }
         let inbox = documents.appendingPathComponent("Inbox", isDirectory: true)
         try? files.removeItem(at: inbox)
-        for key in [ToolState.defaultsKey, LastWorksheet.defaultsKey, TeacherCopyCardState.defaultsKey] {
+        for key in [ToolState.defaultsKey, LastWorksheet.defaultsKey, TeacherCopyCardState.defaultsKey, ReadingPositions.defaultsKey] {
             UserDefaults.standard.removeObject(forKey: key)
+        }
+        if arguments.contains(notebooksArgument) {
+            seedNotebooks(in: support.appendingPathComponent("Library", isDirectory: true))
+            return
         }
         let folder = inbox.appendingPathComponent(className, isDirectory: true)
         try? files.createDirectory(at: folder, withIntermediateDirectories: true)
         try? worksheet().write(to: folder.appendingPathComponent("\(title).pdf"))
+    }
+
+    /// Files the worksheet with its paired Teacher copy, and a second notebook, as a Mac library delivery would.
+    private static func seedNotebooks(in root: URL) {
+        let papers: [(role: DocumentRole, key: String, title: String, file: String)] = [
+            (.student, "ui-test-worksheet", title, "\(title).pdf"),
+            (.teacher, "ui-test-worksheet", "\(title) Answers", "\(title) (Teacher).pdf"),
+            (.student, "ui-test-second", secondTitle, "\(secondTitle).pdf"),
+        ]
+        let done = DispatchSemaphore(value: 0)
+        // The store is its own actor, so the main thread can wait for it here, before the library opens.
+        Task.detached {
+            defer { done.signal() }
+            guard let store = try? LibraryStore(root: root) else { return }
+            for paper in papers {
+                let data = worksheet(heading: paper.title, pages: notebookPages)
+                guard let key = try? PaperKey(rawValue: paper.key),
+                      let publication = try? Publication(subject: className, classTag: nil, paperKey: key, role: paper.role,
+                                                         title: paper.title),
+                      let entry = try? ManifestEntry(source: SourcePath(classFolder: className, relativePath: paper.file),
+                                                     sha256: ContentHash.digest(data), size: Int64(data.count),
+                                                     modifiedAt: Date(), publication: publication) else { continue }
+                _ = try? await store.importPDF(data: data, entry: entry, pageCount: notebookPages)
+            }
+        }
+        done.wait()
     }
 
     /// EP108: launched with this as well, the worksheet opens with a few lines of pen ink on its first page, so a
@@ -66,11 +105,11 @@ enum UITestLaunch {
         return strokes
     }
 
-    /// Two A4 pages with a heading and ruled lines.
-    private static func worksheet() -> Data {
+    /// A4 pages (two unless asked) with a heading and ruled lines.
+    private static func worksheet(heading title: String = title, pages: Int = 2) -> Data {
         let page = CGRect(x: 0, y: 0, width: 595, height: 842)
         return UIGraphicsPDFRenderer(bounds: page).pdfData { context in
-            for number in 1...2 {
+            for number in 1...pages {
                 context.beginPage()
                 let heading = "\(title) · page \(number)" as NSString
                 heading.draw(at: CGPoint(x: 56, y: 56), withAttributes: [.font: UIFont.systemFont(ofSize: 22, weight: .semibold)])
