@@ -627,10 +627,11 @@ private final class WritingPage {
 
     /// Waits until a queued landing may happen, PencilKit having committed every stroke with the Pencil up (or given
     /// up on one it never commits, after `InkFlights.quietChecksBeforeGivingUp` checks), and then for three display
-    /// frames: the landing's is the first after PencilKit's commit.
+    /// frames, once the latest commit has settled (`InkLandingTiming.commitSettle`).
     func waitForASafeFrame(timeout: TimeInterval = 5) {
         let deadline = Date().addingTimeInterval(timeout)
         while !controller.inkEditsMayLand, Date() < deadline { Self.turn(0.005) }
+        Self.turn(InkLandingTiming.commitSettle)
         PencilStroke.waitForFrames(3, timeout: max(deadline.timeIntervalSinceNow, 0))
     }
 
