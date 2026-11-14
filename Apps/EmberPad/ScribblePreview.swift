@@ -216,7 +216,8 @@ extension PDFOverlayPageController {
     /// hides nothing, and shows again whatever it hid before.
     private func hideScribbledInk(of preview: ScribblePreview) {
         let strokes = preview.ink.map { ink in preview.erased.map { ink.strokes[$0] } } ?? []
-        pageInkView(preview.page)?.hideScribbledInk(strokes, scribble: preview.liveID)
+        pageInkView(preview.page)?.hideScribbledInk(strokes, scribble: preview.liveID,
+                                                    liveStrokes: liveStrokes(drawing: strokes, page: preview.page))
         guard scribbleOutline.superlayer != nil || scribbleOutline.path != nil else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -226,6 +227,17 @@ extension PDFOverlayPageController {
     }
 
     func pageInkView(_ page: Int) -> PageInkView? { canvases[page]?.superview as? PageInkView }
+
+    /// The live pen's strokes that still draw some of `strokes` of `page` from their own layers (EP115): each whose
+    /// edit is still waiting to land, and each landed as one of them that the page may not have drawn yet.
+    func liveStrokes(drawing strokes: [PKStroke], page: Int) -> [UInt64] {
+        guard !strokes.isEmpty else { return [] }
+        let ids = Set(strokes.map(InkStrokeID.init))
+        let waiting = pendingInkEdits.filter { $0.page == page && ids.contains(InkStrokeID($0.stroke)) }.compactMap(\.liveID)
+        let landed = livePen.landed(page: page, createdAt: strokes.map(\.path.creationDate))
+        var seen = Set<UInt64>()
+        return (waiting + landed).filter { livePen.stroke(id: $0) != nil && seen.insert($0).inserted }
+    }
 
     /// Takes the outline and the stroke being watched off the page.
     func clearScribblePreview() {

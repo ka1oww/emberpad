@@ -47,8 +47,11 @@ enum StressBounds {
     static let longestFrameGap: Double = 0.100
     /// From the lift of a scribble, an eraser sweep or an undo tap to the frame where the ink it takes is gone.
     static let removal: Double = 0.150
-    /// From the lift to the frame where the stroke is drawn by the page itself (the live pen's layer has handed it
-    /// over). The pen waits for a pause on purpose, so this bound is loose; it catches ink that never lands.
+    /// From the start of the pause in the writing to the frame where the stroke is drawn by the page itself (the live
+    /// pen's layer has handed it over). The pen's swaps wait for a pause on purpose (`InkLandingTiming.pause`), and
+    /// until then the live pen draws the stroke, so the clock starts at the last Pencil lift before the page drew it,
+    /// not at the stroke's own lift (EP115, the captain's decision): a burst written without a pause is not a late
+    /// landing. A stroke the page never draws still fails, and so does landed ink that leaves the screen.
     static let landing: Double = 3.0
     /// Landed ink missing for this long or less (four frames at 60 Hz) is reported as a blip, not failed on. Checked
     /// against recordings of the Simulator's screen: of 213 runs longer than this the sampler reported, 208 showed on
@@ -513,6 +516,7 @@ struct StressPencil {
         let event = PencilEventStub(touch)
         if cancelled { recognizers.forEach { $0.touchesCancelled([touch], with: event) } }
         else { recognizers.forEach { $0.touchesEnded([touch], with: event) } }
+        page.sampler.pencilLifted()
         self.touch = nil
         recognizers = []
         // The lift's own event; the next pen-down may follow at once.
@@ -661,6 +665,18 @@ final class StressFrameSampler {
     private(set) var scribbleOutlineFlickers = 0
     private var scribbleOutlineHiddenSince: CFTimeInterval?
     private(set) var scribbleOutlineFirstShown: CFTimeInterval?
+    /// When the Pencil lifted, every time in the scenario, any tool: the landing clock starts at the last one
+    /// before the page drew a stroke (`StressBounds.landing`).
+    private(set) var pencilLifts: [CFTimeInterval] = []
+
+    func pencilLifted(at time: CFTimeInterval = CACurrentMediaTime()) { pencilLifts.append(time) }
+
+    /// When the pause in the writing that let `mark` land began: the last Pencil lift up to the frame the page drew
+    /// it, never before its own lift.
+    func pauseStart(landing mark: Mark) -> CFTimeInterval? {
+        guard let lift = mark.liftedAt, let drawn = mark.pageDrawnAt else { return nil }
+        return max(lift, pencilLifts.last { $0 <= drawn } ?? lift)
+    }
 
     func start() {
         guard link == nil else { return }
