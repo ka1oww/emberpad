@@ -439,7 +439,7 @@ struct ToolSettingsPopover: View {
                 Section {
                     Toggle("Erase highlighter only",
                            isOn: Binding(get: { tools.settings.eraseHighlighterOnly }, set: tools.setEraseHighlighterOnly))
-                    Button("Clear page", role: .destructive) { confirmingClearPage = true }
+                    Button("Clear Page", role: .destructive) { confirmingClearPage = true }
                 } footer: {
                     Text("Highlighter only leaves pen ink untouched.")
                 }
@@ -483,11 +483,11 @@ struct ToolSettingsPopover: View {
         .environment(\.editMode, .constant(tool == .pen || tool == .highlighter ? .active : .inactive))
         .frame(width: 320, height: heightOverride ?? height)
         .addColorSheet(for: $addingColorFor, picked: $pickedColor, tools: tools)
-        .alert("Clear this page?", isPresented: $confirmingClearPage) {
-            Button("Clear page", role: .destructive) { tools.clearPage() }
+        .alert(ClearPageText.eraserTitle, isPresented: $confirmingClearPage) {
+            Button("Clear Page", role: .destructive) { tools.clearPage() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("All ink on this page is removed. You can undo it.")
+            Text(ClearPageText.message)
         }
     }
 
