@@ -32,7 +32,8 @@ enum UITestLaunch {
         for name in ["Library", "Sync", "Backup"] { try? files.removeItem(at: support.appendingPathComponent(name)) }
         let inbox = documents.appendingPathComponent("Inbox", isDirectory: true)
         try? files.removeItem(at: inbox)
-        for key in [ToolState.defaultsKey, LastWorksheet.defaultsKey, TeacherCopyCardState.defaultsKey, ReadingPositions.defaultsKey] {
+        for key in [ToolState.defaultsKey, LastWorksheet.defaultsKey, TeacherCopyCardState.defaultsKey, ReadingPositions.defaultsKey,
+                    NotebookTabStore.defaultsKey] {
             UserDefaults.standard.removeObject(forKey: key)
         }
         if arguments.contains(notebooksArgument) {

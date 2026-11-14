@@ -32,6 +32,9 @@ protocol WorksheetPageRenderer: AnyObject {
     var readingPositions: ReadingPositions? { get set }
     /// More › Clear Page (EP120): removes all the ink on page `index` (zero-based) as one undo step, keeping the page.
     func clearInk(onPage index: Int)
+    /// EP119: lands every stroke and ink change in flight, then takes no more input, before the worksheet leaves the
+    /// screen for another tab.
+    func landInkBeforeLeaving(timeout: TimeInterval) async
 }
 
 /// This is the replacement point for report option B. Ink and persistence belong to DocumentSession.
@@ -245,10 +248,23 @@ final class PageChromeState: ObservableObject {
     func cancel() { pillTask?.cancel() }
 }
 
+/// What the editor shows and does with the open tabs (EP119).
+struct EditorTabs {
+    /// The tabs on the bar, in order. Read as the editor draws, so a tab closed behind it leaves the bar at once.
+    let bar: () -> [NotebookTabBar.Tab]
+    /// Shows another tab's notebook; false when nothing switched.
+    let select: (UUID) -> Bool
+    /// Closes a tab, with the page area in window coordinates for the close transition when it is the last; false
+    /// when the notebook in front stays.
+    let close: (UUID, CGRect) -> Bool
+}
+
 struct EditorScreen: View {
     let documentID: UUID
     @ObservedObject var library: LibraryController
     @ObservedObject var presentation: PresentationState
+    /// The open tabs, with the tab bar above the header; nil where there are none (EP119).
+    let tabs: EditorTabs?
     /// Shows or hides the library sidebar beside the worksheet; nil where there is no sidebar.
     let toggleSidebar: (() -> Void)?
     /// True when the worksheet was opened from a library card: the page zooms in (EP87).
@@ -261,11 +277,12 @@ struct EditorScreen: View {
     @MainActor
     init(documentID: UUID, library: LibraryController, presentation: PresentationState,
          chrome: PageChromeState? = nil, search: WorksheetSearchModel? = nil, tools: ToolState? = nil,
-         toggleSidebar: (() -> Void)? = nil,
+         tabs: EditorTabs? = nil, toggleSidebar: (() -> Void)? = nil,
          animatesEntrance: Bool = false, onClose: ((CGRect) -> Void)? = nil) {
         self.documentID = documentID
         self.library = library
         self.presentation = presentation
+        self.tabs = tabs
         self.toggleSidebar = toggleSidebar
         self.animatesEntrance = animatesEntrance
         self.onClose = onClose
@@ -309,6 +326,8 @@ struct EditorScreen: View {
     /// The tool palette while a finger carries it (EP102). Only the palette reads it, so a move of the finger never
     /// rebuilds the editor.
     @State private var toolbarCarry = ToolbarCarry()
+    /// True while the worksheet lands its ink to leave for another tab (EP119).
+    @State private var leavingForTab = false
 
     private var entrance: DocumentTransition.Entrance {
         DocumentTransition.entrance(pageEntered: pageEntered, reduceMotion: reduceMotion)
@@ -334,6 +353,33 @@ struct EditorScreen: View {
     /// Back: the library's close transition when it runs one, else a plain pop.
     private func close() {
         if let onClose { onClose(pageAreaFrame) } else { dismiss() }
+    }
+
+    /// A tap on another tab (EP119).
+    private func selectTab(_ id: UUID) {
+        guard let tabs, id != documentID else { return }
+        leaveForTab { tabs.select(id) }
+    }
+
+    /// A tab's close button (EP119). Only closing the tab in front leaves this worksheet.
+    private func closeTab(_ id: UUID) {
+        guard let tabs else { return }
+        if id == documentID { leaveForTab { tabs.close(id, pageAreaFrame) } } else { _ = tabs.close(id, pageAreaFrame) }
+    }
+
+    /// Leaves the worksheet for another tab (EP119): lands every stroke and ink change still in flight and remembers
+    /// where it was left (EP121's reading position), then runs `leave`. Input stays off from then on; if `leave` did
+    /// not go anywhere, it comes back on.
+    private func leaveForTab(_ leave: @escaping () -> Bool) {
+        guard !leavingForTab, !editingPages else { return }
+        leavingForTab = true
+        Task {
+            await renderer?.landInkBeforeLeaving(timeout: NotebookLeave.inkWait)
+            if !leave() {
+                leavingForTab = false
+                renderer?.setPageInput(true)
+            }
+        }
     }
 
     private var pillState: SharePillState {
@@ -369,6 +415,12 @@ struct EditorScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // EP119: GoodNotes' tab bar, just under the status bar, above the worksheet's own bar.
+            if let tabs {
+                NotebookTabBar(tabs: tabs.bar(), active: documentID,
+                               onSelect: { id in selectTab(id) }, onClose: { id in closeTab(id) })
+                    .disabled(leavingForTab || editingPages)
+            }
             header
             if let session { InkSaveBanner(session: session) }
             // EP101: the tool palette floats over the page (see `pageArea`), so the page keeps the whole worksheet.
