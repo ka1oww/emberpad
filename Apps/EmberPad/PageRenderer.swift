@@ -26,8 +26,10 @@ protocol WorksheetPageRenderer: AnyObject {
     func highlightSearch(_ matches: [PDFSelection], current: Int?)
     /// Scrolls the worksheet to show a search match.
     func reveal(_ match: PDFSelection)
-    /// The page to show first, before the view has appeared.
+    /// The page to show first, before the view has appeared. Wins over a remembered position.
     var startPage: Int? { get set }
+    /// EP121: the store the worksheet's position is remembered in, set before the view appears.
+    var readingPositions: ReadingPositions? { get set }
 }
 
 /// This is the replacement point for report option B. Ink and persistence belong to DocumentSession.
@@ -279,6 +281,8 @@ struct EditorScreen: View {
     @State private var teacherCard = TeacherCopyCardState()
     /// Identifies this editor to `PresentationState`, which only lets the editor that set the answers clear them.
     @State private var answersOwner = UUID()
+    /// The paired Teacher copy's library id, under which the panel remembers where its answers were left (EP121).
+    @State private var teacherCopyID: UUID?
     @StateObject private var flattenedExport = FlattenedExportModel()
     /// The remembered Add Page choice (EP61).
     @State private var addPageChoice = AddPageChoice.load()
@@ -405,6 +409,7 @@ struct EditorScreen: View {
                 let answers = await library.teacherCopyURL(for: opened.record)
                 guard !Task.isCancelled else { return }
                 presentation.showPrivateAnswers(answers, owner: answersOwner)
+                teacherCopyID = answers == nil ? nil : opened.record.pairedDocumentID
                 teacherCard.worksheetOpened(hasTeacherCopy: answers != nil)
                 LastWorksheet().opened(opened.record)
                 install(opened, startPage: nil)
@@ -470,7 +475,8 @@ extension EditorScreen {
                                                              privateAnswerURL: presentation.privateAnswerURL),
                                            documentTitle: session.record.title,
                                            card: teacherCard,
-                                           hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil)
+                                           hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil,
+                                           answersID: teacherCopyID)
                 }
             }
             .overlay(alignment: dock == .bottom ? .bottom : .top) {
@@ -539,6 +545,7 @@ extension EditorScreen {
         pageThumbnails.reset()
         let made = PageRendererFactory.make(session: opened, student: presentation.student, tools: tools)
         made.startPage = startPage
+        made.readingPositions = ReadingPositions()
         made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
         chrome.jumpToPage = { [weak made] page in made?.goToPage(page) }
         chrome.addPage = { template in addPage(template) }

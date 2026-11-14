@@ -278,6 +278,8 @@ struct TeacherCopyCardOverlay: View {
     let card: TeacherCopyCardState
     /// False on a page added in Ember Slate, which the Teacher copy has no page for.
     var hasAnswerPage = true
+    /// EP121: the Teacher copy's own library id, under which the panel remembers where its answers were left.
+    var answersID: UUID?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The finger's horizontal travel while a swipe is in progress.
     @State private var drag: CGFloat?
@@ -297,6 +299,7 @@ struct TeacherCopyCardOverlay: View {
                     SlideOverSurface(onChanged: { drag = $0 },
                                      onEnded: { settle(translation: $0, velocity: $1, panelSize: panelSize, in: container) }) {
                         TeacherCopyCard(content: content, documentTitle: documentTitle, side: side, hasAnswerPage: hasAnswerPage,
+                                        answersID: answersID,
                                         onClose: { settle(to: .hide(side), panelSize: panelSize, in: container) },
                                         onMove: { settle(to: .dock(side.opposite), panelSize: panelSize, in: container) })
                     }
@@ -619,6 +622,7 @@ struct TeacherCopyCard: View {
     let documentTitle: String
     var side: TeacherCopyPanelSide = .trailing
     var hasAnswerPage = true
+    var answersID: UUID?
     let onClose: () -> Void
     var onMove: () -> Void = {}
 
@@ -626,7 +630,7 @@ struct TeacherCopyCard: View {
         VStack(spacing: 0) {
             // A sideways finger swipe anywhere on the panel slides it (see SlideOverSurface); the body scrolls.
             TeacherCopyCardHeader(documentTitle: documentTitle, onClose: onClose)
-            TeacherCopyCardBody(content: content, hasAnswerPage: hasAnswerPage)
+            TeacherCopyCardBody(content: content, hasAnswerPage: hasAnswerPage, answersID: answersID)
         }
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: TeacherCopyCardGeometry.cornerRadius, style: .continuous))
@@ -675,12 +679,15 @@ struct TeacherCopyCardHeader: View {
 struct TeacherCopyCardBody: View {
     let content: TeacherCopyCardContent
     var hasAnswerPage = true
+    var answersID: UUID?
 
     var body: some View {
         switch content {
         case .pdf(let url):
-            // The answers stay loaded under the note, so they are where they were on the next PDF page.
-            ReadOnlyPDF(url: url).accessibilityLabel("Private teacher answers")
+            // The answers stay loaded under the note, so they are where they were on the next PDF page. Hidden and
+            // shown again, or reopened later, they come back where they were left (EP121).
+            ReadOnlyPDF(url: url, positionID: answersID, positions: ReadingPositions())
+                .accessibilityLabel("Private teacher answers")
                 .overlay { if !hasAnswerPage { NoAnswerPageState() } }
         case .hidden(let reason):
             AnswersHiddenState(reason: reason)
@@ -772,11 +779,17 @@ struct TeacherCopyEdgeTab: View {
 }
 
 /// A read-only continuous PDF. It is not inked in v1 (private annotation is out of scope).
+///
+/// EP121: with a `positionID` it opens where it was left (page, scroll and zoom) and remembers where it is as it
+/// scrolls and when it is taken down, so sliding the Teacher copy away and back, or reopening the worksheet, never sends
+/// it back to the first page.
 struct ReadOnlyPDF: UIViewRepresentable {
     let url: URL
+    var positionID: UUID?
+    var positions: ReadingPositions?
 
-    func makeUIView(context: Context) -> PDFView {
-        let view = PDFView()
+    func makeUIView(context: Context) -> RememberingPDFView {
+        let view = RememberingPDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
@@ -784,11 +797,69 @@ struct ReadOnlyPDF: UIViewRepresentable {
         view.pageBreakMargins = UIEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
         view.backgroundColor = ThemeToken.canvas.uiColor
         view.document = PDFDocument(url: url)
+        if let positionID, let positions {
+            view.remember(in: positions, id: positionID)
+        }
         return view
     }
 
-    func updateUIView(_ uiView: PDFView, context: Context) {}
+    func updateUIView(_ uiView: RememberingPDFView, context: Context) {}
 
-    /// Dropping the document when the card hides or closes frees the answers' pages.
-    static func dismantleUIView(_ uiView: PDFView, coordinator: ()) { uiView.document = nil }
+    /// Dropping the document when the card hides or closes frees the answers' pages; where they were is kept first.
+    static func dismantleUIView(_ uiView: RememberingPDFView, coordinator: ()) {
+        uiView.savePosition()
+        uiView.document = nil
+    }
+}
+
+/// A PDF view that puts itself back where it was left once it is first laid out in a window, and remembers where it
+/// is at each page change and when it is taken down (EP121).
+final class RememberingPDFView: PDFView {
+    private var positions: ReadingPositions?
+    private var positionID: UUID?
+    private var pending: ReadingPosition?
+    /// False until the remembered position has been put back, so the first layout on page 1 never overwrites it.
+    private(set) var positionRestored = false
+    private var pageObserver: NSObjectProtocol?
+
+    func remember(in positions: ReadingPositions, id: UUID) {
+        self.positions = positions
+        positionID = id
+        pending = positions.position(for: id)
+        pageObserver = NotificationCenter.default.addObserver(forName: .PDFViewPageChanged, object: self, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.savePosition() }
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard positionID != nil, !positionRestored, !restoreScheduled, window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        restoreScheduled = true
+        // After PDFKit's own first layout, or `go(to:)` lands on the first page.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            pending?.restore(into: self)
+            pending = nil
+            positionRestored = true
+        }
+    }
+    private var restoreScheduled = false
+
+    /// Names the page in view, as the worksheet's page pill does.
+    override var accessibilityValue: String? {
+        get {
+            guard let document, let page = currentPage else { return nil }
+            return "Page \(document.index(for: page) + 1) of \(document.pageCount)"
+        }
+        set { super.accessibilityValue = newValue }
+    }
+
+    func savePosition() {
+        guard positionRestored, let positions, let positionID, let position = ReadingPosition.capture(from: self) else { return }
+        positions.save(position, for: positionID)
+    }
+
+    deinit {
+        if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
+    }
 }

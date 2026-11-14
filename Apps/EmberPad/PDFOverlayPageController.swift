@@ -123,6 +123,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
     var startPage: Int?
+    /// EP121: where this worksheet is remembered as left (page, scroll and zoom), read when it appears and written as
+    /// it is left. Nil (as in tests) remembers nothing.
+    var readingPositions: ReadingPositions?
+    /// False until the remembered position has been put back, so PDFKit's first layout on page 1 never overwrites it.
+    private var positionRestored = false
+    private var lifecycleObservers: [NSObjectProtocol] = []
 
     init(session: DocumentSession, student: StudentDisplayModel, tools: ToolState) {
         self.session = session; self.student = student; self.tools = tools
@@ -215,8 +221,20 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if let page = startPage {
             startPage = nil
             // After PDFKit's first layout, or `go(to:)` lands on the first page.
-            DispatchQueue.main.async { [weak self] in self?.goToPage(page) }
+            DispatchQueue.main.async { [weak self] in
+                self?.goToPage(page)
+                self?.positionRestored = true
+            }
+        } else if !positionRestored {
+            // EP121: a worksheet opens where it was left, in this launch or an earlier one.
+            let remembered = readingPositions?.position(for: session.record.id)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                remembered?.restore(into: pdfView, indexOfPageID: { [session] id in session.pages.pages.firstIndex { $0.id == id } })
+                positionRestored = true
+            }
         }
+        observeLifecycle()
         if let canvas = canvases[currentPage] { focus(canvas) }
         observeScrolling()
         publishPage()
@@ -252,6 +270,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        saveReadingPosition()
         landInkEdits()
         cancelInkLandingWaits()
         publishing = false
@@ -267,8 +286,26 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         hideEraserCircle()
     }
 
+    /// EP121: remembers where this worksheet is in view. Leaving it, a page edit and the app going to the background
+    /// all save, so a relaunch after the app was ended in the background still opens here.
+    func saveReadingPosition() {
+        guard positionRestored, let readingPositions,
+              let position = ReadingPosition.capture(from: pdfView, pageID: { [session] in session.page(at: $0)?.id }) else { return }
+        readingPositions.save(position, for: session.record.id)
+    }
+
+    private func observeLifecycle() {
+        guard lifecycleObservers.isEmpty else { return }
+        lifecycleObservers = [UIApplication.willResignActiveNotification, UIApplication.didEnterBackgroundNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.saveReadingPosition() }
+            }
+        }
+    }
+
     deinit {
         if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
+        lifecycleObservers.forEach(NotificationCenter.default.removeObserver)
         viewportObservers.forEach(NotificationCenter.default.removeObserver)
         scrollObservation?.invalidate()
         if let observer = lateInkSteps?.observer { NotificationCenter.default.removeObserver(observer) }
@@ -639,6 +676,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     func retire() {
+        saveReadingPosition()
         landInkEdits()
         cancelInkLandingWaits()
         setPageInput(false)
@@ -663,6 +701,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             publishPage()
         }
         onPageChange?(index)
+        saveReadingPosition()
     }
 
     private func publishPage() {
