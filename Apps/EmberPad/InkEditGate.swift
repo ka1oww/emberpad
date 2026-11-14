@@ -122,7 +122,7 @@ struct InkFlights {
 /// EP94: when a change to a page's drawing may land. PencilKit throws away a stroke that begins within about one frame
 /// after `PKCanvasView.drawing` is set, and a drawing set in the same frame as one of its commits (on that turn of the
 /// run loop, or the next) leaves it throwing strokes away for the rest of a quick burst. Its own undo and redo do
-/// neither. So an edit lands only on a display frame after the latest commit, and the pen's own swaps, which nobody
+/// neither. So an edit lands only on a display frame once the latest commit has settled (`commitSettle`), and the pen's own swaps, which nobody
 /// sees land, wait for a pause in the writing, when a new stroke is least likely to start within that frame. Pure
 /// value logic, unit tested without a display.
 struct InkLandingTiming {
