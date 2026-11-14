@@ -281,7 +281,7 @@ final class DocumentTransitionTests: XCTestCase {
         for document in library.documents.prefix(40) where document.role == .student { await thumbnails.thumbnail(for: document) }
         let window = try makeWindow()
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "EmberPadTests.EP87.\(UUID().uuidString)"))
-        let navigator = WorksheetNavigator()
+        let navigator = WorksheetNavigator(tabStore: NotebookTabStore(defaults: defaults))
         let view = LibraryView(
             library: library, presentation: PresentationState(), pairing: PairingController(),
             sync: SyncClient(library: library, folder: LibrarySyncFolder(root: root.appendingPathComponent("Sync")),

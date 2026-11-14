@@ -46,7 +46,8 @@ struct LibraryView: View {
          sync: SyncClient, signingExpiryDate: Date?, thumbnailCache: ThumbnailCache?,
          lastWorksheet: LastWorksheet = LastWorksheet(), navigator: WorksheetNavigator? = nil) {
         self.library = library
-        _navigator = State(initialValue: navigator ?? WorksheetNavigator())
+        // The open tabs are kept beside the worksheet left open, in the same defaults (EP119).
+        _navigator = State(initialValue: navigator ?? WorksheetNavigator(tabStore: NotebookTabStore(defaults: lastWorksheet.defaults)))
         self.lastWorksheet = lastWorksheet
         self.sync = sync
         self.presentation = presentation
@@ -67,10 +68,13 @@ struct LibraryView: View {
             NavigationStack {
                 detail
                     .navigationDestination(item: $navigator.openWorksheet) { id in
+                        // EP119: a tab switch swaps the editor for the other notebook's, in place.
                         EditorScreen(documentID: id, library: library, presentation: presentation,
+                                     tabs: editorTabs,
                                      toggleSidebar: { navigator.columns.toggleSidebar() },
                                      animatesEntrance: navigator.openedFromCard,
                                      onClose: { pageFrame in navigator.close(pageFrame: pageFrame, reduceMotion: reduceMotion) })
+                            .id(id)
                             .onAppear {
                                 navigator.columns.worksheetOpened()
                                 navigator.editorSwitched()
@@ -93,8 +97,11 @@ struct LibraryView: View {
         }
         .task {
             await library.refresh()
+            navigator.keepTabs(library.documents)
             reopenLastWorksheet()
         }
+        // EP119: a tab whose notebook was archived, replaced by a new version or removed goes from the bar.
+        .onChange(of: library.documents) { _, documents in navigator.keepTabs(documents) }
         .onAppear { navigator.columns.sizeClassChanged(to: horizontalSizeClass) }
         .onChange(of: horizontalSizeClass) { _, sizeClass in navigator.columns.sizeClassChanged(to: sizeClass) }
     }
@@ -490,6 +497,21 @@ struct LibraryView: View {
         .padding(.horizontal, 24)
     }
 
+    /// The open tabs as the worksheet header shows them (EP119), each by its notebook's own title, as its card shows it.
+    private var editorTabs: EditorTabs {
+        let navigator = navigator
+        let library = library
+        return EditorTabs(bar: {
+                              let titles = Dictionary(library.documents.map { ($0.id, LibraryFolders.ownTitle(of: $0)) },
+                                                      uniquingKeysWith: { first, _ in first })
+                              return navigator.tabs.ids.compactMap { id in
+                                  titles[id].map { NotebookTabBar.Tab(id: id, title: $0) }
+                              }
+                          },
+                          select: { id in navigator.switchTo(id) },
+                          close: { id, pageFrame in navigator.closeTab(id, pageFrame: pageFrame, reduceMotion: reduceMotion) })
+    }
+
     /// Once per launch, after the library first loads: reopen the worksheet left open last time.
     private func reopenLastWorksheet() {
         guard !checkedLastWorksheet else { return }
@@ -512,15 +534,24 @@ final class WorksheetNavigator {
     /// Whether the open worksheet came from a card tap, and so zooms in. A launch reopen does not.
     private(set) var openedFromCard = false
     var columns = LibraryColumnState()
+    /// The notebooks open as tabs (EP119). They stay open when the library is shown, and across launches.
+    private(set) var tabs: NotebookTabList
+    @ObservationIgnored private let tabStore: NotebookTabStore
     /// Covers the leaving screen while the transition plays.
     @ObservationIgnored let cover = DocumentTransitionCover()
     /// Whether a switch is keeping UIKit animations off until it has reached UIKit.
     @ObservationIgnored private var holdingAnimations = false
 
+    init(tabStore: NotebookTabStore = NotebookTabStore()) {
+        self.tabStore = tabStore
+        tabs = tabStore.load()
+    }
+
     /// A card tap. The editor is pushed in this same update, without the slide, so it starts loading exactly as soon
-    /// as a push did.
+    /// as a push did. The notebook becomes a tab, or its tab comes forward (EP119).
     func openFromCard(_ id: UUID, reduceMotion: Bool) {
         guard openWorksheet == nil else { return }
+        openTab(id)
         cover.coverOpening(reduceMotion: reduceMotion)
         switchInstantly {
             openedFromCard = true
@@ -532,8 +563,55 @@ final class WorksheetNavigator {
 
     /// The worksheet left open when EmberPad last quit.
     func reopen(_ id: UUID?) {
+        if let id { openTab(id) }
         openedFromCard = false
         openWorksheet = id
+    }
+
+    /// A tap on another notebook's tab (EP119): its editor takes the place of this one at once, with no transition,
+    /// as GoodNotes switches tabs. The leaving editor has already landed its ink. Returns false when nothing switched.
+    @discardableResult
+    func switchTo(_ id: UUID) -> Bool {
+        guard let current = openWorksheet, current != id, tabs.contains(id) else { return false }
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) {
+            openedFromCard = false
+            openWorksheet = id
+        }
+        return true
+    }
+
+    /// A tab's close button (EP119). Closing a tab behind the one in front only takes it off the bar. Closing the one
+    /// in front shows the tab beside it, or the library when it was the last; that editor has already landed its ink.
+    /// `pageFrame` is the editor's page area in window coordinates, for the close transition. Returns false when
+    /// the notebook in front stays.
+    @discardableResult
+    func closeTab(_ id: UUID, pageFrame: CGRect, reduceMotion: Bool) -> Bool {
+        guard tabs.contains(id) else { return false }
+        let next = tabs.close(id, active: openWorksheet)
+        tabStore.save(tabs)
+        guard id == openWorksheet else { return false }
+        if let next { return switchTo(next) }
+        close(pageFrame: pageFrame, reduceMotion: reduceMotion)
+        return true
+    }
+
+    /// Keeps only the tabs of notebooks still in the library as Student worksheets outside Archived (EP119).
+    func keepTabs(_ documents: [DocumentRecord]) {
+        // A library that failed to load reads as empty: its tabs wait for it rather than being dropped.
+        guard !documents.isEmpty else { return }
+        var kept = tabs
+        kept.keepOnly(documents, pinned: openWorksheet)
+        guard kept != tabs else { return }
+        tabs = kept
+        tabStore.save(tabs)
+    }
+
+    private func openTab(_ id: UUID) {
+        guard !tabs.contains(id) else { return }
+        tabs.open(id)
+        tabStore.save(tabs)
     }
 
     /// Back from the worksheet: the library returns at once under the closing editor, which fades and shrinks away.
