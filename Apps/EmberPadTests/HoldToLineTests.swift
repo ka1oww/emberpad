@@ -164,6 +164,46 @@ final class HoldToLineTests: XCTestCase {
                        Array(drawn.path).map(\.location))
     }
 
+    /// EP118: PencilKit can leave a step of its own that changes nothing and registers no redo (five sat mid-stack
+    /// after 72 brackets on the iPad, and five taps of undo did nothing). Each undo still takes one stroke, and each
+    /// redo puts one back.
+    func testUndoAndRedoPassOverStepsThatChangeNothing() throws {
+        let page = try holdPage(baseStrokes: 2)
+        let undo = try XCTUnwrap(page.canvas.undoManager)
+        page.controller.focus(page.canvas)
+        let strokes = page.canvas.drawing.strokes
+        XCTAssertEqual(strokes.count, 2)
+        undo.removeAllActions()
+        let byEvent = undo.groupsByEvent
+        undo.groupsByEvent = false
+        defer { undo.groupsByEvent = byEvent }
+        func step(_ register: () -> Void) {
+            undo.beginUndoGrouping()
+            register()
+            undo.endUndoGrouping()
+        }
+        step { page.controller.registerDrawingSwap(on: undo, page: 0, restoring: PKDrawing(), then: PKDrawing(strokes: [strokes[0]])) }
+        for _ in 0..<3 {
+            step { undo.registerUndo(withTarget: page.canvas) { _ in } }
+        }
+        step {
+            page.controller.registerDrawingSwap(on: undo, page: 0, restoring: PKDrawing(strokes: [strokes[0]]),
+                                                then: PKDrawing(strokes: strokes))
+        }
+
+        page.controller.undo()
+        XCTAssertEqual(page.canvas.drawing.strokes.count, 1, "the first undo takes the newest stroke")
+        page.controller.undo()
+        XCTAssertEqual(page.canvas.drawing.strokes.count, 0, "the next takes the stroke under the empty steps")
+        XCTAssertFalse(undo.canUndo)
+        XCTAssertEqual(page.session.drawing(on: 0).strokes.count, 0)
+        page.controller.redo()
+        XCTAssertEqual(page.canvas.drawing.strokes.count, 1)
+        page.controller.redo()
+        XCTAssertEqual(page.canvas.drawing.strokes.map(InkStrokeID.init), strokes.map(InkStrokeID.init))
+        XCTAssertFalse(undo.canRedo)
+    }
+
     /// Moving the held line's end round and back over writing never makes it a scribble that erases the writing
     /// (before EP96 this erased 679 strokes of a 3000-stroke page).
     func testAHeldLineMovedAboutOverWritingErasesNothing() throws {
