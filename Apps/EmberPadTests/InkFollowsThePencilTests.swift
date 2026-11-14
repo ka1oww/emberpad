@@ -137,6 +137,31 @@ final class InkFollowsThePencilTests: XCTestCase {
         XCTAssertEqual(page.canvas.drawing.strokes.count, 1)
     }
 
+    /// EP115: a zoom's ink redraw that falls due while the Pencil writes waits for PencilKit to commit the stroke.
+    /// Re-fitting the canvas mid-stroke made PencilKit throw the stroke away: the first stroke written straight after a
+    /// zoom came back from the live pen only once its flight was given up, 3 s later.
+    func testAZoomRedrawDueMidStrokeWaitsForPencilKitToCommitTheStroke() throws {
+        let page = try page(baseStrokes: 0)
+        let controller = page.controller
+        let before = page.canvas.zoomScale
+        var pencil = page.pencil()
+        pencil.down(at: CGPoint(x: 60, y: 300))
+        pencil.wobble(to: CGPoint(x: 200, y: 306), steps: 25)
+        controller.pdfView.autoScales = false
+        controller.pdfView.scaleFactor = controller.pdfView.scaleFactor * 2
+        controller.updateInkScale()
+        XCTAssertEqual(page.canvas.zoomScale, before, accuracy: 0.001, "the canvas is not re-fitted while PencilKit holds the stroke")
+        pencil.wobble(to: CGPoint(x: 260, y: 300), steps: 25)
+        pencil.lift()
+        let deadline = Date().addingTimeInterval(1)
+        while page.canvas.drawing.strokes.isEmpty || page.canvas.zoomScale == before, Date() < deadline { HoldPage.turn(0.005) }
+        XCTAssertEqual(page.canvas.drawing.strokes.count, 1, "PencilKit committed the stroke itself, long before a flight is given up")
+        XCTAssertTrue(controller.inkFlights.isEmpty)
+        XCTAssertGreaterThan(page.canvas.zoomScale, before * 1.5, "and the ink is redrawn for the zoom once it has")
+        page.settle()
+        XCTAssertEqual(page.canvas.drawing.strokes.count, 1)
+    }
+
     /// What lands is pixel for pixel what the stroke's layer last showed, for a written stroke and for a held line.
     func testWhatLandsIsExactlyWhatTheLayerShowed() throws {
         let page = try page(baseStrokes: 0)

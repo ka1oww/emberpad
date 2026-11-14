@@ -99,6 +99,57 @@ final class ScribblesInQuickSuccessionTests: XCTestCase {
         XCTAssertFalse(inkView.hidesScribbledInk, "both erases landed and nothing is left cut")
     }
 
+    /// EP115: a word written moments before the scribble is still drawn by the live pen, because its pen-feel swaps
+    /// wait for a pause in the writing. It leaves the screen with the scribble's cut, not about 0.4 s later when the
+    /// erase has landed and the page has redrawn.
+    func testAWordWrittenJustBeforeTheScribbleLeavesWithItsCut() throws {
+        let page = try page(with: [])
+        page.controller.tools.setScribbleToErase(true)
+        let inkView = try XCTUnwrap(page.canvas.superview as? PageInkView)
+        // The writing goes on, as far as the pause is concerned, so the letters' swaps keep waiting.
+        func holdThePauseOpen() { page.controller.inkTiming.lastLift = CACurrentMediaTime() + 60 }
+        var letters: [UInt64] = []
+        for (k, letter) in ScribbleEraseTests.word(at: CGPoint(x: 100, y: 300)).enumerated() {
+            var pencil = page.pencil()
+            pencil.down(at: letter[0])
+            for point in ScribbleFixtures.pencil(letter, speed: 300, rounding: 1, seed: UInt64(k + 1)).dropFirst() {
+                pencil.move(to: point)
+            }
+            letters.append(try XCTUnwrap(page.controller.livePen.writing?.id))
+            pencil.lift()
+            holdThePauseOpen()
+        }
+        let committed = Date().addingTimeInterval(3)
+        while page.canvas.drawing.strokes.count < letters.count, Date() < committed {
+            holdThePauseOpen()
+            HoldPage.turn(0.01)
+        }
+        XCTAssertEqual(page.canvas.drawing.strokes.count, letters.count, "PencilKit committed every letter")
+        XCTAssertTrue(page.controller.hasPendingInk, "the letters' swaps are still waiting")
+        for id in letters {
+            let layer = try XCTUnwrap(inkView.livePenLayer(id: id), "letter \(id) is drawn by its live layer")
+            XCTAssertFalse(layer.view.isHidden)
+        }
+
+        var pencil = page.pencil()
+        let path = ScribbleFixtures.pencil(ScribbleEraseTests.zigzagCorners(), speed: 1200, rounding: 4, seed: 9)
+        pencil.down(at: path[0])
+        for point in path.dropFirst() { pencil.move(to: point) }
+        pencil.lift()
+        let cut = Date().addingTimeInterval(2)
+        while !inkView.hidesScribbledInk, Date() < cut { HoldPage.turn(0.002) }
+        XCTAssertTrue(inkView.hidesScribbledInk, "the scribble cut the word")
+        for id in letters {
+            XCTAssertTrue(inkView.livePenLayer(id: id)?.view.isHidden ?? true,
+                          "letter \(id)'s live layer leaves with the cut, not once the erase has landed and been drawn")
+        }
+
+        page.settle()
+        XCTAssertTrue(page.canvas.drawing.strokes.isEmpty, "the word and the scribble are erased")
+        XCTAssertFalse(inkView.hidesScribbledInk, "and nothing is left cut")
+        for id in letters { XCTAssertTrue(inkView.livePenLayer(id: id)?.view.isHidden ?? true, "no letter comes back") }
+    }
+
     // MARK: Fixtures
 
     static func twoLines() -> [PKStroke] {

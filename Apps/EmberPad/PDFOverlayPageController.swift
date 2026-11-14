@@ -60,6 +60,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var studentPage = 0
     /// EP-49: brings the ink's own zoom to the PDF scale once a zoom settles.
     private var inkScaleWork: DispatchWorkItem?
+    /// A zoom's ink redraw is waiting for PencilKit to commit the stroke it holds (EP115).
+    private var inkScaleWaitsForPencil = false
     /// True while EmberPad itself swaps a canvas drawing, so the change is not read as new ink.
     var isReplacingStroke = false
     /// EP94: the strokes PencilKit has begun and not yet committed, the Pencil touch now on the glass, and the ink
@@ -424,6 +426,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         }
         // Anything still queued may land once this commit's frame is past.
         scheduleInkLanding()
+        inkScaleAfterCommit()
     }
 
     /// After PencilKit commits a new pen stroke, queues its swap, as one undo step named "Ink", for the stroke the
@@ -1072,8 +1075,15 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// How long the PDF scale must stay still before the ink is redrawn for it, in seconds.
     static let inkScaleDelay: TimeInterval = 0.15
 
-    /// Draws every page's ink for the current PDF scale, or waits again while two fingers are still pinching.
-    /// Internal so tests can apply a zoom without waiting.
+    /// A zoom's ink redraw that waited for PencilKit to commit its stroke happens as soon as it has, before the next
+    /// stroke can begin.
+    private func inkScaleAfterCommit() {
+        guard inkScaleWaitsForPencil, !pencilIsDown, inkFlights.isEmpty else { return }
+        updateInkScale()
+    }
+
+    /// Draws every page's ink for the current PDF scale, or waits again while two fingers are still pinching, or
+    /// while PencilKit holds a stroke. Internal so tests can apply a zoom without waiting.
     func updateInkScale() {
         inkScaleWork = nil
         if let scrollView = Self.firstScrollView(in: pdfView),
@@ -1081,6 +1091,16 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             scheduleInkScale()
             return
         }
+        // EP115: re-fitting a canvas to a new zoom while PencilKit holds a stroke on it makes PencilKit throw the
+        // stroke away. The first stroke written straight after a zoom was never committed, and came back from the
+        // live pen only once its flight was given up, 3 s later. The redraw waits for PencilKit to commit, then
+        // follows at once (`inkScaleAfterCommit`), with the retry as a backstop.
+        guard !pencilIsDown, inkFlights.isEmpty else {
+            inkScaleWaitsForPencil = true
+            scheduleInkScale()
+            return
+        }
+        inkScaleWaitsForPencil = false
         for pageView in pageViews.values { pageView.setPDFScale(pdfView.scaleFactor) }
     }
 
@@ -1778,8 +1798,9 @@ extension PDFOverlayPageController {
                 pageView.scribbledInkLanded(scribbles: scribbles, on: canvas.drawing.strokes, since: tiles)
             }
             var landed: [UInt64] = []
-            for id in edits.lazy.filter({ $0.page == page }).compactMap(\.liveID) where livePen.stroke(id: id) != nil {
-                livePen.landed(id: id, now: now)
+            for edit in edits where edit.page == page {
+                guard let id = edit.liveID, livePen.stroke(id: id) != nil else { continue }
+                livePen.landed(id: id, now: now, as: edit.stroke.path.creationDate)
                 landed.append(id)
             }
             for item in recovered where item.page == page && livePen.stroke(id: item.liveID) != nil {
@@ -1835,6 +1856,7 @@ extension PDFOverlayPageController {
             self.inkFlightCheck = nil
             if !self.pencilIsDown { self.recoverDiscarded(self.inkFlights.quietCheck()) }
             self.scheduleInkLanding()
+            self.inkScaleAfterCommit()
             if !self.inkFlights.isEmpty {
                 self.armInkFlightCheck()
                 self.scheduleLivePenExpiry()
@@ -2179,7 +2201,10 @@ extension PDFOverlayPageController {
         let previewed = finishScribblePreview(page: page, scribble: scribble, base: base)
         let erased = previewed ?? ScribbleErase.erasedIndices(scribble: scribble, in: base)
         // Without its preview (a stroke after it began its own), what goes is hidden now instead.
-        if previewed == nil { pageInkView(page)?.hideScribbledInk(erased.map { base[$0] }, scribble: liveID) }
+        if previewed == nil {
+            let strokes = erased.map { base[$0] }
+            pageInkView(page)?.hideScribbledInk(strokes, scribble: liveID, liveStrokes: liveStrokes(drawing: strokes, page: page))
+        }
         guard !erased.isEmpty else { return false }
         // The stroke is the scribble's, whatever a hold at its end would have made of it.
         Self.holdRecognizer(on: canvas)?.consumeHold()

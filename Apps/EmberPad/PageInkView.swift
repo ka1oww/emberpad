@@ -400,6 +400,8 @@ final class PageInkView: UIView {
         let lines: [(path: CGPath, width: CGFloat)]
         /// What the lines cover, in page points.
         let bounds: CGRect
+        /// The live pen strokes still drawing some of `strokes` from their own layers, hidden with them (EP115).
+        let liveStrokes: Set<UInt64>
         let generation: Int
         /// Once this scribble's erase has landed: the tiles' seeds before it did, whether the page was idle then, and
         /// when it landed or the page's drawing last changed.
@@ -424,16 +426,26 @@ final class PageInkView: UIView {
     var hidesScribbledInk: Bool { !scribbleCuts.isEmpty }
 
     /// The scribble with live stroke `scribble` has lifted, and will erase `strokes` of the page: from now on they and
-    /// the scribble's own ink are hidden. A scribble already hiding ink now hides `strokes` instead.
-    func hideScribbledInk(_ strokes: [PKStroke], scribble: UInt64?) {
+    /// the scribble's own ink are hidden. A scribble already hiding ink now hides `strokes` instead. `liveStrokes` are
+    /// the live pen's strokes still drawing some of `strokes` from their own layers (EP115): ink written moments before
+    /// the scribble is drawn there until it lands, so cutting the page alone left it showing until the page had drawn
+    /// the erase, about half a second after the lift. Their layers are hidden with the cut, and shown again with it.
+    func hideScribbledInk(_ strokes: [PKStroke], scribble: UInt64?, liveStrokes: [UInt64] = []) {
         guard !strokes.isEmpty else { return showScribbledInk(scribble: scribble) }
+        let hidden = Set(liveStrokes).subtracting([scribble].compactMap { $0 })
+        let before = scribbleCuts.filter { $0.scribble == scribble }.reduce(Set<UInt64>()) { $0.union($1.liveStrokes) }
         scribbleCuts.removeAll { $0.scribble == scribble }
+        showLiveStrokes(before.subtracting(hidden))
         scribbleCutGeneration += 1
         let generation = scribbleCutGeneration
         let lines = strokes.compactMap(Self.cutLine(of:))
         let bounds = lines.reduce(CGRect.null) { $0.union($1.path.boundingBoxOfPath.insetBy(dx: -$1.width / 2, dy: -$1.width / 2)) }
         scribbleCuts.append(ScribbleCut(scribble: scribble, strokes: Set(strokes.map(InkStrokeID.init)), lines: lines,
-                                        bounds: bounds, generation: generation))
+                                        bounds: bounds, liveStrokes: hidden, generation: generation))
+        for layer in livePenLayers where layer.id.map(hidden.contains) ?? false {
+            if let id = layer.id { handovers[id] = nil }
+            layer.view.isHidden = true
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.scribbleCutPatience) { [weak self] in
             guard let self, self.scribbleCuts.contains(where: { $0.generation == generation && $0.landed == nil }) else { return }
             self.showScribbledInk(scribble: scribble)
@@ -452,7 +464,16 @@ final class PageInkView: UIView {
         guard !shown.isEmpty else { return }
         scribbleCuts.removeAll { $0.scribble == scribble }
         if let scribble, let layer = livePenLayers.first(where: { $0.id == scribble }) { layer.view.isHidden = false }
+        showLiveStrokes(shown.reduce(Set<UInt64>()) { $0.union($1.liveStrokes) })
         drawScribbleCuts()
+    }
+
+    /// Shows again the layers of live strokes `ids` a scribble's cut hid, unless another cut still hides them.
+    private func showLiveStrokes(_ ids: Set<UInt64>) {
+        let stillCut = scribbleCuts.reduce(Set<UInt64>()) { $0.union($1.liveStrokes) }
+        for layer in livePenLayers where layer.id.map({ ids.contains($0) && !stillCut.contains($0) }) ?? false {
+            layer.view.isHidden = false
+        }
     }
 
     /// The page's queued ink edits, among them the scribbles with live strokes `scribbles`, have just landed, and its

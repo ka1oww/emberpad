@@ -1220,9 +1220,10 @@ final class StressScenario {
             if case .visible = mark.expect, mark.liftedAt != nil, mark.drawnAt.contains(where: { $0 != nil }) { return true }
             return false
         }
-        let landed = lifted.compactMap { mark -> (label: String, time: Double)? in
-            guard let lift = mark.liftedAt, let drawn = mark.pageDrawnAt else { return nil }
-            return (mark.label, max(0, drawn - lift))
+        // Timed from the start of the pause that let it land (`StressBounds.landing`); from its own lift as well, reported.
+        let landed = lifted.compactMap { mark -> (label: String, time: Double, sinceLift: Double)? in
+            guard let lift = mark.liftedAt, let drawn = mark.pageDrawnAt, let pause = sampler.pauseStart(landing: mark) else { return nil }
+            return (mark.label, max(0, drawn - pause), max(0, drawn - lift))
         }
         let landings = landed.map(\.time)
         let slowest = landed.max { $0.time < $1.time }
@@ -1231,8 +1232,13 @@ final class StressScenario {
             let worst = landings.max() ?? 0
             metrics["landingMaxMs"] = worst * 1000
             metrics["landingP50Ms"] = landings.isEmpty ? 0 : landings.sorted()[landings.count / 2] * 1000
+            if let longest = landed.max(by: { $0.sinceLift < $1.sinceLift }) {
+                metrics["landingSinceLiftMaxMs"] = longest.sinceLift * 1000
+                notes.append(String(format: "longest wait to land from its own lift %.0f ms (%@): the pen waits for a pause on purpose",
+                                    longest.sinceLift * 1000, longest.label))
+            }
             check("every stroke lands on the page", unlanded.isEmpty && worst <= StressBounds.landing,
-                  unlanded.isEmpty ? String(format: "slowest landing %.0f ms after the lift", worst * 1000) + " (\(slowest?.label ?? "-"))"
+                  unlanded.isEmpty ? String(format: "slowest landing %.0f ms after the pause began", worst * 1000) + " (\(slowest?.label ?? "-"))"
                       : "\(unlanded.count) of \(lifted.count) never drawn by the page itself: \(unlanded.prefix(4).joined(separator: ", "))")
         }
         // Removal.

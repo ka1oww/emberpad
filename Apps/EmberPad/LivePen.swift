@@ -23,6 +23,9 @@ struct LivePenStrokes {
         fileprivate(set) var liftedAt: TimeInterval?
         /// When PencilKit's commit was swapped for it; it stays drawn until the page has drawn its committed ink.
         fileprivate(set) var committedAt: TimeInterval?
+        /// The creation date of the page's stroke it landed as (EP115): PencilKit's for the same touch, or its own for a
+        /// stroke PencilKit threw away. An erase of that page stroke takes this stroke off the screen with it.
+        fileprivate(set) var landedAs: Date?
         /// PencilKit committed it and its swap is waiting for PencilKit to be idle, or PencilKit threw it away and
         /// this copy of it is waiting to go on the page (EP94): it stays drawn, however long that takes, until it
         /// lands (`landed`).
@@ -213,12 +216,25 @@ struct LivePenStrokes {
         return strokes[index]
     }
 
-    /// The owed stroke's swap landed on the page: it leaves once the page has drawn it (`rendered`).
-    mutating func landed(id: UInt64, now: TimeInterval) {
+    /// The owed stroke's swap landed on the page, as the page stroke created at `creationDate` (its own when nil): it
+    /// leaves once the page has drawn it (`rendered`).
+    mutating func landed(id: UInt64, now: TimeInterval, as creationDate: Date? = nil) {
         guard let index = strokes.firstIndex(where: { $0.id == id }) else { return }
         strokes[index].owed = false
         strokes[index].committedAt = now
+        strokes[index].landedAs = creationDate ?? strokes[index].creationDate
     }
+
+    /// The strokes on `page` that landed as page strokes created at one of `dates` (EP115).
+    func landed(page: Int, createdAt dates: [Date]) -> [UInt64] {
+        strokes.filter { stroke in
+            guard stroke.page == page, let landed = stroke.landedAs else { return false }
+            return dates.contains { abs($0.timeIntervalSince(landed)) <= Self.sameCreation }
+        }.map(\.id)
+    }
+
+    /// How far apart two creation dates can be and still be one stroke's, read back from PencilKit.
+    static let sameCreation: TimeInterval = 0.001
 
     /// The page has drawn its ink: committed strokes there leave, as the page now shows them itself.
     mutating func rendered(page: Int) {
