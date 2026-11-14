@@ -54,9 +54,17 @@ struct HoldTracker: Equatable {
 /// straight pen line; circle to lasso, EP-29) is the owner's job.
 ///
 /// `heldAtEnd` stays latched after the touch lifts, until the owner calls
-/// `consumeHold()` or the next touch begins, because PencilKit may commit the
-/// stroke before or after this recogniser sees the touch end. `pencilStroke`
-/// is latched the same way, for owners that act on every Pencil stroke.
+/// `consumeHold()`, because PencilKit may commit the stroke before or after
+/// this recogniser sees the touch end. `pencilStroke` is latched the same way,
+/// for owners that act on every Pencil stroke.
+///
+/// EP118: each touch keeps its own latches. On a slow iPad PencilKit can commit
+/// a stroke after the next touch has begun; that touch used to clear the
+/// stroke's hold, and the late commit then took the new touch's latch, so the
+/// stroke after it was never straightened ("Always straight" highlights left
+/// bent). A touch that begins now sets the unspent latches aside, and the owner
+/// names the stroke each drawing change commits (`beginCommit`), so the
+/// latches read and spent are that stroke's own.
 @MainActor
 final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     /// Called once per touch, when it latches a hold.
@@ -72,21 +80,62 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
     private(set) var currentLocation: CGPoint?
     /// The last stroke was held still for `HoldTracker.duration`. Set by
     /// touches; settable in the module so tests can stand in for a Pencil.
-    var heldAtEnd = false
+    var heldAtEnd: Bool {
+        get { latches.held }
+        set { latches.held = newValue }
+    }
     /// A Pencil touch began on this view since the last `consumeHold()`, so
     /// the next drawing change is a stroke the teacher just drew (not an undo
     /// or redo). Cleared if the touch is cancelled. Settable in the module so
     /// tests can stand in for a Pencil.
-    var pencilStroke = false
+    var pencilStroke: Bool {
+        get { latches.drawn }
+        set { latches.drawn = newValue }
+    }
     /// How far the tracked touch has travelled, in points.
     private(set) var travelled: CGFloat = 0
     /// When the hold latched, the stroke so far was close to a line
     /// (`StrokeSnap.isLineLike`). Movement after the hold only moves the
     /// line's end, so it does not count. Settable in the module for tests.
-    var lineLikeAtHold = false
+    var lineLikeAtHold: Bool {
+        get { latches.lineLike }
+        set { latches.lineLike = newValue }
+    }
+
     /// The pen's draw and hold made the stroke a clean shape when the hold latched (EP116), set by the owner. Like
-    /// `lineLikeAtHold`, it lasts until the next touch begins. Settable in the module for tests.
-    var heldShape: HeldShape?
+    /// the other latches, it lasts until the drawing change that commits its stroke spends it. Settable in the module
+    /// for tests.
+    var heldShape: HeldShape? {
+        get { latches.shape }
+        set { latches.shape = newValue }
+    }
+
+    /// One touch's latches, kept until the drawing change that commits its stroke spends them.
+    struct Latches: Equatable {
+        var drawn = false
+        var held = false
+        var lineLike = false
+        /// The shape the pen's draw and hold made (EP116).
+        var shape: HeldShape?
+        /// When the touch began; PencilKit's stroke for it is created at about the same moment.
+        var began: Date?
+        var isSpent: Bool { !drawn && !held }
+    }
+    /// The newest touch's latches.
+    private var newest = Latches()
+    /// Earlier touches whose strokes PencilKit had not committed when the next touch began, oldest first.
+    private(set) var earlier: [Latches] = []
+    /// The earlier touch whose stroke the drawing change being handled commits (`beginCommit`); nil for the newest.
+    private var committing: Int?
+    /// The latches `heldAtEnd`, `pencilStroke` and `lineLikeAtHold` read and set.
+    private var latches: Latches {
+        get { committing.map { earlier[$0] } ?? newest }
+        set {
+            if let committing { earlier[committing] = newValue } else { newest = newValue }
+        }
+    }
+    /// How many earlier touches are kept. A touch whose stroke PencilKit never commits is forgotten after this many.
+    static let mostEarlier = 8
     /// The current touch has been held still long enough to count as a hold.
     var isHeld: Bool { tracker?.held ?? false }
     /// The tracked touch was cancelled rather than lifted.
@@ -109,11 +158,33 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         delegate = self
     }
 
-    /// Clears the latched hold and stroke so they apply to one stroke only.
+    /// Clears the latched hold and stroke so they apply to one stroke only: the stroke being committed
+    /// (`beginCommit`), with every earlier touch before it (their strokes never came), or else the newest touch's.
     func consumeHold() {
-        heldAtEnd = false
-        pencilStroke = false
+        if let committing {
+            earlier.removeFirst(committing + 1)
+            self.committing = nil
+        } else {
+            newest = Latches()
+        }
     }
+
+    /// A drawing change is about to be handled. `createdAt` is the creation date of the one stroke it commits (nil for
+    /// any other change); from now until `endCommit`, the latches are those of the touch that drew it: the touch that
+    /// began nearest that moment.
+    func beginCommit(createdAt date: Date?) {
+        committing = nil
+        guard let date, !earlier.isEmpty else { return }
+        var gap = newest.began.map { abs($0.timeIntervalSince(date)) } ?? .infinity
+        for (index, touch) in earlier.enumerated() {
+            guard let began = touch.began, abs(began.timeIntervalSince(date)) < gap else { continue }
+            gap = abs(began.timeIntervalSince(date))
+            committing = index
+        }
+    }
+
+    /// The drawing change has been handled: the latches are the newest touch's again.
+    func endCommit() { committing = nil }
 
     // MARK: - Never interfere
 
@@ -138,10 +209,13 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         startLocation = point
         currentLocation = point
         travelled = 0
-        lineLikeAtHold = false
-        heldShape = nil
-        heldAtEnd = false
-        pencilStroke = true
+        // The last touch's latches wait for its stroke's commit if it has not come yet.
+        if !newest.isSpent {
+            earlier.append(newest)
+            if earlier.count > Self.mostEarlier { earlier.removeFirst(earlier.count - Self.mostEarlier) }
+        }
+        committing = nil
+        newest = Latches(drawn: true, began: Date())
         wasCancelled = false
         waitingOutStall = false
         schedule(after: HoldTracker.duration)
@@ -172,8 +246,7 @@ final class HoldRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
         super.touchesCancelled(touches, with: event)
         guard let touch, touches.contains(touch) else { return }
         // A cancelled stroke is not committed, so its hold must not apply to a later one.
-        heldAtEnd = false
-        pencilStroke = false
+        newest = Latches()
         finish(cancelled: true)
     }
 

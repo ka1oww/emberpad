@@ -407,6 +407,47 @@ final class StraightHighlighterTests: XCTestCase {
         XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
     }
 
+    /// EP118: on a slow iPad PencilKit can commit a highlighter stroke after the Pencil has already gone down for the
+    /// next one. Both strokes are straightened: the late commit spends its own touch's latch, not the new touch's.
+    func testAlwaysStraightHighlighterCommittedAfterTheNextTouchBeganStillSnapsBoth() async throws {
+        let (controller, session) = try await Self.makeController(pages: 1)
+        let canvas = try Self.canvas(controller, session, page: 0)
+        let hold = try XCTUnwrap(canvas.gestureRecognizers?.compactMap { $0 as? HoldRecognizer }.first)
+        controller.tools.select(.highlighter)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 820, height: 1180))
+        var pencil = PencilStroke(window: window, view: canvas, recognizers: [hold])
+
+        // Highlight A is drawn and lifted, but PencilKit has not committed it yet.
+        let beganA = Date()
+        pencil.down(at: CGPoint(x: 40, y: 120))
+        pencil.move(to: CGPoint(x: 400, y: 131), steps: 8)
+        pencil.lift()
+        PencilStroke.turn(0.05)
+        // The Pencil goes down for highlight B; only now does A's stroke arrive.
+        let beganB = Date()
+        pencil.down(at: CGPoint(x: 40, y: 320))
+        XCTAssertEqual(hold.earlier.count, 1, "A's latches wait for its commit")
+        let first = Self.wobblyMarker(from: CGPoint(x: 40, y: 120), to: CGPoint(x: 400, y: 131), created: beganA)
+        Self.commitOnce(PKDrawing(strokes: [first]), on: canvas, controller, session)
+        XCTAssertTrue(hold.pencilStroke, "A's commit leaves B's own stroke latch for B")
+        await Self.settle()
+        pencil.move(to: CGPoint(x: 400, y: 331), steps: 8)
+        pencil.lift()
+        let second = Self.wobblyMarker(from: CGPoint(x: 40, y: 320), to: CGPoint(x: 400, y: 331), created: beganB)
+        Self.commitOnce(PKDrawing(strokes: canvas.drawing.strokes + [second]), on: canvas, controller, session)
+        XCTAssertFalse(hold.pencilStroke, "B's commit spends B's latch")
+        XCTAssertTrue(hold.earlier.isEmpty, "no touch is left waiting for a stroke")
+        await Self.settle()
+
+        let strokes = canvas.drawing.strokes
+        XCTAssertEqual(strokes.count, 2)
+        for (index, y) in [125.5, 325.5].enumerated() where index < strokes.count {
+            XCTAssertTrue(Array(strokes[index].path).allSatisfy { abs($0.location.y - y) < 1e-6 },
+                          "highlight \(index == 0 ? "A" : "B") lies flat")
+        }
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 2)
+    }
+
     func testAlwaysStraightLeavesUndoneInkAndSwitchedOffStrokesAlone() async throws {
         let (controller, session) = try await Self.makeController(pages: 1)
         let canvas = try Self.canvas(controller, session, page: 0)
@@ -510,7 +551,8 @@ final class StraightHighlighterTests: XCTestCase {
     }
 
     /// A synthetic marker stroke, 18 pt unless `full` says otherwise, with thin ends and a small wobble.
-    static func wobblyMarker(from start: CGPoint, to end: CGPoint, wobble: CGFloat = 2, width full: CGFloat = 18) -> PKStroke {
+    static func wobblyMarker(from start: CGPoint, to end: CGPoint, wobble: CGFloat = 2, width full: CGFloat = 18,
+                             created: Date = Date(timeIntervalSince1970: 1_800_000_000)) -> PKStroke {
         let count = 24
         let points = (0..<count).map { index -> PKStrokePoint in
             let t = CGFloat(index) / CGFloat(count - 1)
@@ -521,7 +563,7 @@ final class StraightHighlighterTests: XCTestCase {
                                  opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
         }
         let ink = PKInk(.marker, color: UIColor.emberHighlighterYellow.withAlphaComponent(Theme.highlighterDefaultOpacity))
-        return PKStroke(ink: ink, path: PKStrokePath(controlPoints: points, creationDate: Date(timeIntervalSince1970: 1_800_000_000)))
+        return PKStroke(ink: ink, path: PKStrokePath(controlPoints: points, creationDate: created))
     }
 
     private static func registerSwap(on undo: UndoManager, canvas: PKCanvasView, to drawing: PKDrawing) {
@@ -537,6 +579,14 @@ final class StraightHighlighterTests: XCTestCase {
         undo.registerUndo(withTarget: target) { target in
             MainActor.assumeIsolated { registerUnrelatedStep(on: undo, target: target) }
         }
+    }
+
+    /// PencilKit commits `drawing`: one drawing change, as on the iPad. Setting the drawing tells the canvas's delegate
+    /// itself when it is the controller; a second, empty change would spend the next touch's latch.
+    private static func commitOnce(_ drawing: PKDrawing, on canvas: PKCanvasView, _ controller: PDFOverlayPageController,
+                                   _ session: DocumentSession) {
+        canvas.drawing = drawing
+        if session.drawing(on: 0).strokes.count != drawing.strokes.count { controller.canvasViewDrawingDidChange(canvas) }
     }
 
     /// Lets the replacement that waits a turn of the main queue run.

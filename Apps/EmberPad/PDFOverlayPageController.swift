@@ -403,8 +403,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             committingLiveID = inkFlights.committed(canvas: ObjectIdentifier(canvasView),
                                                     creationDate: stroke.path.creationDate)?.liveID
         }
+        // EP118: the hold and stroke latches read below are those of the touch that drew this stroke, which on a slow
+        // iPad may have lifted before the touch now down began.
+        let hold = Self.holdRecognizer(on: canvasView)
+        hold?.beginCommit(createdAt: !replaying && strokes.count == previousCount + 1 ? strokes.last?.path.creationDate : nil)
+        defer { hold?.endCommit() }
         // Read before the snaps consume it: this change is a stroke the Pencil just drew.
-        let drawn = Self.holdRecognizer(on: canvasView)?.pencilStroke ?? false
+        let drawn = hold?.pencilStroke ?? false
         // The Shape tool's strokes become shapes (EP64); they are never lines to straighten or loops to lasso. A
         // scribble goes first, held or not: the erase it previewed while drawn is the one it does (EP90).
         let taken = tools.current == .shape
@@ -461,14 +466,38 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         guard !readOnly else { return }
         finishWholeStrokeErase()
         landInkEdits()
-        activeCanvas?.undoManager?.undo()
+        guard let undoManager = activeCanvas?.undoManager else { return }
+        stepPastEmptySteps(can: { undoManager.canUndo }, undoManager.undo)
     }
     func redo() {
         guard !readOnly else { return }
         finishWholeStrokeErase()
         landInkEdits()
-        activeCanvas?.undoManager?.redo()
+        guard let undoManager = activeCanvas?.undoManager else { return }
+        stepPastEmptySteps(can: { undoManager.canRedo }, undoManager.redo)
     }
+
+    /// EP118: one undo or redo always changes the ink. After 72 fast brackets on an iPad Air 4, five undo steps in a
+    /// row changed nothing and left no redo behind: not EmberPad's own (each registers its inverse), but steps PencilKit
+    /// left where a landing's clean-up (`dropEmptySteps`) does not reach. Every step of EmberPad's own changes a page's
+    /// drawing, so a step that changes no page is passed over and the next one taken, up to `mostEmptyStepsSkipped`.
+    private func stepPastEmptySteps(can: () -> Bool, _ step: () -> Void) {
+        for _ in 0...Self.mostEmptyStepsSkipped where can() {
+            // The active page is compared whole; every other page counts its changes (`scribbleRevisions`).
+            let canvas = activeCanvas
+            let page = canvases.first { $0.value === canvas }?.key
+            let others = scribbleRevisions.filter { $0.key != page }
+            let drawing = canvas?.drawing
+            step()
+            let after = canvas?.drawing
+            guard scribbleRevisions.filter({ $0.key != page }) == others,
+                  after?.strokes.count == drawing?.strokes.count, after == drawing else { return }
+        }
+    }
+
+    /// How many steps that change nothing one undo or redo passes over at most.
+    static let mostEmptyStepsSkipped = 16
+
     @objc private func undoGesture() { undo() }
     @objc private func redoGesture() { redo() }
 

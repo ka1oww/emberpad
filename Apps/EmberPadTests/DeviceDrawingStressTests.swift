@@ -1084,22 +1084,41 @@ final class StressScenario {
         sampler.releaseAll()
         var wrong: [String] = []
         var steps = 0
+        // An undo group opened outside undo and redo during the check registers a step, which empties redo: who
+        // opened it is named with the first wrong step (EP118: on one Simulator run every redo found none left).
+        var openers: [String] = []
+        let opened = NotificationCenter.default.addObserver(forName: .NSUndoManagerDidOpenUndoGroup, object: undo, queue: nil) { _ in
+            guard !undo.isUndoing, !undo.isRedoing, openers.count < 3 else { return }
+            let frames = Thread.callStackSymbols.dropFirst(2).prefix(6)
+                .map { $0.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).dropLast(2).joined(separator: " ") }
+            openers.append(frames.joined(separator: " < "))
+        }
+        defer { NotificationCenter.default.removeObserver(opened) }
         // Taps 50 ms apart, as fast as a two-finger double tap repeats.
+        // Each wrong step names the undo step it was ("Ink" is EmberPad's own; PencilKit's own steps have no name).
+        func named(_ name: String) -> String { name.isEmpty ? "unnamed" : "\"\(name)\"" }
         while undo.canUndo, steps < count {
             let before = canvas.drawing.strokes.count
+            let name = undo.undoActionName
             controller.undo()
             steps += 1
-            if canvas.drawing.strokes.count != before - 1 { wrong.append("undo \(steps): \(before) to \(canvas.drawing.strokes.count)") }
+            if canvas.drawing.strokes.count != before - 1 {
+                wrong.append("undo \(steps) (\(named(name))): \(before) to \(canvas.drawing.strokes.count)")
+            }
             StressPage.pump(0.05)
         }
         if steps < count { wrong.append("only \(steps) undo steps for \(count) strokes") }
         for k in 0..<steps {
             let before = canvas.drawing.strokes.count
+            let name = undo.canRedo ? named(undo.redoActionName) : "none left"
             controller.redo()
-            if canvas.drawing.strokes.count != before + 1 { wrong.append("redo \(k + 1): \(before) to \(canvas.drawing.strokes.count)") }
+            if canvas.drawing.strokes.count != before + 1 {
+                wrong.append("redo \(k + 1) (\(name)): \(before) to \(canvas.drawing.strokes.count)")
+            }
             StressPage.pump(0.05)
         }
         settle()
+        if !wrong.isEmpty, !openers.isEmpty { wrong.insert("undo group opened during the check by " + openers.joined(separator: "; "), at: 0) }
         check("each undo takes one stroke and redo restores it", wrong.isEmpty,
               wrong.isEmpty ? "\(steps) undos took one stroke each; \(steps) redos put each back" : wrong.prefix(6).joined(separator: "; "))
     }
@@ -1138,8 +1157,21 @@ final class StressScenario {
                     return "\(InkStrokeID(stroke).hashValue) \(Int(first.x * 10)) \(Int(first.y * 10)) \(mask)"
                 }).count
                 let clear = shown.filter { InkKeepsEveryStrokeTests.alpha($0.ink.color) == 0 }.count
+                var detail = "\(saved.count) saved, \(shown.count) on the page, \(unique) distinct, \(count) expected"
+                if saved.count < count {
+                    // Names the strokes written here that no saved stroke passes near, so a loss says which one.
+                    let removed = Set(removals.map(\.id))
+                    let paths = saved.map { StressInk.points(of: $0, count: 64) }
+                    let lost = sampler.allMarks.filter { mark in
+                        mark.page == index && !removed.contains(mark.id) && mark.drawnAt.contains { $0 != nil }
+                            && !paths.contains { path in
+                                mark.points.allSatisfy { p in path.contains { hypot($0.x - p.x, $0.y - p.y) <= 12 } }
+                            }
+                    }.map(\.label)
+                    if !lost.isEmpty { detail += "; not on the page: \(lost.prefix(6).joined(separator: ", "))" }
+                }
                 check("page \(index + 1): no stroke lost or doubled", saved.count == count && shown.count == count && unique == count,
-                      "\(saved.count) saved, \(shown.count) on the page, \(unique) distinct, \(count) expected")
+                      detail)
                 check("page \(index + 1): no stroke left clear", clear == 0, "\(clear) strokes left in the live pen's clear ink")
             }
         }
