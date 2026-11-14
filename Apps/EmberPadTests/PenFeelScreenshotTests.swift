@@ -42,6 +42,8 @@ final class PenFeelScreenshotTests: XCTestCase {
             }
         }
         await pause(0.5)
+        // The pen feel lands once the last commit has settled (EP123), after the last read above.
+        strokes = canvas.drawing.strokes
         XCTAssertEqual(session.drawing(on: 0).strokes.count, strokes.count)
         // Every row takes the pen's width; the 0% row keeps blunt ends and sharper rows have thinner tips.
         let perRow = Self.writing(top: 0).count

@@ -114,13 +114,16 @@ final class InkEditGateTests: XCTestCase {
 
     // MARK: InkLandingTiming
 
-    func testAChangeLandsOnlyOnAFrameAfterTheLatestCommit() {
+    func testAChangeLandsOnlyOnAFrameOnceTheLatestCommitHasSettled() {
         var timing = InkLandingTiming()
-        XCTAssertTrue(timing.frameIsAfterCommit(5), "nothing committed yet")
+        XCTAssertTrue(timing.frameIsClearOfCommit(5), "nothing committed yet")
         timing.lastCommit = 10
-        XCTAssertFalse(timing.frameIsAfterCommit(9.99), "the commit's own frame")
-        XCTAssertFalse(timing.frameIsAfterCommit(10))
-        XCTAssertTrue(timing.frameIsAfterCommit(10 + 1.0 / 60))
+        XCTAssertFalse(timing.frameIsClearOfCommit(9.99), "the commit's own frame")
+        XCTAssertFalse(timing.frameIsClearOfCommit(10))
+        XCTAssertFalse(timing.frameIsClearOfCommit(10 + 1.0 / 60), "the first frame after the commit (EP123)")
+        XCTAssertFalse(timing.frameIsClearOfCommit(10 + 0.05))
+        XCTAssertTrue(timing.frameIsClearOfCommit(10 + InkLandingTiming.commitSettle))
+        XCTAssertTrue(timing.frameIsClearOfCommit(10.5))
     }
 
     func testThePensSwapsWaitForHalfASecondOfPause() {

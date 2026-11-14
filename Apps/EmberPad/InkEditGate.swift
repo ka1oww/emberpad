@@ -129,7 +129,7 @@ struct InkLandingTiming {
     /// How long the Pencil must have been up before the pen's swaps land on their own (measured on the captain's own
     /// writing: a write half a second into a pause leaves the next stroke in its frame about 6 times in 1000, against
     /// about 100 in 1000 for a write right after each stroke). Visible edits (a scribble's erase, a straight line, a
-    /// shape, a lasso) land at the first safe frame instead.
+    /// shape, a lasso) land at the first safe frame instead, once the latest commit has settled (`commitSettle`).
     static let pause: TimeInterval = 0.5
 
     /// How many swaps may wait for the pause before they land at the first safe frame anyway. A landing undoes
@@ -138,15 +138,23 @@ struct InkLandingTiming {
     /// so his writing lands only in pauses.
     static let mostWaiting = 32
 
+    /// How long after a commit PencilKit must be left to finish with the stroke before the drawing changes (EP123).
+    /// A change in that time, with the next stroke beginning a few milliseconds after it, leaves PencilKit throwing
+    /// away every later stroke on the page: the highlights lost on the iPad, where the first frame after a commit
+    /// fell in the 10 ms gap between quick highlights. Measured on the Simulator: a change 0.5 to 16 ms after the
+    /// commit lost the strokes after it, one 50 ms or more after never did; doubled for the slower iPad.
+    static let commitSettle: TimeInterval = 0.1
+
     /// When the Pencil last lifted, in `CACurrentMediaTime` seconds; nil before any lift.
     var lastLift: CFTimeInterval?
     /// When PencilKit last committed a stroke, in `CACurrentMediaTime` seconds.
     var lastCommit: CFTimeInterval?
 
-    /// Whether a frame shown at `frame` (`CADisplayLink.timestamp`) comes after the latest commit's own frame.
-    func frameIsAfterCommit(_ frame: CFTimeInterval) -> Bool {
+    /// Whether a frame shown at `frame` (`CADisplayLink.timestamp`) comes after the latest commit has settled
+    /// (`commitSettle`), so a change on it cannot catch PencilKit still finishing that stroke.
+    func frameIsClearOfCommit(_ frame: CFTimeInterval) -> Bool {
         guard let lastCommit else { return true }
-        return frame > lastCommit
+        return frame >= lastCommit + Self.commitSettle
     }
 
     /// How long after `now` the pause is over; zero once it is, or once `waiting` swaps fill the queue.
