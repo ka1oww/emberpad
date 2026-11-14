@@ -74,6 +74,9 @@ fi
 # TEST_RUNNER_ variables reach the test process with the prefix removed. EMBERPAD_STRESS=1 is the
 # gate: without it, and outside the separate stress-test app, every stress test skips itself.
 export TEST_RUNNER_EMBERPAD_STRESS=1
+# EMBERPAD_STRESS_ORIENTATION=landscape lays a portrait iPad's page out in a window of its landscape shape, so the
+# page shows only as much of itself as on an iPad standing in landscape (the Simulator cannot be turned from a test).
+[[ -n ${EMBERPAD_STRESS_ORIENTATION:-} ]] && export TEST_RUNNER_EMBERPAD_STRESS_ORIENTATION=$EMBERPAD_STRESS_ORIENTATION
 [[ $KIND == simulator ]] && export TEST_RUNNER_EMBERPAD_STRESS_OUTPUT="$OUT"
 
 xcodebuild -project "$ROOT/EmberPad.xcodeproj" -scheme EmberPad -configuration Debug \

@@ -26,6 +26,35 @@ enum StressGate {
 
     static var enabled: Bool { ProcessInfo.processInfo.environment[environmentKey] == "1" }
 
+    /// "landscape" lays the stress page out in a window of the screen's landscape shape, as wide as the screen and
+    /// as tall as the screen turned on its side would be at that width, so the page shows as little of itself as on
+    /// an iPad standing in landscape; unset, the page fills the screen as the iPad is held. The Simulator's iPad
+    /// starts in portrait, where the whole page shows, and iPadOS does not let a test turn it; the teacher's iPad
+    /// stands in landscape, where only the page's top part shows (EP122). The script passes it as
+    /// `TEST_RUNNER_EMBERPAD_STRESS_ORIENTATION`.
+    static let orientationKey = "EMBERPAD_STRESS_ORIENTATION"
+    static var landscape: Bool { ProcessInfo.processInfo.environment[orientationKey] == "landscape" }
+
+    /// The stress page's window frame on a screen of `bounds`.
+    static func windowFrame(in bounds: CGRect, landscape: Bool = landscape) -> CGRect {
+        guard landscape, bounds.height > bounds.width else { return bounds }
+        return CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: (bounds.width * bounds.width / bounds.height).rounded())
+    }
+
+    /// How far above the screen's bottom edge the lowest row of writing sits, clear of its ink and the sampler's
+    /// inset.
+    static let rowMargin: CGFloat = 30
+
+    /// The heights `ys` of a scenario's rows of writing, laid out for a page the screen shows whole (an iPad in
+    /// portrait). Where the lowest would sit below `floor` (an iPad on its stand in landscape shows only the page's top
+    /// half), the rows below the first close up, in proportion, so the lowest sits at `floor`: ink written where the
+    /// screen does not show it cannot be seen to land (EP122). Where they fit, they are kept as they are.
+    static func fit(_ ys: [CGFloat], above floor: CGFloat) -> [CGFloat] {
+        guard let top = ys.min(), let bottom = ys.max(), bottom > top, bottom > floor else { return ys }
+        let scale = max(0, floor - top) / (bottom - top)
+        return ys.map { top + ($0 - top) * scale }
+    }
+
     static var isSimulator: Bool {
         #if targetEnvironment(simulator)
         true
@@ -349,7 +378,7 @@ final class StressPage {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first { $0.session.role == .windowApplication })
         window = UIWindow(windowScene: scene)
-        window.frame = scene.coordinateSpace.bounds
+        window.frame = StressGate.windowFrame(in: scene.coordinateSpace.bounds)
         let container = UIViewController()
         container.view.backgroundColor = .emberCanvas
         container.addChild(controller)
@@ -636,6 +665,9 @@ final class StressFrameSampler {
         var goneAt: CFTimeInterval?
         /// Whether at least half of it has shown on some frame: ink never shown cannot be seen to leave.
         var everShown = false
+        /// Whether any point of it was on the screen on some frame once due, so it could be read at all. Ink written
+        /// where the screen does not show it is never judged (EP122).
+        var everOnScreen = false
         var cameBackAt: CFTimeInterval?
         var run: (start: CFTimeInterval, frames: Int, worst: Double, model: String, evidence: String?, screen: [Double]?)?
 
@@ -915,6 +947,7 @@ final class StressFrameSampler {
         for (index, hit) in inked where hit && mark.firstSeen[index] == nil { mark.firstSeen[index] = now }
         let judged = inked.count
         guard judged > 0 else { return }
+        mark.everOnScreen = true
         let shown = inked.values.filter { $0 }.count
         if Double(shown) >= 0.5 * Double(judged) { mark.everShown = true }
         switch mark.expect {
