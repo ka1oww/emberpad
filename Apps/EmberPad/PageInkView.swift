@@ -124,6 +124,13 @@ final class PageInkView: UIView {
     /// for that long: 104 to 129 ms on the iPad Air late in the stress test. Here only the live ink waits.
     static let livePenDrawings = DispatchQueue(label: "EmberPad.livePenDrawings", qos: .userInteractive)
 
+    /// A live drawing on its way from `livePenDrawings` to the main thread and back (EP124), so that it is let go of on
+    /// that queue. Only one thread holds it at a time: the queue that made it, then the main thread, then the queue.
+    private final class MadeDrawing: @unchecked Sendable {
+        var drawing: PKDrawing?
+        init(_ drawing: PKDrawing) { self.drawing = drawing }
+    }
+
     private var livePenLayers: [LivePenLayer] = []
     /// The live strokes shown, oldest first.
     private var livePenOrder: [UInt64] = []
@@ -249,11 +256,15 @@ final class PageInkView: UIView {
             // EP124: made off the main thread, given on it, unless a newer drawing or a clear has replaced it meanwhile.
             layer.making = generation
             Self.livePenDrawings.async { [weak self, weak layer] in
-                let drawing = PKDrawing(strokes: [stroke])
+                let made = MadeDrawing(PKDrawing(strokes: [stroke]))
                 DispatchQueue.main.async {
-                    guard let self, let layer, layer.making == generation else { return }
-                    layer.making = nil
-                    self.give(drawing, to: layer, generation: generation)
+                    if let self, let layer, layer.making == generation, let drawing = made.drawing {
+                        layer.making = nil
+                        self.give(drawing, to: layer, generation: generation)
+                    }
+                    // PencilKit keeps its own copy. Let go of this one where it was made: the last release gives its
+                    // replica back to the record, which waits for a save just as making it does.
+                    Self.livePenDrawings.async { made.drawing = nil }
                 }
             }
         } else {
