@@ -7,7 +7,25 @@ private func isCompanionSourceDirectory(_ url: URL) -> Bool {
     return values.isDirectory == true && values.isSymbolicLink != true
 }
 
+/// Starts the Companion, or, when it hosts `EmberPadCompanionTests`, a bare app with no models, so a test run never
+/// reads the pairing, starts the sync server or prepares the iPad library.
 @main
+enum CompanionMain {
+    static func main() {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            CompanionTestHost.main()
+        } else {
+            EmberPadCompanion.main()
+        }
+    }
+}
+
+struct CompanionTestHost: App {
+    var body: some Scene {
+        Settings { EmptyView() }
+    }
+}
+
 struct EmberPadCompanion: App {
     @StateObject private var model: CompanionModel
     @StateObject private var pairing: CompanionPairingModel
@@ -23,8 +41,13 @@ struct EmberPadCompanion: App {
         CompanionPeerHelloModel.shared.startIfRequested()
 #endif
         let model = CompanionModel()
-        let pairing = CompanionPairingModel()
         let present = CompanionPresentModel()
+#if DEBUG
+        let pairing = CompanionPresentFake.isEnabled
+            ? CompanionPairingModel(keychain: PairingKeychain(service: CompanionPresentFake.pairingService)) : CompanionPairingModel()
+#else
+        let pairing = CompanionPairingModel()
+#endif
         let sync = CompanionSyncModel(presentHost: present.host)
         pairing.onCredentialChange = { [weak sync] in sync?.serve($0) }
         model.onPrepared = { [weak sync] in sync?.refreshOutbox() }
@@ -32,10 +55,18 @@ struct EmberPadCompanion: App {
         _pairing = StateObject(wrappedValue: pairing)
         _sync = StateObject(wrappedValue: sync)
         _present = StateObject(wrappedValue: present)
+#if DEBUG
+        if CompanionPresentFake.isEnabled {
+            let fake = CompanionPresentFake(host: present.host)
+            CompanionPresentFake.running = fake
+            fake.start()
+        }
+#endif
     }
 
     var body: some Scene {
         MenuBarExtra("EmberPad", image: "MenuBarGlyph") {
+            CompanionPresentBanner(model: present).frame(width: 340)
             CompanionLibraryContent(
                 folder: model.folder,
                 isSourceAvailable: model.isSourceAvailable,
