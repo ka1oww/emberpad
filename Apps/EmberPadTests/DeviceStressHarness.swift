@@ -87,11 +87,21 @@ enum StressBounds {
     /// the screen; of 33 this short, 2 did. A tile PencilKit is redrawing can read bare for a frame or two that the
     /// screen never showed.
     static let blip: Double = 0.070
+    /// EP126: the longest gap between two display frames while the lasso's outline is drawn and while a selection is
+    /// dragged or resized: a 60 Hz frame and one frame budget more, so no stall over one frame budget.
+    static let lassoFrameGap: Double = 2.0 / 60
+    /// EP126: the longest gap between two display frames at the lasso's single moments: the lift that selects, and a
+    /// drag's pick-up and drop.
+    static let lassoMoment: Double = 0.100
+    /// EP126: the most drawings a page is given through one drag or resize of a selection: one to pick it up and one to
+    /// drop it, never one per move.
+    static let lassoPageDrawings = 2
 
     static var summary: [String: Double] {
         ["penToInkP95Ms": penToInkP95 * 1000, "penToInkMaxMs": penToInkMax * 1000,
          "longestFrameGapMs": longestFrameGap * 1000, "removalMs": removal * 1000, "landingMs": landing * 1000,
-         "blipMs": blip * 1000]
+         "blipMs": blip * 1000, "lassoFrameGapMs": lassoFrameGap * 1000, "lassoMomentMs": lassoMoment * 1000,
+         "lassoPageDrawings": Double(lassoPageDrawings)]
     }
 }
 
@@ -727,7 +737,7 @@ final class StressFrameSampler {
 
     /// Starts timing frames afresh (each scenario's own stalls).
     func resetTiming() {
-        frameGaps = []; appFrameGaps = []; costs = []; lastFrame = nil; metalFrames = 0
+        frameGaps = []; appFrameGaps = []; appFrameTimes = []; costs = []; lastFrame = nil; metalFrames = 0
     }
 
     @discardableResult
@@ -784,6 +794,7 @@ final class StressFrameSampler {
             let gap = max(0, now - lastFrame - lastCost - StressHarnessTime.take())
             if gap > (appFrameGaps.max() ?? 0) { longestGapAt = lastFrame - scenarioStart }
             appFrameGaps.append(gap)
+            appFrameTimes.append(now)
         }
         lastFrame = now
         frames += 1
@@ -804,6 +815,8 @@ final class StressFrameSampler {
     private var lastCost: CFTimeInterval = 0
     /// Frame gaps with the sampler's own work taken off: the stalls the app itself causes.
     private(set) var appFrameGaps: [Double] = []
+    /// When each of `appFrameGaps` ended (EP126), to say where in a scenario a stall fell.
+    private(set) var appFrameTimes: [CFTimeInterval] = []
     /// When the longest of them began, in seconds since the scenario began.
     private(set) var longestGapAt: Double = 0
     /// Frames on which a page was drawn by PencilKit's Metal view (the Pencil is down on it), so its pixels could

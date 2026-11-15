@@ -64,6 +64,7 @@ final class PageInkView: UIView {
         guard page.width > 0, page.height > 0 else { return }
         Self.fit(canvas, pageSize: page, inkScale: inkScale, parentScale: 1, center: CGPoint(x: bounds.midX, y: bounds.midY))
         fitSetAsideInk()
+        for lift in lifts { fitLift(lift) }
     }
 
     /// Adds a passive ink layer above the canvas's own ink (Erase highlighter only), drawn at the same zoom.
@@ -126,7 +127,7 @@ final class PageInkView: UIView {
 
     /// A live drawing on its way from `livePenDrawings` to the main thread and back (EP124), so that it is let go of on
     /// that queue. Only one thread holds it at a time: the queue that made it, then the main thread, then the queue.
-    private final class MadeDrawing: @unchecked Sendable {
+    final class MadeDrawing: @unchecked Sendable {
         var drawing: PKDrawing?
         init(_ drawing: PKDrawing) { self.drawing = drawing }
     }
@@ -324,6 +325,228 @@ final class PageInkView: UIView {
         return view
     }
 
+    // MARK: Lifted selection (EP126)
+
+    /// The selected ink, in a layer of its own, while a drag on the selection moves or resizes it (EP126). The drag
+    /// used to give the page a whole new drawing on every move: on a page full of ink PencilKit then made a drawing of
+    /// every stroke and redrew every tile under the selection, about 90 times a drag, and the dragged ink trailed the
+    /// finger by a third of a second and more (on the iPad each of those drawings also waited on PencilKit's replica
+    /// record, EP114). Now the selected strokes are drawn once, in their own layer, as soon as they are selected, and a
+    /// drag only moves that layer. The page is given a drawing just twice: to pick the selection up (the page without
+    /// it) and to drop it (the page with it moved). Until the page has redrawn a tile after the pick-up, the selected
+    /// ink is cut out of that tile, as a scribble's erase is (EP108); after the drop, the layer is masked off each tile
+    /// the page has redrawn and hidden once all are, as a live stroke's is (EP103). So the ink never leaves the screen
+    /// and never shows twice.
+    private final class Lift {
+        let view: PKCanvasView
+        var generation = 0
+        /// The generation whose drawing the layer was last given.
+        var given = 0
+        /// Where the lifted strokes draw, in page points, before any move.
+        var bounds: CGRect = .null
+        /// PencilKit has drawn the strokes (reported it, or been given `livePenRenderPatience` to), and what waits for it.
+        var drawn = false
+        var waiting: [() -> Void] = []
+        /// Shown in place of the selected ink, moved by `moved` (page points).
+        var shown = false
+        var moved: CGAffineTransform = .identity
+        /// Dropped back on the page: the page's tiles then, nil while the page was still drawing an earlier change.
+        var dropped: (seeds: [ObjectIdentifier: UInt32]?, since: CFTimeInterval)?
+
+        init(view: PKCanvasView) { self.view = view }
+    }
+
+    private var lifts: [Lift] = []
+    private var liftGeneration = 0
+    /// The scribble id of the cut that hides the selected ink on the page from its pick-up until the page has redrawn.
+    private static let liftCut = UInt64.max
+
+    /// Draws `strokes`, the selection's ink as the page holds it, in a hidden lift layer, ready for a drag, and returns
+    /// the lift's generation. The drawing is made off the main thread, as the live pen's are (EP124).
+    func prepareLift(_ strokes: [PKStroke]) -> Int {
+        let lift = lifts.first { !$0.shown && $0.dropped == nil } ?? makeLift()
+        liftGeneration += 1
+        let generation = liftGeneration
+        lift.generation = generation
+        lift.bounds = strokes.reduce(CGRect.null) { $0.union($1.renderBounds) }
+        lift.drawn = false
+        lift.waiting = []
+        hide(lift)
+        Self.livePenDrawings.async { [weak self, weak lift] in
+            let made = MadeDrawing(PKDrawing(strokes: strokes))
+            DispatchQueue.main.async {
+                if let self, let lift, lift.generation == generation, let drawing = made.drawing {
+                    lift.given = generation
+                    lift.view.drawing = drawing
+                    // Should PencilKit never report it, the layer counts as drawn after a while all the same.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.livePenRenderPatience) { [weak self, weak lift] in
+                        guard let self, let lift else { return }
+                        self.liftDidRender(lift, generation: generation)
+                    }
+                }
+                Self.livePenDrawings.async { made.drawing = nil }
+            }
+        }
+        return generation
+    }
+
+    /// Whether lift `generation` is still ready or held.
+    func hasLift(_ generation: Int) -> Bool { lifts.contains { $0.generation == generation } }
+
+    /// Runs `run` once PencilKit has drawn lift `generation`: at once if it has. A lift let go of never runs it.
+    func whenLiftDrawn(_ generation: Int, _ run: @escaping () -> Void) {
+        guard let lift = lifts.first(where: { $0.generation == generation }) else { return }
+        if lift.drawn { run() } else { lift.waiting.append(run) }
+    }
+
+    /// Shows lift `generation` in place of the selected ink, moved by `moved`. `strokes`, the selected ink as the page
+    /// held it, are cut out of the page until it has redrawn each tile since `tiles`, taken before the page was given
+    /// its drawing without them.
+    func pickUpLift(_ generation: Int, moved: CGAffineTransform, cutting strokes: [PKStroke], since tiles: PageTiles) {
+        guard let lift = lifts.first(where: { $0.generation == generation }) else { return }
+        lift.shown = true
+        lift.dropped = nil
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        move(lift, by: moved)
+        lift.view.layer.mask = nil
+        CATransaction.commit()
+        hideScribbledInk(strokes, scribble: Self.liftCut)
+        if let index = scribbleCuts.firstIndex(where: { $0.scribble == Self.liftCut }) {
+            scribbleCuts[index].landed = (seeds: tiles.seeds, idle: tiles.idle && !tiles.seeds.isEmpty, since: CACurrentMediaTime())
+        }
+        if handoverWatch == nil { handoverWatch = HandoverWatch(self) }
+        checkScribbleCuts()
+    }
+
+    /// Moves lift `generation` by `delta` from where its ink was picked up, in page points.
+    func moveLift(_ generation: Int, by delta: CGAffineTransform) {
+        guard let lift = lifts.first(where: { $0.generation == generation }), lift.shown else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        move(lift, by: delta)
+        CATransaction.commit()
+    }
+
+    /// The page has just been given the lifted ink back (or the drawing it was picked up from), and its tiles were
+    /// `tiles` before: the layer is masked off each tile under it once the page has redrawn that tile, and hidden once
+    /// it has redrawn them all. While the page was still drawing an earlier change, it waits for the page's report.
+    func dropLift(_ generation: Int, since tiles: PageTiles) {
+        guard let lift = lifts.first(where: { $0.generation == generation }), lift.shown else { return }
+        lift.dropped = (seeds: tiles.idle && !tiles.seeds.isEmpty ? tiles.seeds : nil, since: CACurrentMediaTime())
+        if handoverWatch == nil { handoverWatch = HandoverWatch(self) }
+        checkHandovers()
+    }
+
+    /// Lets go of lift `generation` at once: hidden, and the page's selected ink no longer cut out. For a selection
+    /// let go of before any drag, and for a page whose ink changed some other way during one.
+    func discardLift(_ generation: Int) {
+        guard let lift = lifts.first(where: { $0.generation == generation }) else { return }
+        let shown = lift.shown
+        lift.generation = 0
+        lift.waiting = []
+        lift.shown = false
+        lift.dropped = nil
+        hide(lift)
+        if shown { showScribbledInk(scribble: Self.liftCut) }
+    }
+
+    private func makeLift() -> Lift {
+        let view = PKCanvasView(frame: canvas.bounds)
+        view.overrideUserInterfaceStyle = .light
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.isUserInteractionEnabled = false
+        // Only a picture of ink the page itself holds; assistive technologies read the page's canvas.
+        view.accessibilityElementsHidden = true
+        view.isScrollEnabled = false
+        view.drawingGestureRecognizer.isEnabled = false
+        view.maximumSupportedContentVersion = .latest
+        view.delegate = self
+        view.autoresizingMask = []
+        let lift = Lift(view: view)
+        lifts.append(lift)
+        canvas.addSubview(view)
+        fitLift(lift)
+        hide(lift)
+        return lift
+    }
+
+    /// Hides `lift` by a mask that shows nothing, not by `isHidden`, so PencilKit still draws it while it waits.
+    private func hide(_ lift: Lift) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        lift.view.layer.mask = CAShapeLayer()
+        lift.moved = .identity
+        lift.view.transform = .identity
+        CATransaction.commit()
+    }
+
+    /// Places `lift`'s ink moved by `delta` (page points): its view, centred on the canvas's centre in the canvas's
+    /// coordinates (`inkScale` times page points), is turned about that centre by `delta`'s linear part and shifted so
+    /// that every page point lands where `delta` takes it.
+    private func move(_ lift: Lift, by delta: CGAffineTransform) {
+        lift.moved = delta
+        let s = inkScale
+        let c = CGPoint(x: bounds.width * s / 2, y: bounds.height * s / 2)
+        lift.view.transform = CGAffineTransform(a: delta.a, b: delta.b, c: delta.c, d: delta.d,
+                                                tx: s * delta.tx + delta.a * c.x + delta.c * c.y - c.x,
+                                                ty: s * delta.ty + delta.b * c.x + delta.d * c.y - c.y)
+    }
+
+    /// Fits `lift`'s view to the page as a set-aside layer is, keeping its move.
+    private func fitLift(_ lift: Lift) {
+        let page = bounds.size
+        guard page.width > 0, page.height > 0 else { return }
+        let s = inkScale
+        let size = CGSize(width: page.width * s, height: page.height * s)
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let view = lift.view
+        guard view.zoomScale != s || view.bounds.size != size || view.contentOffset != .zero || view.center != center else {
+            return move(lift, by: lift.moved)
+        }
+        Self.fit(view, pageSize: page, inkScale: s, parentScale: s, center: center)
+        move(lift, by: lift.moved)
+    }
+
+    /// PencilKit has drawn lift `generation`'s drawing: whatever waits for it goes.
+    private func liftDidRender(_ lift: Lift, generation: Int) {
+        guard lift.generation == generation, lift.given == generation, !lift.drawn else { return }
+        lift.drawn = true
+        let waiting = lift.waiting
+        lift.waiting = []
+        for run in waiting { run() }
+    }
+
+    /// Hides each dropped lift once the page has redrawn every tile under it, and masks it off those redrawn so far.
+    private func checkDroppedLifts(_ tiles: [(layer: CALayer, frame: CGRect, seed: UInt32)]) {
+        let now = CACurrentMediaTime()
+        for lift in lifts {
+            guard let dropped = lift.dropped else { continue }
+            guard now - dropped.since <= Self.handoverPatience, let seeds = dropped.seeds else {
+                if now - dropped.since > Self.handoverPatience { finishDrop(lift) }
+                continue
+            }
+            let bounds = lift.bounds.applying(lift.moved).insetBy(dx: -1, dy: -1)
+            let under = tiles.filter { $0.frame.intersects(bounds) }
+            let redrawn = under.filter { tile in seeds[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false }
+            if !under.isEmpty, redrawn.count == under.count {
+                finishDrop(lift)
+            } else if !redrawn.isEmpty {
+                mask(lift.view, off: redrawn.map(\.frame))
+            }
+        }
+    }
+
+    private func finishDrop(_ lift: Lift) {
+        lift.dropped = nil
+        lift.shown = false
+        lift.generation = 0
+        hide(lift)
+    }
+
+    private var liftDropping: Bool { lifts.contains { $0.dropped != nil } }
+
     // MARK: Handing live strokes over to the page (EP103)
 
     /// PencilKit draws the page canvas in tiles, each a layer showing an IOSurface it redraws in place. For any change
@@ -352,6 +575,7 @@ final class PageInkView: UIView {
         // draws a stroke, so strokes that landed as the Pencil came down are redrawn only after that stroke's commit.
         if !handovers.isEmpty { handoverStarted = CACurrentMediaTime() }
         for index in scribbleCuts.indices where scribbleCuts[index].landed != nil { scribbleCuts[index].landed?.since = CACurrentMediaTime() }
+        for lift in lifts where lift.dropped != nil { lift.dropped?.since = CACurrentMediaTime() }
     }
 
     /// The page's tiles now, before a change to its drawing.
@@ -415,7 +639,8 @@ final class PageInkView: UIView {
         }
         if CACurrentMediaTime() - handoverStarted > Self.handoverPatience { handovers = [:] }
         checkScribbleCuts()
-        if handovers.isEmpty, !scribbleCutLanded {
+        checkDroppedLifts(tiles)
+        if handovers.isEmpty, !scribbleCutLanded, !liftDropping {
             handoverWatch?.stop()
             handoverWatch = nil
         }
@@ -538,6 +763,8 @@ final class PageInkView: UIView {
 
     /// PencilKit reports the page drawn: a landed erase is on screen everywhere.
     func pageDidFinishRendering() {
+        // A lift dropped while the page was still drawing an earlier change is drawn by the page now (EP126).
+        for lift in lifts where lift.dropped != nil && lift.dropped?.seeds == nil { finishDrop(lift) }
         guard scribbleCutLanded else { return }
         releaseScribbleCuts()
     }
@@ -736,7 +963,7 @@ final class PageInkView: UIView {
         let page = bounds.size
         guard page.width > 0, page.height > 0 else { return }
         let center = CGPoint(x: page.width * inkScale / 2, y: page.height * inkScale / 2)
-        for layer in canvas.subviews.compactMap({ $0 as? PKCanvasView }) {
+        for layer in canvas.subviews.compactMap({ $0 as? PKCanvasView }) where !lifts.contains(where: { $0.view === layer }) {
             Self.fit(layer, pageSize: page, inkScale: inkScale, parentScale: inkScale, center: center)
         }
     }
@@ -810,6 +1037,15 @@ private final class HandoverWatch: NSObject {
 extension PageInkView: PKCanvasViewDelegate {
     /// PencilKit has drawn a live layer's drawing: the newest one waiting, if any, goes next.
     func canvasViewDidFinishRendering(_ canvasView: PKCanvasView) {
+        if let lift = lifts.first(where: { $0.view === canvasView }) {
+            // Not from inside PencilKit's report: what waits gives the page a drawing.
+            let generation = lift.given
+            DispatchQueue.main.async { [weak self, weak lift] in
+                guard let self, let lift else { return }
+                self.liftDidRender(lift, generation: generation)
+            }
+            return
+        }
         guard let layer = livePenLayers.first(where: { $0.view === canvasView }) else { return }
         livePenLayerDidRender(layer)
     }

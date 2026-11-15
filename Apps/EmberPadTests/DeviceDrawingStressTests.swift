@@ -516,6 +516,126 @@ final class DeviceDrawingStressTests: XCTestCase {
         scenario.finish(expectedStrokes: [0: scenario.bystanderCount + 4])
     }
 
+    /// EP126: the toolbar lasso on a page full of ink, as a worked page in class is (rows of long writing, highlights
+    /// and boxes round answers). The outline is drawn, the ink inside is selected at the lift, the selection is dragged
+    /// and then resized, and each part is timed on its own. While the outline is drawn, and through the steady part of
+    /// the drag and of the resize, no display frame may wait longer than `StressBounds.lassoFrameGap`; selecting,
+    /// picking the selection up and dropping it are single moments, held to `StressBounds.lassoMoment`. The drag still
+    /// moves exactly the selected strokes, by the drag, as one undo step, and so does the resize; ink far from the lasso
+    /// and the moved ink stay on the screen.
+    func test13b_LassoOnAHeavyPage() throws {
+        let heavy = StressInk.heavyPage()
+        let scenario = try StressScenario(tool: "lasso.heavyPage", title: "Lasso on a page full of ink", self, ink: heavy)
+        let total = scenario.bystanderCount + heavy.count
+        scenario.note("\(heavy.count) strokes of writing, highlights and boxes on the page")
+        scenario.tools.select(.lasso)
+        StressPage.pump(0.3)
+        let centre = scenario.visibleCentre(page: 0)
+        let radius: CGFloat = 90
+        // Ink well clear of the lasso and of where the selection goes, which must stay on the screen throughout.
+        let far = scenario.page.saved(0).dropFirst(scenario.bystanderCount).filter { stroke in
+            StressInk.points(of: stroke, count: 3).allSatisfy { StressInk.distance($0, centre) > 340 }
+        }
+        let step = max(1, far.count / 8)
+        scenario.markStrokes(Array(stride(from: 0, to: far.count, by: step).prefix(8).map { far[$0] }), label: "ink far from the lasso")
+        // The outline, then the lift that selects.
+        var pencil = StressPencil(page: scenario.page, pageIndex: 0)
+        let loop = StressInk.samples(StressInk.circle(center: centre, radius: radius), speed: 900, seed: 5)
+        let outline = scenario.frameGaps {
+            pencil.down(at: loop[0])
+            for point in loop.dropFirst() { pencil.move(to: point) }
+            StressPage.pump(0.05)
+        }
+        let select = scenario.frameGaps {
+            pencil.lift()
+            StressPage.pump(0.3)
+        }
+        let selected = scenario.controller.inkSelection.selection?.indices.sorted() ?? []
+        scenario.check("the lasso selects the ink inside it", !selected.isEmpty && selected.count < total,
+                       "selected \(selected.count) of \(total) strokes")
+        var timed: [(key: String, name: String, gaps: StressPhase, bound: Double)] = [
+            ("outline", "the outline is drawn", outline, StressBounds.lassoFrameGap),
+            ("select", "the lift selects", select, StressBounds.lassoMoment),
+        ]
+        if let box = scenario.controller.inkSelection.selection?.box {
+            // The drag.
+            let moved = CGVector(dx: 50, dy: 70)
+            let saved = scenario.page.saved(0)
+            let picked = Set(selected)
+            // A quick drag, as a selection is carried across a page: out past where it goes, 8.6 points a move, and back.
+            let out = (1...20).map { CGVector(dx: 5 * CGFloat($0), dy: 7 * CGFloat($0)) }
+            let back = (1...10).map { CGVector(dx: 100 - 5 * CGFloat($0), dy: 140 - 7 * CGFloat($0)) }
+            let drag = scenario.timedSelectionDrag(from: CGPoint(x: box.rect.midX, y: box.rect.midY).applying(box.transform),
+                                                   through: out + back,
+                                                   probes: (selected.map { saved[$0] }, saved.indices.filter { !picked.contains($0) }.map { saved[$0] }))
+            scenario.checkDrag(drag, "drag")
+            timed += [("dragPickUp", "the drag picks the selection up", drag.pickUp, StressBounds.lassoMoment),
+                      ("drag", "the selection is dragged", drag.steady, StressBounds.lassoFrameGap),
+                      ("dragDrop", "the drag drops it", drag.drop, StressBounds.lassoMoment)]
+            scenario.settle()
+            let afterMove = scenario.page.saved(0)
+            let shifted = afterMove.indices.filter { n in
+                let t = afterMove[n].transform
+                return abs(t.tx - moved.dx) < 1 && abs(t.ty - moved.dy) < 1 && abs(t.a - 1) < 0.001 && abs(t.d - 1) < 0.001
+            }
+            scenario.check("the drag moves exactly the selected strokes", shifted == selected,
+                           "\(shifted.count) strokes moved by (\(Int(moved.dx)), \(Int(moved.dy))), \(selected.count) selected")
+            scenario.check("the move is one undo step", scenario.undoManager?.undoActionName == "Move",
+                           "the top undo step is \(scenario.undoManager?.undoActionName ?? "none")")
+            // The moved ink stays on the screen once dropped.
+            let movedStep = max(1, selected.count / 10)
+            let movedMarks = stride(from: 0, to: selected.count, by: movedStep).prefix(10).map { n in
+                scenario.sampler.add("moved stroke #\(n + 1)", page: 0, points: StressInk.points(of: afterMove[selected[n]], count: 6),
+                                     lifted: true)
+            }
+            StressPage.pump(0.5)
+            movedMarks.forEach(scenario.sampler.release)
+            // The resize, from the handle.
+            scenario.controller.inkSelection.beginResize()
+            StressPage.pump(0.1)
+            let overlay = scenario.controller.inkSelection.overlay
+            if let handle = overlay.handleCenter, let canvas = scenario.page.canvas(0) {
+                let resize = scenario.timedSelectionDrag(from: canvas.pageSpace.convert(handle, from: overlay), by: CGVector(dx: 40, dy: 30))
+                scenario.checkDrag(resize, "resize")
+                timed += [("resizePickUp", "the resize picks the selection up", resize.pickUp, StressBounds.lassoMoment),
+                          ("resize", "the selection is resized", resize.steady, StressBounds.lassoFrameGap),
+                          ("resizeDrop", "the resize drops it", resize.drop, StressBounds.lassoMoment)]
+                scenario.settle()
+                let afterResize = scenario.page.saved(0)
+                let scaled = afterResize.indices.filter { abs(afterResize[$0].transform.a - 1) > 0.01 }
+                scenario.check("the resize changes exactly the selected strokes", scaled == selected,
+                               "\(scaled.count) strokes scaled, \(selected.count) selected")
+                scenario.check("the resize is one undo step", scenario.undoManager?.undoActionName == "Resize",
+                               "the top undo step is \(scenario.undoManager?.undoActionName ?? "none")")
+                let resizedMarks = stride(from: 0, to: selected.count, by: movedStep).prefix(10).map { n in
+                    scenario.sampler.add("resized stroke #\(n + 1)", page: 0,
+                                         points: StressInk.points(of: afterResize[selected[n]], count: 6), lifted: true)
+                }
+                StressPage.pump(0.5)
+                resizedMarks.forEach(scenario.sampler.release)
+            } else {
+                scenario.check("the resize handle shows", false, "no handle after Resize")
+            }
+            // Two undos put everything back where it was.
+            scenario.sampler.releaseAll()
+            scenario.controller.undo()
+            StressPage.pump(0.05)
+            scenario.controller.undo()
+            scenario.settle()
+            let still = scenario.page.saved(0).filter { $0.transform != .identity }.count
+            scenario.check("two undos put the selection back", still == 0, "\(still) strokes still moved after two undos")
+        }
+        for part in timed {
+            let worst = part.gaps.worst
+            scenario.metrics["lasso.\(part.key).longestFrameGapMs"] = worst * 1000
+            scenario.metrics["lasso.\(part.key).frames"] = Double(part.gaps.gaps.count)
+            scenario.check("no stall while \(part.name)", !part.gaps.gaps.isEmpty && worst <= part.bound,
+                           String(format: "longest frame gap %.0f ms at %.2f s over %d frames (bound %.0f ms)", worst * 1000,
+                                  part.gaps.worstEnd - scenario.sampler.scenarioStart, part.gaps.gaps.count, part.bound * 1000))
+        }
+        scenario.finish(expectedStrokes: [0: total])
+    }
+
     /// Circle to lasso: a loop drawn round ink just written, then a long press on its line, selects the ink and leaves
     /// the loop off the page.
     func test14_CircleToLasso() throws {
@@ -898,13 +1018,14 @@ final class StressScenario {
     }
     private let began = Date()
 
-    init(tool: String, title: String, _ testCase: XCTestCase) throws {
+    /// `ink` is more ink on page 0 when the scenario begins, after the handwriting every scenario has there.
+    init(tool: String, title: String, _ testCase: XCTestCase, ink: [PKStroke] = []) throws {
         self.tool = tool
         self.title = title
         self.testCase = testCase
         let bystanders = StressInk.bystanders()
         bystanderCount = bystanders.count
-        page = try StressPage(pages: 3, ink: [0: bystanders])
+        page = try StressPage(pages: 3, ink: [0: bystanders + ink])
         sampler.scenario = tool
         sampler.scenarioStart = CACurrentMediaTime()
         notes.append(String(format: "began at %.3f (Unix time)", Date().timeIntervalSince1970))
@@ -1041,6 +1162,75 @@ final class StressScenario {
 
     func lasso(_ samples: [CGPoint]) { drive(samples) }
 
+    /// The app's own frame gaps while `body` runs (EP126): each gap a frame ends inside it, and when it ended.
+    func frameGaps(_ body: () -> Void) -> StressPhase {
+        let start = sampler.appFrameGaps.count
+        body()
+        return StressPhase(gaps: Array(sampler.appFrameGaps.dropFirst(start)), ends: Array(sampler.appFrameTimes.dropFirst(start)))
+    }
+
+    /// A finger drag on the selection from `start` (page points) by `delta`, in `steps` even moves 120 a second as the
+    /// selection's pan delivers them on a ProMotion iPad, timed as `timedSelectionDrag(from:through:)` times it.
+    func timedSelectionDrag(from start: CGPoint, by delta: CGVector, steps: Int = 90) -> StressDrag {
+        timedSelectionDrag(from: start, through: (1...steps).map { k in
+            CGVector(dx: delta.dx * CGFloat(k) / CGFloat(steps), dy: delta.dy * CGFloat(k) / CGFloat(steps))
+        })
+    }
+
+    /// A finger drag on the selection from `start` (page points) through `shifts` (one move each, from `start`), 120
+    /// moves a second, timed in three parts (EP126): the pick-up (the touch down, its first two moves and a frame or
+    /// two after), the steady drag after it, and the drop at the last shift (the lift and the frames after it). It
+    /// counts the drawings the page is given through the whole gesture.
+    ///
+    /// With `probes` (the selected strokes and the rest of the page's ink when the drag begins), at every `probeEvery`th
+    /// move of the steady drag up to four points of the selected ink where the move puts it are watched until the
+    /// screen shows ink there: each on bare paper, clear of the other ink and of everywhere the selection was before
+    /// that move, so only the dragged ink arriving can read as ink. Their waits are the drag's move to ink. A probed
+    /// move is held for two 60 Hz frames, so a screen slower than the moves still gets to show it.
+    func timedSelectionDrag(from start: CGPoint, through shifts: [CGVector], probes: (selected: [PKStroke], others: [PKStroke])? = nil,
+                            probeEvery: Int = 3) -> StressDrag {
+        var result = StressDrag()
+        guard let canvas = page.canvas(0), shifts.count >= 3, let last = shifts.last else { return result }
+        let overlay = controller.inkSelection.overlay
+        func onOverlay(_ p: CGPoint) -> CGPoint { overlay.convert(p, from: canvas.pageSpace) }
+        let finder = probes.map { probes in StressHarnessTime.measure { StressDragProbes(selected: probes.selected, others: probes.others) } }
+        var probeMarks: [Int] = []
+        func move(_ k: Int) {
+            let t = shifts[k]
+            overlay.continueDrag(to: onOverlay(CGPoint(x: start.x + t.dx, y: start.y + t.dy)))
+            let now = CACurrentMediaTime()
+            guard let finder, k >= 2, k % probeEvery == 0 else { return StressPage.pump(1.0 / 120) }
+            let points = StressHarnessTime.measure { finder.points(at: t, after: Array(shifts.prefix(k)), shown: shownPart()) }
+            if !points.isEmpty {
+                probeMarks.append(sampler.add("drag probe at move \(k + 1)", page: 0, points: points,
+                                              drawnAt: Array(repeating: now, count: points.count)))
+            }
+            StressPage.pump(1.0 / 30)
+        }
+        let revisions = controller.scribbleRevisions[0, default: 0]
+        result.pickUp = frameGaps {
+            overlay.beginDrag(at: onOverlay(start), to: onOverlay(start))
+            move(0)
+            move(1)
+            StressPage.pump(0.05)
+        }
+        result.steady = frameGaps { for k in 2..<shifts.count { move(k) } }
+        result.drop = frameGaps {
+            overlay.endDrag(at: onOverlay(CGPoint(x: start.x + last.dx, y: start.y + last.dy)))
+            StressPage.pump(0.3)
+        }
+        result.pageDrawings = controller.scribbleRevisions[0, default: 0] - revisions
+        for id in probeMarks {
+            guard let mark = sampler.mark(id) else { continue }
+            for (drawn, seen) in zip(mark.drawnAt, mark.firstSeen) {
+                guard let drawn else { continue }
+                if let seen { result.inkWaits.append(max(0, seen - drawn)) } else { result.probesNeverShown += 1 }
+            }
+            sampler.release(id)
+        }
+        return result
+    }
+
     /// The Pencil held still at `point` for `seconds`.
     func press(at point: CGPoint, for seconds: TimeInterval) {
         var pencil = StressPencil(page: page, pageIndex: 0)
@@ -1065,6 +1255,27 @@ final class StressScenario {
         }
         overlay.endDrag(at: onOverlay(CGPoint(x: start.x + delta.dx, y: start.y + delta.dy)))
         removals += removing.map { removal($0, lift: CACurrentMediaTime(), "move") }
+    }
+
+    /// EP126: a selection's drag or resize leaves the page's drawing alone until the drop: before EP126 every move gave
+    /// the page a new drawing, which PencilKit redrew whole and recorded, the stall on the iPad. And, where it was
+    /// watched, the dragged ink keeps up with the finger as pen ink does with the Pencil.
+    func checkDrag(_ drag: StressDrag, _ name: String) {
+        metrics["lasso.\(name).pageDrawings"] = Double(drag.pageDrawings)
+        check("the \(name) gives the page its drawing only to pick up and drop", drag.pageDrawings <= StressBounds.lassoPageDrawings,
+              "the page was given \(drag.pageDrawings) drawings through the \(name) (at most \(StressBounds.lassoPageDrawings))")
+        guard !drag.inkWaits.isEmpty || drag.probesNeverShown > 0 else { return }
+        let waits = drag.inkWaits.sorted()
+        let p50 = waits.isEmpty ? 0 : waits[waits.count / 2], p95 = waits.isEmpty ? 0 : waits[min(waits.count - 1, waits.count * 95 / 100)]
+        let worst = waits.last ?? 0
+        metrics["lasso.\(name).inkP50Ms"] = p50 * 1000
+        metrics["lasso.\(name).inkP95Ms"] = p95 * 1000
+        metrics["lasso.\(name).inkMaxMs"] = worst * 1000
+        metrics["lasso.\(name).inkNeverShown"] = Double(drag.probesNeverShown)
+        check("the dragged ink keeps up with the finger", drag.probesNeverShown == 0 && p95 <= StressBounds.penToInkP95
+                && worst <= StressBounds.penToInkMax,
+              String(format: "move to ink p50 %.0f ms, p95 %.0f ms, max %.0f ms over %d points", p50 * 1000, p95 * 1000, worst * 1000,
+                     waits.count) + (drag.probesNeverShown > 0 ? "; \(drag.probesNeverShown) points the dragged ink never showed at" : ""))
     }
 
     /// The two-finger double tap's undo. `removing` must then leave the screen.
@@ -1363,6 +1574,118 @@ final class StressScenario {
 }
 
 // MARK: - Shapes and colours
+
+/// One timed drag on a selection (EP126): its three parts, the drawings the page was given through it, and the waits
+/// from a move to the frame showing the dragged ink there.
+struct StressDrag {
+    var pickUp = StressPhase()
+    var steady = StressPhase()
+    var drop = StressPhase()
+    var pageDrawings = 0
+    var inkWaits: [Double] = []
+    var probesNeverShown = 0
+}
+
+/// Finds the points `timedSelectionDrag` watches for the dragged ink (EP126): points along the selected strokes, moved
+/// by the drag so far, that lie on bare paper, clear of the page's other ink and of everywhere the selection was
+/// before, so that nothing but the dragged ink arriving there can read as ink.
+struct StressDragProbes {
+    static let clearance: CGFloat = 3.5
+    private struct Cell: Hashable { let x: Int, y: Int }
+    private let candidates: [CGPoint]
+    private let selection: [Cell: [CGPoint]]
+    private let others: [Cell: [CGPoint]]
+
+    init(selected: [PKStroke], others: [PKStroke]) {
+        candidates = selected.flatMap { StressInk.points(of: $0, count: 8) }
+        selection = Self.grid(selected.flatMap(Self.dense))
+        self.others = Self.grid(others.flatMap(Self.dense))
+    }
+
+    private static func dense(_ stroke: PKStroke) -> [CGPoint] {
+        stroke.path.interpolatedPoints(by: .distance(2)).map { $0.location.applying(stroke.transform) }
+    }
+
+    private static func cell(_ p: CGPoint) -> Cell { Cell(x: Int((p.x / clearance).rounded(.down)), y: Int((p.y / clearance).rounded(.down))) }
+
+    private static func grid(_ points: [CGPoint]) -> [Cell: [CGPoint]] { Dictionary(grouping: points, by: cell) }
+
+    private static func near(_ q: CGPoint, _ grid: [Cell: [CGPoint]]) -> Bool {
+        let c = cell(q)
+        for dx in -1...1 {
+            for dy in -1...1 {
+                for p in grid[Cell(x: c.x + dx, y: c.y + dy)] ?? [] where hypot(p.x - q.x, p.y - q.y) <= clearance { return true }
+            }
+        }
+        return false
+    }
+
+    /// Up to four points of the selected ink moved by `shift`, inside `shown`, clear of the other ink and of the
+    /// selection at its place before the drag and at each of the `earlier` moves.
+    func points(at shift: CGVector, after earlier: [CGVector], shown: CGRect) -> [CGPoint] {
+        let past = [CGVector.zero] + earlier
+        let inside = shown.isNull ? CGRect.infinite : shown.insetBy(dx: 8, dy: 8)
+        var found: [CGPoint] = []
+        for c in candidates {
+            let q = CGPoint(x: c.x + shift.dx, y: c.y + shift.dy)
+            guard inside.contains(q), !Self.near(q, others),
+                  !past.contains(where: { Self.near(CGPoint(x: q.x - $0.dx, y: q.y - $0.dy), selection) }) else { continue }
+            found.append(q)
+            if found.count == 4 { break }
+        }
+        return found
+    }
+}
+
+/// The app's frame gaps through one part of a scenario (EP126), and when each ended.
+struct StressPhase {
+    var gaps: [Double] = []
+    var ends: [CFTimeInterval] = []
+    var worst: Double { gaps.max() ?? 0 }
+    var worstEnd: CFTimeInterval { gaps.indices.max { gaps[$0] < gaps[$1] }.map { ends[$0] } ?? 0 }
+}
+
+extension StressInk {
+    /// A page full of ink (EP126), as a worked page in class is: 18 rows of long writing in two columns, a highlight
+    /// across every third row, and a box round every sixth row's answer and a ring round the next. About 600 strokes.
+    static func heavyPage() -> [PKStroke] {
+        let words = ["the warm sun rose", "under a tall mountain", "data notes and laws", "she drew a long line",
+                     "now add the moles", "write it down slowly"]
+        var strokes: [PKStroke] = []
+        var date = 1_700_000_100.0
+        func stroke(_ points: [CGPoint], ink: PKInk, width: CGFloat) -> PKStroke {
+            date += 1
+            let control = points.enumerated().map { k, p in
+                PKStrokePoint(location: p, timeOffset: Double(k) / 240, size: CGSize(width: width, height: width), opacity: 1,
+                              force: 1, azimuth: 0, altitude: .pi / 2)
+            }
+            return PKStroke(ink: ink, path: PKStrokePath(controlPoints: control, creationDate: Date(timeIntervalSince1970: date)))
+        }
+        let pen = PKInk(.fountainPen, color: .black)
+        let marker = PKInk(.marker, color: UIColor.emberHighlighterYellow.withAlphaComponent(Theme.highlighterDefaultOpacity))
+        for row in 0..<18 {
+            let y = 150 + CGFloat(row) * 34
+            for column in 0..<2 {
+                let text = words[(row * 2 + column) % words.count]
+                for points in ScribbleFixtures.handwriting(text, at: CGPoint(x: 40 + CGFloat(column) * 290, y: y), scale: 0.6) {
+                    strokes.append(stroke(points, ink: pen, width: 2.5))
+                }
+            }
+            if row % 3 == 1 {
+                strokes.append(stroke(line(from: CGPoint(x: 36, y: y + 6), to: CGPoint(x: 560, y: y + 7), wobble: 0.5), ink: marker, width: 14))
+            }
+            if row % 6 == 2 {
+                let box = [CGPoint(x: 32, y: y - 14), CGPoint(x: 270, y: y - 14), CGPoint(x: 270, y: y + 22), CGPoint(x: 32, y: y + 22),
+                           CGPoint(x: 32, y: y - 14)]
+                strokes.append(stroke(zip(box, box.dropFirst()).flatMap { line(from: $0, to: $1, steps: 20, wobble: 0) }, ink: pen, width: 2))
+            }
+            if row % 6 == 3 {
+                strokes.append(stroke(circle(center: CGPoint(x: 440, y: y + 4), radius: 26), ink: pen, width: 2))
+            }
+        }
+        return strokes
+    }
+}
 
 extension StressInk {
     static func line(from a: CGPoint, to b: CGPoint, steps: Int = 40, wobble: CGFloat) -> [CGPoint] {
