@@ -357,7 +357,7 @@ A second lesson started in the same minute gets `_1430-2`, and so on. A folder i
 | `documents[].role` | string | `"student"` or `"teacher"`. A Teacher copy's pages are never in the video. |
 | `documents[].ranges` | array | Each time it was open: `from` and `to` (times), `startOffset` and `endOffset` (numbers). `to` and `endOffset` are absent while it is open. |
 | `audioWarnings` | array | Each audio-health warning, in order. Empty when there was none. |
-| `audioWarnings[].kind` | string | `"silent"` (digital silence) or `"disconnected"` (unplugged, or no audio). |
+| `audioWarnings[].kind` | string | `"silent"` (digital silence), `"disconnected"` (unplugged, or no audio) or `"notRecording"` (no video file could be written, so picture and sound were not kept). |
 | `audioWarnings[].from`, `audioWarnings[].to` | time | When the problem began (the last sound before it) and when sound came back or the lesson ended; `to` is absent while it lasts. |
 | `audioWarnings[].warnedAt` | time | When the warning was raised, about 60 s after `from`. |
 | `audioWarnings[].startOffset`, `audioWarnings[].endOffset` | number | `from` and `to` on the lesson's timeline. |

@@ -263,6 +263,7 @@ final class CompanionLessonModel: ObservableObject {
     private var recording: Recording?
     private var starting = false
     private var handled: UUID?
+    private var endWhileStarting: UUID?
     private var scene: PresentScene?
     private var presenting = PresentHost.Status.off
     private var sleepObservers: [NSObjectProtocol] = []
@@ -284,6 +285,8 @@ final class CompanionLessonModel: ObservableObject {
         var health: LessonAudioHealth
         /// Warnings from before the Mac slept; the health check starts again on waking.
         var earlierEpisodes: [LessonAudioHealth.Episode] = []
+        /// Stretches when no video file could be written; the last is open until a file starts again.
+        var writeFailures: [LessonAudioHealth.Episode] = []
         var picture = LessonPicture()
         var lastChoice: LessonPicture.Choice?
         let canvas: PresentCanvasView
@@ -313,7 +316,7 @@ final class CompanionLessonModel: ObservableObject {
             canvas.scaleOverride = 1
         }
 
-        var episodes: [LessonAudioHealth.Episode] { earlierEpisodes + health.episodes }
+        var episodes: [LessonAudioHealth.Episode] { earlierEpisodes + writeFailures + health.episodes }
     }
 
     init(options: Options = Options(), microphones: LessonMicrophoneSystem? = nil) {
@@ -357,15 +360,20 @@ final class CompanionLessonModel: ObservableObject {
     func end() { perform(.end, id: UUID(), origin: .mac) }
 
     private func perform(_ action: PresentLessonCommand.Action, id: UUID, origin: LessonRecord.Origin) {
+        if action == .end, recording == nil, starting {
+            endWhileStarting = id
+            return
+        }
         handled = id
         switch action {
         case .end:
             if recording != nil {
                 Task { await finish() }
-            } else if !starting {
+            } else {
                 setStatus(.idle)
             }
         case .start, .startWithBuiltInMic:
+            endWhileStarting = nil
             guard recording == nil, !starting else { return setStatus(status) }
             switch LessonMicrophone.choose(from: microphones.candidates(), allowBuiltIn: action == .startWithBuiltInMic) {
             case .askFirst:
@@ -392,7 +400,13 @@ final class CompanionLessonModel: ObservableObject {
         starting = true
         Task {
             defer { starting = false }
-            guard await microphones.authorize() else {
+            let authorized = await microphones.authorize()
+            if let end = endWhileStarting {
+                endWhileStarting = nil
+                handled = end
+                return setStatus(.idle)
+            }
+            guard authorized else {
                 return setStatus(PresentLessonStatus(state: .failed, message:
                     "Microphone access is off for EmberPad Companion. Turn it on in System Settings, Privacy & Security, Microphone."))
             }
@@ -449,15 +463,34 @@ final class CompanionLessonModel: ObservableObject {
 
     /// Starts the next video file at `time`.
     private func startSegment(_ recording: Recording, at time: CMTime) throws {
-        recording.segment += 1
-        let name = LessonFolder.videoName(segment: recording.segment)
+        let number = recording.segment + 1
+        let name = LessonFolder.videoName(segment: number)
         let writer = try LessonSegmentWriter(url: recording.folder.appendingPathComponent(name), settings: recording.settings)
         try writer.start(at: time)
+        recording.segment = number
         recording.writer = writer
         recording.sink.use(writer)
         recording.log.startFile(name, at: date(time, in: recording))
         recording.lastFrameTime = nil
         recording.dirty = true
+    }
+
+    /// Starts the next video file after a sleep or a failed file; when none can be written, says so on the Mac and the
+    /// iPad and in `lesson.json`, and the next tick tries again.
+    private func resumeSegment(_ recording: Recording, at time: CMTime) {
+        let at = seconds(time, in: recording)
+        do {
+            try startSegment(recording, at: time)
+            if let last = recording.writeFailures.indices.last, recording.writeFailures[last].to == nil {
+                recording.writeFailures[last].to = at
+                checkpoint(recording)
+            }
+        } catch {
+            if recording.writeFailures.last?.to != nil || recording.writeFailures.isEmpty {
+                recording.writeFailures.append(.init(problem: .notRecording, from: at, warnedAt: at))
+                checkpoint(recording)
+            }
+        }
     }
 
     private func startSource(_ recording: Recording) {
@@ -576,10 +609,13 @@ final class CompanionLessonModel: ObservableObject {
         if let writer = recording.writer, writer.error != nil {
             // The file can no longer be written: keep what it holds and go on in the next one.
             recording.log.endFile(at: date(now, in: recording))
+            recording.writer = nil
+            recording.sink.use(nil)
             Task { _ = await writer.finish() }
-            try? startSegment(recording, at: now)
         }
-        let warning = recording.health.warning.map { LessonAudioHealth.text(for: $0, at: seconds(now, in: recording)) }
+        if recording.writer == nil { resumeSegment(recording, at: now) }
+        let failure = recording.writeFailures.last.flatMap { $0.to == nil ? $0 : nil }
+        let warning = (failure ?? recording.health.warning).map { LessonAudioHealth.text(for: $0, at: seconds(now, in: recording)) }
         if warning != status.warning {
             var next = status
             next.warning = warning
@@ -631,7 +667,7 @@ final class CompanionLessonModel: ObservableObject {
         let now = CMClockGetTime(hostClock)
         recording.sleeping = false
         recording.health = LessonAudioHealth(start: seconds(now, in: recording), warnAfter: options.warnAfter)
-        try? startSegment(recording, at: now)
+        resumeSegment(recording, at: now)
         startSource(recording)
         checkpoint(recording)
     }
@@ -766,6 +802,8 @@ final class FakeMicrophones: LessonMicrophoneSystem {
     var available: [LessonMicrophone.Candidate]
     var silenceAfter: TimeInterval?
     var authorized = true
+    /// How long `authorize` takes, as when the first-run permission prompt waits for the teacher.
+    var authorizeDelay: TimeInterval = 0
     private(set) var sources: [SyntheticAudioSource] = []
 
     init(available: [LessonMicrophone.Candidate], silenceAfter: TimeInterval? = nil) {
@@ -781,7 +819,10 @@ final class FakeMicrophones: LessonMicrophoneSystem {
 
     func candidates() -> [LessonMicrophone.Candidate] { available }
     func channels(of candidate: LessonMicrophone.Candidate) -> Int { 1 }
-    func authorize() async -> Bool { authorized }
+    func authorize() async -> Bool {
+        if authorizeDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(authorizeDelay * 1_000_000_000)) }
+        return authorized
+    }
 
     func makeSource(_ candidate: LessonMicrophone.Candidate) throws -> LessonAudioSource {
         guard available.contains(candidate) else { throw LessonAudioFailure.deviceGone(candidate.name) }

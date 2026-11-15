@@ -184,6 +184,56 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
 
+    /// An End lesson that arrives while the microphone permission is still pending cancels the start: nothing records,
+    /// and the End is reported as handled only once the start has been given up.
+    func testEndWhileStartingCancelsTheStart() async throws {
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.authorizeDelay = 0.5
+        let (model, iPad, _) = presenting(microphones)
+        let lesson = model.lesson
+        iPad.present(.student)
+        iPad.send(command: PresentLessonCommand(action: .start))
+        let end = PresentLessonCommand(action: .end)
+        iPad.send(command: end)
+        XCTAssertNotEqual(lesson.status.handledCommand, end.id, "the End is not acknowledged while the start is pending")
+        try await waitUntil { lesson.status.handledCommand == end.id }
+        XCTAssertEqual(lesson.status.state, .idle)
+        try await pause(0.5)
+        XCTAssertFalse(lesson.isRecording)
+        XCTAssertTrue(microphones.sources.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    /// When the next video file cannot be started after a sleep, the lesson says so on the Mac and the iPad and in
+    /// lesson.json instead of showing a normal recording, and starts again once a file can be written.
+    func testAFailedSegmentRestartIsWarnedAndRecorded() async throws {
+        var options = options()
+        options.watchSleep = true
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        let lesson = CompanionLessonModel(options: options, microphones: microphones)
+        lesson.start()
+        try await waitUntil { lesson.status.state == .recording }
+        let folder = try XCTUnwrap(lesson.folder)
+        let blocker = folder.appendingPathComponent(LessonFolder.videoName(segment: 2))
+        try Data().write(to: blocker)
+
+        let center = NSWorkspace.shared.notificationCenter
+        center.post(name: NSWorkspace.willSleepNotification, object: nil)
+        try await pause(0.3)
+        center.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try await waitUntil { lesson.status.warning?.hasPrefix("Recording stopped") == true }
+        let live = try await waitForRecord(in: folder) { $0.audioWarnings.contains { $0.kind == .notRecording } }
+        XCTAssertEqual(live.files.count, 1, "a failed attempt adds no file")
+
+        try FileManager.default.removeItem(at: blocker)
+        try await waitUntil { lesson.status.warning == nil }
+        await lesson.finish()
+        let record = try LessonRecord.read(from: folder)
+        XCTAssertEqual(record.files.map(\.name), ["lesson.mp4", "lesson-2.mp4"])
+        XCTAssertEqual(record.audioWarnings.filter { $0.kind == .notRecording }.count, 1)
+        XCTAssertTrue(record.audioWarnings.allSatisfy { $0.to != nil })
+    }
+
     // MARK: Audio health
 
     /// The microphone goes digitally silent, then is unplugged: both warn on the Mac and the iPad after `warnAfter`

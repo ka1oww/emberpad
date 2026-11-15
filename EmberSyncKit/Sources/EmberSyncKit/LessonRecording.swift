@@ -63,6 +63,8 @@ public struct LessonAudioHealth: Equatable, Sendable {
         case silent
         /// The microphone is unplugged, or no audio has arrived for `stallLimit`.
         case disconnected
+        /// The video file cannot be written (a full disk, say): the picture and sound are not being kept.
+        case notRecording
     }
 
     public struct Episode: Equatable, Sendable {
@@ -73,6 +75,13 @@ public struct LessonAudioHealth: Equatable, Sendable {
         public var warnedAt: TimeInterval
         /// When sound came back; nil while it lasts.
         public var to: TimeInterval?
+
+        public init(problem: Problem, from: TimeInterval, warnedAt: TimeInterval, to: TimeInterval? = nil) {
+            self.problem = problem
+            self.from = from
+            self.warnedAt = warnedAt
+            self.to = to
+        }
     }
 
     public static let warnAfter: TimeInterval = 60
@@ -147,6 +156,7 @@ public struct LessonAudioHealth: Equatable, Sendable {
         switch episode.problem {
         case .silent: return "Microphone silent for \(length)"
         case .disconnected: return "Microphone disconnected for \(length)"
+        case .notRecording: return "Recording stopped: the video file cannot be written (\(length))"
         }
     }
 }
