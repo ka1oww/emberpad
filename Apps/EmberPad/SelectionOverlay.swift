@@ -74,6 +74,24 @@ final class InkSelectionController {
     private(set) var selection: InkSelection?
     /// The page drawing when the current drag began; the drag previews from it.
     private var dragBase: PKDrawing?
+    /// The selected ink, ready in its page's lift layer for a drag to move (EP126).
+    private var lift: Lift?
+
+    /// The selection's ink in its page's lift layer (`PageInkView.prepareLift`), made as soon as it is selected, with
+    /// the page's drawing without it, made off the main thread while the page was at `revision`
+    /// (`PDFOverlayPageController.scribbleRevisions`). A drag holds it from its first touch to its drop.
+    private struct Lift {
+        let page: Int
+        let generation: Int
+        let revision: Int
+        var rest: PageInkView.MadeDrawing?
+        var held = false
+        var pickedUp = false
+        var moved: CGAffineTransform = .identity
+    }
+
+    /// Whether a drag holds the selection's ink lifted off its page, so no other change may reach the page (EP126).
+    var holdsLiftedInk: Bool { lift?.held == true }
     /// The dashed path shown while a toolbar-lasso stroke is being drawn.
     private let lassoPath = InkSelectionController.makeLassoPath()
     /// Stands in for the canvas's responder-chain undo manager in tests.
@@ -174,11 +192,18 @@ final class InkSelectionController {
         let lasso = (outline?.count ?? 0) >= 3 ? outline! : box.corners
         selection = InkSelection(page: page, indices: indices, box: box, outline: lasso)
         overlay.show(box, outline: lasso, on: canvas)
+        readyLift()
         return true
     }
 
+    /// Drops the selection. A drag still holding its ink puts the page back as it was before the drag.
     func dismiss() {
-        guard selection != nil || dragBase != nil else { return }
+        guard selection != nil || dragBase != nil || lift != nil else { return }
+        if let held = lift, held.held, let base = dragBase {
+            lift = nil
+            settle(held, restoring: base)
+        }
+        forgetLift()
         selection = nil
         dragBase = nil
         overlay.hide()
@@ -187,7 +212,14 @@ final class InkSelectionController {
     /// The page's ink changed some other way (new ink, undo, redo), so the
     /// selected indices may no longer mean the same strokes.
     func pageDidChange(_ page: Int) {
-        if selection?.page == page { dismiss() }
+        guard selection?.page == page else { return }
+        if let held = lift, held.held {
+            // The page's drawing is no longer the one picked up from: it is left as it now is.
+            lift = nil
+            dragBase = nil
+            pageInk(held.page)?.discardLift(held.generation)
+        }
+        dismiss()
     }
 
     func canvasWillLeave(_ canvas: PKCanvasView) {
@@ -303,27 +335,144 @@ final class InkSelectionController {
 
     // MARK: - Move and resize
 
+    // EP126: a drag moves the selection's lift layer, made ready when the ink was selected, and gives the page a
+    // drawing only to pick the ink up and to drop it (`PageInkView`'s lifted selection). Without a lift layer (no
+    // page ink view, or one let go of) it previews the whole page on every move, as before.
+
     private func dragBegan() {
         guard let selection, let canvas = host?.canvases[selection.page] else { return }
         dragBase = canvas.drawing
+        guard var held = lift, held.page == selection.page, !held.held, let ink = pageInk(held.page), ink.hasLift(held.generation)
+        else { return forgetLift() }
+        held.held = true
+        held.moved = .identity
+        lift = held
+        let generation = held.generation
+        ink.whenLiftDrawn(generation) { [weak self] in self?.pickUp(generation) }
+    }
+
+    /// The lift layer has drawn the selected ink: it takes the ink's place, and the page is given its drawing without
+    /// it (made when the ink was selected, unless the page has changed since).
+    private func pickUp(_ generation: Int) {
+        guard let host, var held = lift, held.generation == generation, held.held, !held.pickedUp, let selection,
+              selection.page == held.page, let base = dragBase, let ink = pageInk(held.page) else { return }
+        let strokes = base.strokes
+        let picked = Set(selection.indices)
+        let rest: PKDrawing
+        if let made = held.rest?.drawing, held.revision == host.scribbleRevisions[held.page, default: 0] {
+            rest = made
+        } else {
+            rest = PKDrawing(strokes: strokes.indices.filter { !picked.contains($0) }.map { strokes[$0] })
+        }
+        let made = held.rest
+        held.rest = nil
+        held.pickedUp = true
+        lift = held
+        let tiles = ink.pageTiles()
+        host.previewDrawing(rest, page: held.page)
+        ink.pickUpLift(generation, moved: held.moved, cutting: selection.indices.filter(strokes.indices.contains).map { strokes[$0] },
+                       since: tiles)
+        // PencilKit keeps its own copy; this one is let go of off the main thread.
+        Self.release(made)
     }
 
     private func dragChanged(_ delta: CGAffineTransform) {
         guard let selection, let dragBase else { return }
+        if var held = lift, held.held {
+            held.moved = delta
+            lift = held
+            if held.pickedUp { pageInk(held.page)?.moveLift(held.generation, by: delta) }
+            return
+        }
         host?.previewDrawing(SelectionEdit.transformed(dragBase, indices: selection.indices, by: delta), page: selection.page)
     }
 
     private func dragEnded(_ delta: CGAffineTransform, _ drag: SelectionDrag) {
         guard let selection, let base = dragBase else { return }
         dragBase = nil
-        apply(delta, actionName: drag.actionName, from: base, undoManager: undoManager(for: selection.page))
+        let undoManager = undoManager(for: selection.page)
+        guard let held = lift, held.held else {
+            return apply(delta, actionName: drag.actionName, from: base, undoManager: undoManager)
+        }
+        lift = nil
+        guard held.pickedUp, let ink = pageInk(held.page) else {
+            pageInk(held.page)?.discardLift(held.generation)
+            Self.release(held.rest)
+            apply(delta, actionName: drag.actionName, from: base, undoManager: undoManager)
+            host?.scheduleInkLanding()
+            return
+        }
+        ink.moveLift(held.generation, by: delta)
+        let tiles = ink.pageTiles()
+        apply(delta, actionName: drag.actionName, from: base, undoManager: undoManager)
+        ink.dropLift(held.generation, since: tiles)
+        host?.scheduleInkLanding()
     }
 
     private func dragCancelled() {
         guard let selection, let base = dragBase else { return }
         dragBase = nil
-        host?.previewDrawing(base, page: selection.page)
+        guard let held = lift, held.held else {
+            host?.previewDrawing(base, page: selection.page)
+            return
+        }
+        lift = nil
+        settle(held, restoring: base)
+        readyLift()
     }
+
+    /// Ends a drag holding `held` with the page back at `base`, its drawing before the drag.
+    private func settle(_ held: Lift, restoring base: PKDrawing) {
+        Self.release(held.rest)
+        guard let ink = pageInk(held.page), held.pickedUp else {
+            pageInk(held.page)?.discardLift(held.generation)
+            return
+        }
+        ink.moveLift(held.generation, by: .identity)
+        let tiles = ink.pageTiles()
+        host?.previewDrawing(base, page: held.page)
+        ink.dropLift(held.generation, since: tiles)
+        host?.scheduleInkLanding()
+    }
+
+    /// Makes the selected ink ready in its page's lift layer for a drag, with the page's drawing without it.
+    private func readyLift() {
+        forgetLift()
+        guard let host, let selection, let canvas = host.canvases[selection.page], let ink = pageInk(selection.page) else { return }
+        let strokes = canvas.drawing.strokes
+        let picked = Set(selection.indices)
+        let generation = ink.prepareLift(selection.indices.filter(strokes.indices.contains).map { strokes[$0] })
+        let page = selection.page
+        lift = Lift(page: page, generation: generation, revision: host.scribbleRevisions[page, default: 0])
+        let rest = strokes.indices.filter { !picked.contains($0) }.map { strokes[$0] }
+        // Made off the main thread and let go of there, as the live pen's drawings are (EP124).
+        PageInkView.livePenDrawings.async { [weak self] in
+            let made = PageInkView.MadeDrawing(PKDrawing(strokes: rest))
+            DispatchQueue.main.async {
+                if let self, var ready = self.lift, ready.page == page, ready.generation == generation, !ready.pickedUp {
+                    ready.rest = made
+                    self.lift = ready
+                } else {
+                    Self.release(made)
+                }
+            }
+        }
+    }
+
+    /// Lets go of a lift no drag holds.
+    private func forgetLift() {
+        guard let ready = lift, !ready.held else { return }
+        lift = nil
+        pageInk(ready.page)?.discardLift(ready.generation)
+        Self.release(ready.rest)
+    }
+
+    private static func release(_ made: PageInkView.MadeDrawing?) {
+        guard let made else { return }
+        PageInkView.livePenDrawings.async { made.drawing = nil }
+    }
+
+    private func pageInk(_ page: Int) -> PageInkView? { host?.canvases[page]?.superview as? PageInkView }
 
     /// Moves or resizes the selection by `delta` (in drawing space) as one
     /// undo step named `actionName`.
@@ -344,6 +493,7 @@ final class InkSelectionController {
             self.selection = selection
         }
         overlay.show(selection.box, outline: selection.outline, on: canvas, resizing: overlay.isResizing)
+        readyLift()
     }
 
     // MARK: - Cut, Copy, Delete, Duplicate, Resize, Color, Paste
@@ -401,6 +551,7 @@ final class InkSelectionController {
         else { return }
         host.commitDrawing(after, page: selection.page, replacing: before, actionName: "Color", undoManager: undoManager)
         overlay.show(selection.box, outline: selection.outline, on: canvas, resizing: overlay.isResizing)
+        readyLift()
     }
 
     /// Puts the selected ink on the pasteboard as PencilKit drawing data and

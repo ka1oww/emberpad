@@ -470,6 +470,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     func undo() {
         guard !readOnly else { return }
         finishWholeStrokeErase()
+        // EP126: never on a page whose selected ink a drag holds lifted off it.
+        if inkSelection.holdsLiftedInk { inkSelection.dismiss() }
         landInkEdits()
         guard let undoManager = activeCanvas?.undoManager else { return }
         stepPastEmptySteps(can: { undoManager.canUndo }, undoManager.undo)
@@ -477,6 +479,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     func redo() {
         guard !readOnly else { return }
         finishWholeStrokeErase()
+        if inkSelection.holdsLiftedInk { inkSelection.dismiss() }
         landInkEdits()
         guard let undoManager = activeCanvas?.undoManager else { return }
         stepPastEmptySteps(can: { undoManager.canRedo }, undoManager.redo)
@@ -1648,9 +1651,11 @@ extension PDFOverlayPageController {
 
     /// Whether a queued ink edit may change a page's drawing now: PencilKit holds no stroke it has not committed and
     /// no Pencil touch is down. Setting the drawing, or popping the undo stack, at any other moment makes PencilKit
-    /// silently throw its stroke away: the ink that vanished in class (EP94).
+    /// silently throw its stroke away: the ink that vanished in class (EP94). Nor while a drag on the selection holds
+    /// its ink lifted off the page (EP126): the page then lacks the selected strokes, so edits addressed by index would
+    /// miss; they land after the drop.
     var inkEditsMayLand: Bool {
-        !pencilIsDown && inkFlights.isEmpty && highlighterErase == nil && !isReplacingStroke
+        !pencilIsDown && inkFlights.isEmpty && highlighterErase == nil && !isReplacingStroke && !inkSelection.holdsLiftedInk
     }
 
     /// Whether any ink change is queued.
@@ -1786,6 +1791,8 @@ extension PDFOverlayPageController {
                 if wait > 0 { return armInkPause(wait) }
             }
         }
+        // Landing at once: a drag holding the selection's ink lifted off the page puts the page back first (EP126).
+        if inkSelection.holdsLiftedInk { inkSelection.dismiss() }
         claimLivePen(final: true)
         inkPauseWait?.invalidate()
         inkPauseWait = nil

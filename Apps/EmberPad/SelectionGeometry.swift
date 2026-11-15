@@ -86,9 +86,23 @@ enum LassoGeometry {
         return stroke.path.map { $0.location.applying(transform) }
     }
 
-    /// The indices of the strokes in `drawing` inside the loop `lasso`.
+    /// The indices of the strokes in `drawing` inside the loop `lasso`. A stroke whose path lies wholly outside the
+    /// box round the loop has no point inside it, so it is passed over without sampling its path (EP126): on a page
+    /// full of ink, sampling every stroke made the lift that selects take tens of milliseconds.
     static func selectedIndices(in drawing: PKDrawing, lasso: [CGPoint]) -> [Int] {
-        selectedIndices(of: drawing.strokes.map(drawingPoints(of:)), in: lasso)
+        guard let box = bounds(of: lasso) else { return [] }
+        let strokes = drawing.strokes
+        return strokes.indices.filter { n in
+            mayReach(strokes[n], box) && insideFraction(of: drawingPoints(of: strokes[n]), in: lasso) >= insideThreshold
+        }
+    }
+
+    /// Whether any point sampled along `stroke` can lie in `box`: the path's points all lie within the box round its
+    /// control points (a B-spline stays inside their hull), and the stroke's transform keeps that so.
+    private static func mayReach(_ stroke: PKStroke, _ box: CGRect) -> Bool {
+        let transform = stroke.transform
+        guard let hull = bounds(of: stroke.path.map { $0.location.applying(transform) }) else { return true }
+        return hull.insetBy(dx: -1, dy: -1).intersects(box.insetBy(dx: -1, dy: -1))
     }
 
     /// How far `point` is from the line through `path` (the line itself, not
@@ -205,7 +219,9 @@ enum SelectionEdit {
     static let duplicateOffset: CGFloat = 20
 
     static func strokes(of drawing: PKDrawing, at indices: [Int]) -> [PKStroke] {
-        indices.filter(drawing.strokes.indices.contains).map { drawing.strokes[$0] }
+        // Read once: every read of `strokes` copies each stroke of the drawing.
+        let strokes = drawing.strokes
+        return indices.filter(strokes.indices.contains).map { strokes[$0] }
     }
 
     /// `drawing` with `delta` applied to the strokes at `indices`, on top of
