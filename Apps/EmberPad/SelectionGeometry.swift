@@ -65,15 +65,138 @@ enum LassoGeometry {
 
     /// The share of `points` inside `polygon`, from 0 to 1; 0 for no points.
     static func insideFraction(of points: [CGPoint], in polygon: [CGPoint]) -> CGFloat {
-        guard !points.isEmpty, let box = bounds(of: polygon) else { return 0 }
-        let inside = points.filter { box.contains($0) && contains($0, in: polygon) }.count
+        guard !points.isEmpty, let loop = Loop(polygon) else { return 0 }
+        let inside = points.filter { loop.contains($0) }.count
         return CGFloat(inside) / CGFloat(points.count)
     }
 
     /// The indices of the strokes (each given by its points) with at least
     /// `insideThreshold` of their points inside `polygon`.
     static func selectedIndices(of strokes: [[CGPoint]], in polygon: [CGPoint]) -> [Int] {
-        strokes.indices.filter { insideFraction(of: strokes[$0], in: polygon) >= insideThreshold }
+        guard let loop = Loop(polygon) else { return [] }
+        return strokes.indices.filter { loop.holds(strokes[$0]) }
+    }
+
+    /// A lasso made ready to test many points against (EP128). `contains(_:in:)` walks every edge of the loop for
+    /// each point, and a lasso keeps every Pencil sample, so closing a big loop on a full page tested each of
+    /// thousands of stroke samples against up to 2000 edges: about a second with the page frozen. The loop's edges
+    /// are filed by the horizontal bands of its box they span, so a point is tested only against the edges in its
+    /// own band. Only an edge whose height spans the point's y can change the winding number, and every such edge is
+    /// filed in that band, so the answer is exactly `contains(_:in:)`'s: the same edges, tested the same way.
+    struct Loop {
+        let polygon: [CGPoint]
+        /// The box round the loop; a point outside it is never inside (as `insideFraction` has always required).
+        let box: CGRect
+        private let top: CGFloat
+        private let bandHeight: CGFloat
+        /// Band `k`'s edges (each the index of its first point) are `edges[starts[k]..<starts[k + 1]]`.
+        private let starts: [Int]
+        private let edges: [Int32]
+
+        init?(_ polygon: [CGPoint]) {
+            guard let box = LassoGeometry.bounds(of: polygon) else { return nil }
+            self.polygon = polygon
+            self.box = box
+            top = box.minY
+            let count = polygon.count
+            guard count >= 3, count <= Int(Int32.max), box.height > 0, box.height.isFinite, box.minY.isFinite else {
+                // Too few points to hold anything, a flat loop no point lies within, or a loop too far off to file:
+                // test every edge, as `contains(_:in:)` does.
+                bandHeight = 0
+                starts = []
+                edges = []
+                return
+            }
+            // About one band per edge, so a band holds a few edges of a loop drawn by hand. A loop of long edges that
+            // each cross many bands (a zigzag scribbled over the page) gets fewer, wider bands, so filing it stays
+            // within a few dozen entries an edge; one band always does, holding each edge once.
+            var bands = min(count, 4096)
+            var height: CGFloat = 0
+            var spans: [(first: Int, last: Int)] = []
+            while true {
+                height = box.height / CGFloat(bands)
+                // A loop too thin to split into so many bands gets one.
+                if bands > 1, !(height > 0 && height.isFinite) { bands = 1; continue }
+                let size = height, last = bands - 1
+                spans = polygon.indices.map { index in
+                    let a = polygon[index].y, b = polygon[index == count - 1 ? 0 : index + 1].y
+                    // An edge with a NaN end never counts, so it is filed nowhere.
+                    guard !a.isNaN, !b.isNaN else { return (1, 0) }
+                    return (Self.band(min(a, b), top: box.minY, height: size, last: last),
+                            Self.band(max(a, b), top: box.minY, height: size, last: last))
+                }
+                let filed = spans.reduce(0) { $0 + max($1.last - $1.first + 1, 0) }
+                if bands == 1 || filed <= 32 * count { break }
+                bands = max(bands / 8, 1)
+            }
+            bandHeight = height
+            var sizes = [Int](repeating: 0, count: bands + 1)
+            for span in spans where span.first <= span.last {
+                for k in span.first...span.last { sizes[k + 1] += 1 }
+            }
+            for k in 0..<bands { sizes[k + 1] += sizes[k] }
+            var fill = sizes
+            var filed = [Int32](repeating: 0, count: sizes[bands])
+            for (index, span) in spans.enumerated() where span.first <= span.last {
+                for k in span.first...span.last {
+                    filed[fill[k]] = Int32(index)
+                    fill[k] += 1
+                }
+            }
+            starts = sizes
+            edges = filed
+        }
+
+        /// The band holding height `y`. Rounding never reverses an order, so a point between an edge's ends falls in
+        /// a band between the bands of its ends, which the edge is filed in.
+        private static func band(_ y: CGFloat, top: CGFloat, height: CGFloat, last: Int) -> Int {
+            Int(min(max(((y - top) / height).rounded(.down), 0), CGFloat(last)))
+        }
+
+        /// Whether `point` is inside the loop: within its box and inside by the nonzero winding rule, exactly as
+        /// `box.contains(point) && LassoGeometry.contains(point, in: polygon)`.
+        func contains(_ point: CGPoint) -> Bool {
+            guard box.contains(point) else { return false }
+            guard bandHeight > 0 else { return LassoGeometry.contains(point, in: polygon) }
+            let k = Self.band(point.y, top: top, height: bandHeight, last: starts.count - 2)
+            let count = polygon.count
+            var winding = 0
+            for slot in starts[k]..<starts[k + 1] {
+                let index = Int(edges[slot])
+                let a = polygon[index], b = polygon[index == count - 1 ? 0 : index + 1]
+                if a.y <= point.y {
+                    if b.y > point.y, LassoGeometry.side(of: point, from: a, to: b) > 0 { winding += 1 }
+                } else if b.y <= point.y, LassoGeometry.side(of: point, from: a, to: b) < 0 {
+                    winding -= 1
+                }
+            }
+            return winding != 0
+        }
+
+        /// Whether at least `insideThreshold` of `points` are inside the loop: `insideFraction(of:in:) >=
+        /// insideThreshold`, decided as soon as the points left cannot change it.
+        func holds(_ points: [CGPoint]) -> Bool {
+            let count = points.count
+            guard count > 0 else { return 0 >= LassoGeometry.insideThreshold }
+            let needed = LassoGeometry.insideNeeded(of: count)
+            var inside = 0
+            for (n, point) in points.enumerated() {
+                if inside >= needed { return true }
+                if inside + (count - n) < needed { return false }
+                if contains(point) { inside += 1 }
+            }
+            return inside >= needed
+        }
+    }
+
+    /// The fewest of `count` points that must be inside for `CGFloat(inside) / CGFloat(count) >= insideThreshold`,
+    /// worked out with that same division so the two never disagree; `count + 1` when no number of them does.
+    static func insideNeeded(of count: Int) -> Int {
+        var needed = min(max(Int((insideThreshold * CGFloat(count)).rounded(.up)), 0), count + 1)
+        func enough(_ inside: Int) -> Bool { inside <= count && CGFloat(inside) / CGFloat(count) >= insideThreshold }
+        while needed > 0, enough(needed - 1) { needed -= 1 }
+        while needed <= count, !enough(needed) { needed += 1 }
+        return needed
     }
 
     /// Points along `stroke` in drawing space (its transform applied), about
@@ -89,11 +212,12 @@ enum LassoGeometry {
     /// The indices of the strokes in `drawing` inside the loop `lasso`. A stroke whose path lies wholly outside the
     /// box round the loop has no point inside it, so it is passed over without sampling its path (EP126): on a page
     /// full of ink, sampling every stroke made the lift that selects take tens of milliseconds.
+    /// Each remaining stroke is judged against the loop made ready once (`Loop`, EP128).
     static func selectedIndices(in drawing: PKDrawing, lasso: [CGPoint]) -> [Int] {
-        guard let box = bounds(of: lasso) else { return [] }
+        guard let loop = Loop(lasso) else { return [] }
         let strokes = drawing.strokes
         return strokes.indices.filter { n in
-            mayReach(strokes[n], box) && insideFraction(of: drawingPoints(of: strokes[n]), in: lasso) >= insideThreshold
+            mayReach(strokes[n], loop.box) && loop.holds(drawingPoints(of: strokes[n]))
         }
     }
 
