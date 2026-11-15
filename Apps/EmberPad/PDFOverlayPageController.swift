@@ -28,6 +28,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// The clock the live pen's timeouts run by. Internal so tests can move it.
     var livePenClock: () -> TimeInterval = { CACurrentMediaTime() }
     private var livePenExpiry: DispatchWorkItem?
+    /// Pages whose live strokes are checked, once this turn is over, for strokes that have left the page (EP113).
+    private var livePenLeftPageChecks: Set<Int> = []
+    /// The names of the undo steps EmberPad makes for ink itself (EP113), none of which ever changes nothing.
+    private var ownInkStepNames: Set<String> = [PendingInkEdit.inkActionName, PendingInkEdit.straightLineActionName,
+                                                "Scribble to Erase", "Erase", "Clear Page"]
     /// P6: the laser pointer's Pencil input, on while the laser is chosen. Internal for tests.
     let laser = LaserPointerRecognizer()
     /// The laser dot on this iPad, above the pages. Internal for tests.
@@ -342,6 +347,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.delegate = self
         canvas.addGestureRecognizer(makeHoldRecognizer())
         inkSelection.prepare(canvas)
+        pageView.landedStrokeIsOnPage = { [weak self, weak canvas] id, bounds in
+            self?.landedStrokeIsOnPage(id, at: bounds, canvas: canvas) ?? false
+        }
         canvases[index] = canvas
         pageViews[index] = pageView
         pdfView.visibleCanvases = Array(canvases.values)
@@ -375,6 +383,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         guard let page = canvases.first(where: { $0.value === canvasView })?.key else { return }
         (canvasView.superview as? PageInkView)?.pageDrawingDidChange()
         scribbleRevisions[page, default: 0] += 1
+        checkLivePenLeftPage(page)
         guard !isReplacingStroke else { return }
         // EP94: a change to the drawing lands only on a later display frame than this.
         inkTiming.lastCommit = CACurrentMediaTime()
@@ -458,13 +467,51 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         session.update(restored, page: page)
     }
 
-    /// The page drew its ink: the live pen's committed strokes there are now on the page itself.
+    /// The page drew its ink: the live pen's committed strokes there that the page now shows itself leave.
+    /// EP113: only those. The report can come for an earlier drawing PencilKit was still drawing, before the strokes'
+    /// own tiles are redrawn; the others leave once the page shows them (the handover, or `expire`).
     func canvasViewDidFinishRendering(_ canvasView: PKCanvasView) {
-        (canvasView.superview as? PageInkView)?.pageDidFinishRendering()
+        let pageView = canvasView.superview as? PageInkView
+        pageView?.pageDidFinishRendering()
         guard let page = canvases.first(where: { $0.value === canvasView })?.key,
               livePen.strokes.contains(where: { $0.page == page && $0.committedAt != nil }) else { return }
-        livePen.rendered(page: page)
+        livePen.rendered(page: page) { pageView?.hasDrawn(liveStroke: $0.id) ?? true }
         showLivePen(page: page)
+    }
+
+    /// Once this turn is over, the live strokes on `page` whose landed stroke has left it (erased, undone) go (EP113).
+    /// Not at once: a landing changes the drawing several times on the way (its undo pops and checks).
+    private func checkLivePenLeftPage(_ page: Int) {
+        guard livePen.hasLanded(page: page), !livePenLeftPageChecks.contains(page) else { return }
+        livePenLeftPageChecks.insert(page)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.livePenLeftPageChecks.remove(page)
+            guard self.livePen.hasLanded(page: page), let canvas = self.canvases[page] else { return }
+            // The pen ink set aside while the highlighter-only eraser is down is still the page's (EP71).
+            if let erase = self.highlighterErase, erase.canvas === canvas { return }
+            // Read back from PencilKit, one stroke's creation date can differ by a little (`sameCreation`).
+            let onPage = canvas.drawing.strokes.map(\.path.creationDate)
+            let isOnPage: (Date) -> Bool = { date in
+                onPage.contains { abs($0.timeIntervalSince(date)) <= LivePenStrokes.sameCreation }
+            }
+            if self.livePen.leftPage(page: page, onPage: isOnPage) { self.showLivePen(page: page) }
+        }
+    }
+
+    /// Whether live stroke `id`'s landed stroke is on `canvas`'s drawing now, where its layer draws it (`bounds`, in
+    /// page points), not moved by the lasso since (EP113). Not while the highlighter-only eraser has the pen ink set
+    /// aside (EP71), nor for a stroke that does not know what it landed as.
+    private func landedStrokeIsOnPage(_ id: UInt64, at bounds: CGRect, canvas: PKCanvasView?) -> Bool {
+        guard let canvas, let landedAs = livePen.stroke(id: id)?.landedAs else { return false }
+        if let erase = highlighterErase, erase.canvas === canvas { return false }
+        let near: CGFloat = 4
+        return canvas.drawing.strokes.contains { stroke in
+            guard abs(stroke.path.creationDate.timeIntervalSince(landedAs)) <= LivePenStrokes.sameCreation else { return false }
+            let on = stroke.renderBounds
+            return abs(on.midX - bounds.midX) <= near && abs(on.midY - bounds.midY) <= near
+                && abs(on.width - bounds.width) <= near && abs(on.height - bounds.height) <= near
+        }
     }
 
     func undo() {
@@ -513,13 +560,24 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// `tools.pencilTool` when they are created.
     func apply(_ tool: any PKTool) {
         finishWholeStrokeErase()
-        landInkEdits()
+        // EP113: a new pen colour or width lands nothing. Each waiting swap keeps the ink it was written in, so it
+        // lands in its own time, as writing does (EP94). Landed here, in the middle of writing, the drawing was set
+        // within a frame of PencilKit's commits, and PencilKit threw away the strokes begun just after; put back
+        // later, they went on the page out of the order they were written.
+        if !Self.keepsPen(from: canvases.values.first?.tool, to: tool) { landInkEdits() }
         finishHighlighterErase()
         clearScribblePreview()
         inkSelection.dismiss()
         hideEraserCircle()
         for canvas in canvases.values { canvas.tool = tool }
         updateCanvasInput()
+    }
+
+    /// Whether a change from PencilKit tool `old` to `new` is the pen's own colour or width: both are the live pen's
+    /// clear ink (`PenFeel.liveTool`).
+    static func keepsPen(from old: (any PKTool)?, to new: any PKTool) -> Bool {
+        guard let old = old as? PKInkingTool, let new = new as? PKInkingTool else { return false }
+        return old.inkType == PenFeel.liveInkType && new.inkType == PenFeel.liveInkType
     }
 
     /// Only the focused page takes Pencil input. The toolbar lasso is
@@ -860,13 +918,17 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             let now = self.livePenClock()
             // While PencilKit holds a stroke it has not committed, any lifted live stroke may be it (EP94). A landed
             // stroke stays drawn until the page draws it (EP108), or, should the page never show doing so, until the
-            // Pencil has been up for a while with nothing in flight, long enough for any redraw to be over.
+            // Pencil has been up for a while with nothing in flight, long enough for any redraw to be over, and the
+            // page has redrawn the stroke's tiles since its drawing last changed. EP113: PencilKit put off redrawing
+            // the page for nine seconds after a highlighter stroke it never committed, and a pen line that had landed
+            // just before it vanished for four, from this fallback until that redraw.
             let quiet = !self.pencilIsDown && self.inkFlights.isEmpty
                 && self.inkTiming.lastLift.map { CACurrentMediaTime() - $0 >= LivePenStrokes.timeout } ?? true
             self.livePen.expire(now: now, keepingLifted: !self.inkFlights.isEmpty) { stroke in
                 let pageView = self.canvases[stroke.page]?.superview as? PageInkView
                 if pageView?.hasDrawn(liveStroke: stroke.id) ?? true { return true }
                 return quiet && stroke.committedAt.map { now - $0 >= LivePenStrokes.undrawnTimeout } ?? true
+                    && pageView?.hasRedrawnSinceChange(liveStroke: stroke.id) ?? true
             }
             pages.forEach { self.showLivePen(page: $0) }
             self.scheduleLivePenExpiry()
@@ -1577,6 +1639,22 @@ extension PDFOverlayPageController {
             if hasPendingInk { landInkEdits() }
             erase.read(canvas.drawing)
         }
+        // EP113: not while the page is still drawing ink that has just landed (the edits above, or a tool change's), as
+        // PencilKit would draw the landed page after this one and a stroke erased would show again for a frame. The
+        // path waits, tested again shortly or once the Pencil lifts.
+        if !erase.waiting.isEmpty, (canvas.superview as? PageInkView)?.isDrawingLanding == true {
+            if !erase.lifted, erase.retry == nil {
+                let work = DispatchWorkItem { [weak self] in
+                    MainActor.assumeIsolated {
+                        erase.retry = nil
+                        self?.applyWholeStrokeErase(erase)
+                    }
+                }
+                erase.retry = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.wholeStrokeEraseRetry, execute: work)
+            }
+            return
+        }
         guard erase.sweepWaiting() else { return }
         setWholeStrokeErasedDrawing(PKDrawing(strokes: erase.strokes), page: erase.page)
     }
@@ -1820,6 +1898,7 @@ extension PDFOverlayPageController {
             var landed: [UInt64] = []
             for edit in edits where edit.page == page {
                 guard let id = edit.liveID, livePen.stroke(id: id) != nil else { continue }
+                // Every edit's strokes keep the committed stroke's creation date (EP113).
                 livePen.landed(id: id, now: now, as: edit.stroke.path.creationDate)
                 landed.append(id)
             }
@@ -1964,6 +2043,7 @@ extension PDFOverlayPageController {
                 }
                 undoManager.setActionName(step.actionName)
                 undoManager.endUndoGrouping()
+                ownInkStepNames.insert(step.actionName)
             }
             undoManager.groupsByEvent = byEvent
         }
@@ -1972,6 +2052,15 @@ extension PDFOverlayPageController {
         isReplacingStroke = true
         canvas.drawing = after
         isReplacingStroke = false
+        if mayPop, let pageView = canvas.superview as? PageInkView {
+            // EP113: the strokes the pops took off and this set again, but those a live layer still draws.
+            let live = edits.compactMap { edit in
+                edit.liveID.flatMap { livePen.stroke(id: $0) } != nil ? edit.stroke.path.creationDate : nil
+            }
+            pageView.guardLanding(after.strokes.dropFirst(start).filter { stroke in
+                !live.contains { abs($0.timeIntervalSince(stroke.path.creationDate)) <= LivePenStrokes.sameCreation }
+            })
+        }
         inkSelection.pageDidChange(page)
         session.update(after, page: page)
         if replay.lassoNewest {
@@ -2160,8 +2249,10 @@ extension PDFOverlayPageController {
 
     /// Drops the steps just below a landing's that change nothing (EP98). PencilKit leaves one for a stroke it threw
     /// away, and on a slow run loop can make a stroke's step only after the stroke has landed (`lateInkSteps`).
-    /// EmberPad's own "Ink" steps are never empty, so one ends the search; any other step is tried, and put back if
+    /// EmberPad's own ink steps are never empty, so one ends the search; any other step is tried, and put back if
     /// it changes anything.
+    /// EP113: all of EmberPad's own steps, not only "Ink". Tried, a step is undone and redone, and PencilKit draws the
+    /// page as it was in between: the straight highlight or the erase below a landing went, or came back, for a frame.
     /// A dropped step leaves no redo behind either.
     private func dropEmptySteps(_ undoManager: UndoManager, on canvas: PKCanvasView, page: Int) {
         let drawing = canvas.drawing
@@ -2172,7 +2263,7 @@ extension PDFOverlayPageController {
             if dropped > 0, !couldRedo { undoManager.emberClearRedo() }
         }
         for _ in 0..<Self.mostEmptyStepsDropped {
-            guard undoManager.canUndo, undoManager.undoActionName != PendingInkEdit.inkActionName else { return }
+            guard undoManager.canUndo, !ownInkStepNames.contains(undoManager.undoActionName) else { return }
             guard case .empty = undoStep(undoManager, on: canvas, page: page, from: drawing) else {
                 return _ = putBack(1, on: undoManager)
             }
@@ -2369,7 +2460,11 @@ extension PDFOverlayPageController {
         isReplacingStroke = true
         erase.canvas.drawing = merged
         isReplacingStroke = false
-        erase.inkLayer.removeFromSuperview()
+        if let pageView = erase.canvas.superview as? PageInkView, erase.inkLayer.superview === erase.canvas {
+            pageView.removeSetAsideInk(erase.inkLayer)
+        } else {
+            erase.inkLayer.removeFromSuperview()
+        }
         session.update(merged, page: erase.page)
         guard let undoManager = erase.undoManager else { return }
         undoManager.enableUndoRegistration()
@@ -2476,4 +2571,5 @@ private final class LaserTrailTicker: NSObject {
         controller.tickLaserTrail()
     }
 }
+
 

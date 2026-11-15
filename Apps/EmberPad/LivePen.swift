@@ -25,6 +25,8 @@ struct LivePenStrokes {
         fileprivate(set) var committedAt: TimeInterval?
         /// The creation date of the page's stroke it landed as (EP115): PencilKit's for the same touch, or its own for a
         /// stroke PencilKit threw away. An erase of that page stroke takes this stroke off the screen with it.
+        /// EP113: its layer also goes as soon as that stroke leaves the page (an erase or an undo) before the page has
+        /// drawn it (`leftPage`).
         fileprivate(set) var landedAs: Date?
         /// PencilKit committed it and its swap is waiting for PencilKit to be idle, or PencilKit threw it away and
         /// this copy of it is waiting to go on the page (EP94): it stays drawn, however long that takes, until it
@@ -236,9 +238,28 @@ struct LivePenStrokes {
     /// How far apart two creation dates can be and still be one stroke's, read back from PencilKit.
     static let sameCreation: TimeInterval = 0.001
 
-    /// The page has drawn its ink: committed strokes there leave, as the page now shows them itself.
-    mutating func rendered(page: Int) {
-        strokes.removeAll { $0.page == page && $0.committedAt != nil }
+    /// PencilKit reported drawing the page: committed strokes there that `drawn` says the page shows leave.
+    /// EP113: only those. PencilKit's report is no proof that a stroke's own tiles were drawn: one came just after a
+    /// stroke landed, with its tiles not yet redrawn, and the stroke vanished for up to seven seconds.
+    mutating func rendered(page: Int, drawn: (Stroke) -> Bool = { _ in true }) {
+        strokes.removeAll { $0.page == page && $0.committedAt != nil && drawn($0) }
+    }
+
+    /// Committed strokes on `page` whose landed stroke is no longer there (`onPage` says, by creation date) leave at
+    /// once (EP113): erased or undone, they are not ink the page will ever draw. Returns whether any left.
+    @discardableResult
+    mutating func leftPage(page: Int, onPage: (Date) -> Bool) -> Bool {
+        let before = strokes.count
+        strokes.removeAll { stroke in
+            guard stroke.page == page, stroke.committedAt != nil, let landedAs = stroke.landedAs else { return false }
+            return !onPage(landedAs)
+        }
+        return strokes.count != before
+    }
+
+    /// Whether any committed stroke on `page` knows the stroke it landed as.
+    func hasLanded(page: Int) -> Bool {
+        strokes.contains { $0.page == page && $0.committedAt != nil && $0.landedAs != nil }
     }
 
     /// Drops every stroke on `page` (its canvas left the screen).
