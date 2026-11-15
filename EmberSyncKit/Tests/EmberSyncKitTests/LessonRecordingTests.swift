@@ -199,12 +199,79 @@ struct LessonRecordingTests {
         try send(library)
         #expect(picture.next(host.current) == nil)
 
+        // The class swapped onto the Teacher copy (EP130): a page marked `role == .teacher` is held even when its
+        // document is one the iPad named as a Student copy.
+        var marked = student.view(page: 0)
+        if case .page(var page) = marked.screen { page.role = .teacher; marked.screen = .page(page) }
+        var reveal = PresentUpdate(seq: 0)
+        reveal.frame = PresentFrame(view: marked, session: UUID(), pages: snapshot.frame!.pages)
+        reveal.document = snapshot.document
+        try send(reveal)
+        #expect(host.current.document?.role == .student)
+        #expect(LessonPicture.choice(for: host.current) == .hold)
+        #expect(picture.next(host.current)?.frame == studentFrame)
+
         // Back on the Student copy: live again.
         var back = PresentUpdate(seq: 0)
         back.frame = studentFrame
         try send(back)
         #expect(picture.next(host.current)?.frame == studentFrame)
         #expect(LessonPicture.choice(for: host.current) == .live)
+    }
+
+    /// An iPad on a version-4 link names no documents, so its pages are trusted, except one marked as the Teacher
+    /// copy's: an EP130 iPad that swaps the class onto the Teacher copy marks those pages, whatever the link.
+    @Test func aTeacherCopyPageIsHeldOnAnOlderLinkToo() throws {
+        let host = PresentHost()
+        let iPad = ReplyLog(version: WireProtocol.presentVersion)
+        var seq: UInt64 = 0
+        func send(_ update: PresentUpdate) throws {
+            var update = update
+            update.seq = seq
+            seq += 1
+            host.received(try PresentCodec.encode(update), on: iPad)
+        }
+        var open = PresentUpdate(seq: 0)
+        open.open = true
+        try send(open)
+        let student = FakeWorksheet()
+        var snapshot = PresentUpdate(seq: 0)
+        snapshot.reset = true
+        snapshot.frame = PresentFrame(view: student.view(page: 0), session: student.session, pages: [])
+        try send(snapshot)
+        #expect(!host.current.namesDocuments)
+        var picture = LessonPicture()
+        #expect(LessonPicture.choice(for: host.current) == .live)
+        let studentFrame = picture.next(host.current)?.frame
+
+        var marked = student.view(page: 0)
+        if case .page(var page) = marked.screen { page.role = .teacher; marked.screen = .page(page) }
+        var reveal = PresentUpdate(seq: 0)
+        reveal.frame = PresentFrame(view: marked, session: UUID(), pages: [])
+        try send(reveal)
+        #expect(LessonPicture.choice(for: host.current) == .hold)
+        #expect(picture.next(host.current)?.frame == studentFrame)
+    }
+
+    /// While the class sees a worksheet's Teacher copy, `lesson.json` lists it apart from the Student copy: the same id,
+    /// the role `teacher`, its own times.
+    @Test func aTeacherCopyShownToTheClassIsListedApartFromItsWorksheet() {
+        let start = Date(timeIntervalSince1970: 1_794_700_000)
+        var log = Self.log(start: start)
+        let student = PresentLessonDocument(id: UUID(), title: "Moles WS", subject: "H2 Chem", classTag: "MI PU1", role: .student)
+        var teacher = student
+        teacher.role = .teacher
+        log.show(student, at: start.addingTimeInterval(1))
+        log.show(teacher, at: start.addingTimeInterval(10))
+        log.show(student, at: start.addingTimeInterval(20))
+        log.show(nil, at: start.addingTimeInterval(30))
+        let documents = log.record.documents
+        #expect(documents.map(\.role) == [.student, .teacher])
+        #expect(documents.map(\.id) == [student.id, student.id])
+        #expect(documents[0].ranges.map(\.startOffset) == [1, 20])
+        #expect(documents[0].ranges.map(\.endOffset) == [10, 30])
+        #expect(documents[1].ranges.map(\.startOffset) == [10])
+        #expect(documents[1].ranges.map(\.endOffset) == [20])
     }
 
     // MARK: Audio health

@@ -540,12 +540,21 @@ final class CompanionLessonModel: ObservableObject {
         presenting = status
         guard let recording else { return }
         recording.dirty = true
-        let document = status == .off ? nil : scene.document
+        let document = status == .off ? nil : Self.shownDocument(scene)
         if recording.document != .some(document) {
             recording.document = .some(document)
             recording.log.show(document, at: Date())
             checkpoint(recording)
         }
+    }
+
+    /// The document the class sees, for `lesson.json`: the one the iPad named, or, while the teacher has swapped the
+    /// class onto that worksheet's Teacher copy (EP130), its Teacher copy, listed under the worksheet's id with the
+    /// role `teacher`. Its pages are never recorded (`LessonPicture`).
+    static func shownDocument(_ scene: PresentScene) -> PresentLessonDocument? {
+        guard var document = scene.document else { return nil }
+        if scene.presented?.showsTeacherCopy == true, document.role == .student { document.role = .teacher }
+        return document
     }
 
     /// The scene the recording shows now; nil is the neutral card.

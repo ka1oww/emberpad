@@ -84,6 +84,13 @@ final class LessonRecorderTests: XCTestCase {
         iPad.show(.student)
         try await pause(1.2)
 
+        // The teacher swaps the class onto the Teacher copy (EP130): its pages come marked as the teacher's, under a
+        // reveal of their own, while the iPad still names the Student copy. The recording holds the Student frame.
+        iPad.revealTeacherCopy()
+        try await pause(1.5)
+        iPad.show(.student)
+        try await pause(1.2)
+
         let end = PresentLessonCommand(action: .end)
         iPad.send(command: end)
         try await waitUntil { lesson.status.state == .idle && lesson.lastLesson == folder }
@@ -98,10 +105,14 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertEqual(record.microphone.sampleRate, 48_000)
         XCTAssertEqual(record.files.map(\.name), ["lesson.mp4"])
         XCTAssertNotNil(record.endedAt)
-        XCTAssertEqual(record.documents.map(\.title), [LessonIPad.Copy.student.document.title, LessonIPad.Copy.teacher.document.title])
-        XCTAssertEqual(record.documents.map(\.role), [.student, .teacher])
-        XCTAssertEqual(record.documents[0].ranges.count, 2, "the Student copy was shown twice")
+        XCTAssertEqual(record.documents.map(\.title), [LessonIPad.Copy.student.document.title, LessonIPad.Copy.teacher.document.title,
+                                                       LessonIPad.Copy.student.document.title])
+        XCTAssertEqual(record.documents.map(\.role), [.student, .teacher, .teacher])
+        XCTAssertEqual(record.documents.map(\.id), [LessonIPad.Copy.student.document.id, LessonIPad.Copy.teacher.document.id,
+                                                    LessonIPad.Copy.student.document.id], "the swapped-in Teacher copy is listed under its worksheet")
+        XCTAssertEqual(record.documents[0].ranges.count, 3, "the Student copy was shown three times")
         XCTAssertEqual(record.documents[1].ranges.count, 1)
+        XCTAssertEqual(record.documents[2].ranges.count, 1)
         XCTAssertEqual(record.documents[0].classTag, "MI PU3")
         XCTAssertTrue(record.audioWarnings.isEmpty)
         XCTAssertTrue(record.documents.allSatisfy { $0.ranges.allSatisfy { $0.to != nil } })
@@ -109,7 +120,7 @@ final class LessonRecorderTests: XCTestCase {
         // lesson.mp4: both tracks, 48 kHz audio, the length of the lesson; no frame shows the Teacher copy.
         let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
         let duration = try await asset.load(.duration).seconds
-        XCTAssertGreaterThan(duration, 4.2)
+        XCTAssertGreaterThan(duration, 6.9)
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         let audio = try XCTUnwrap(audioTracks.first)
         let formats = try await audio.load(.formatDescriptions)
@@ -283,6 +294,9 @@ final class LessonRecorderTests: XCTestCase {
         try await waitUntil { model.lesson.status.state == .recording }
         let folder = try XCTUnwrap(model.lesson.folder)
         try await pause(1)
+        // An EP130 iPad on a version-4 link marks a swapped-in Teacher copy page: it is held, never recorded.
+        iPad.revealTeacherCopy()
+        try await pause(1.2)
         await model.lesson.finish()
         XCTAssertTrue(iPad.statuses.isEmpty)
         let record = try LessonRecord.read(from: folder)
@@ -290,6 +304,7 @@ final class LessonRecorderTests: XCTestCase {
         let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
         let frames = try await sampleFrames(asset, every: 0.2, duration: try await asset.load(.duration).seconds)
         XCTAssertTrue(frames.contains { $0.whiteShare > 0.3 }, "a version-4 page is a Student copy and is recorded")
+        XCTAssertTrue(frames.allSatisfy { $0.redShare <= 0.05 }, "a page marked as the Teacher copy's is never recorded")
     }
 
     // MARK: Helpers
@@ -460,6 +475,23 @@ private final class LessonIPad: PresentReplying, @unchecked Sendable {
 
     func show(_ copy: Copy) {
         send(page(copy))
+    }
+
+    /// What an EP130 iPad sends when the teacher swaps the class onto the Teacher copy: its pages under a reveal of
+    /// their own (a new document id and session), marked `role == .teacher`, while it still names the Student copy.
+    func revealTeacherCopy() {
+        seq += 1
+        let paper = Copy.teacher.paper
+        let view = PresentedView(screen: .page(.init(documentID: UUID(), framing: "presenterPage", focusedPageIndex: 0,
+                                                     visibleRect: Self.letter, margin: 0,
+                                                     pages: [.init(pageIndex: 0, frame: Self.letter, inkRevision: 0)],
+                                                     liveStrokes: [], laser: nil, laserTrail: [], role: .teacher)))
+        var update = PresentUpdate(seq: seq)
+        update.frame = PresentFrame(view: view, session: UUID(),
+                                    pages: [PresentPageRef(pageIndex: 0, asset: paper.hash, size: Self.letter.size)])
+        update.assets = [paper]
+        if version >= WireProtocol.lessonVersion { update.document = PresentDocumentChange(document: Copy.student.document) }
+        send(update)
     }
 
     func send(command: PresentLessonCommand) {

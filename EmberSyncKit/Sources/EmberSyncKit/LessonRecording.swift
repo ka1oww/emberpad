@@ -34,7 +34,11 @@ public struct LessonPicture: Sendable {
         case .idle: return .card
         case .paused, .teacherCopyPrivate: return .hold
         case .page(let page):
-            // An older iPad (version 4) names no documents, and puts only Student copies on a page.
+            // A page marked as the Teacher copy's (EP130: the teacher swapped the class onto it) is never recorded,
+            // whatever the link version or the document the iPad named.
+            if page.role == .teacher { return .hold }
+            // An older iPad (version 4) names no documents; before EP130 it put only Student copies on a page, and
+            // from EP130 it marks a Teacher copy page as one (above).
             guard scene.namesDocuments else { return .live }
             return scene.documents[page.documentID]?.role == .student ? .live : .hold
         }
@@ -465,14 +469,15 @@ public struct LessonLog: Sendable {
     /// The document open on the iPad changed at `time`; nil when none is (the library, or Present stopped).
     public mutating func show(_ document: PresentLessonDocument?, at time: Date) {
         let current = record.documents.firstIndex { $0.ranges.last?.to == nil && !$0.ranges.isEmpty }
-        if let current, record.documents[current].id == document?.id { return }
+        if let current, let document, record.documents[current].id == document.id,
+           record.documents[current].role == document.role { return }
         if let current, let last = record.documents[current].ranges.indices.last {
             record.documents[current].ranges[last].to = time
             record.documents[current].ranges[last].endOffset = offset(time)
         }
         guard let document else { return }
         let span = LessonRecord.Span(from: time, to: nil, startOffset: offset(time), endOffset: nil)
-        if let index = record.documents.firstIndex(where: { $0.id == document.id }) {
+        if let index = record.documents.firstIndex(where: { $0.id == document.id && $0.role == document.role }) {
             record.documents[index].title = document.title
             record.documents[index].ranges.append(span)
         } else {
