@@ -151,17 +151,22 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
     public var laser: PresentLaserChange?
     /// The whole laser trail, when it changed.
     public var trail: [PresentedView.TrailPiece]?
+    /// Version 5 (EP129): the open document, when it changed and in every snapshot.
+    public var document: PresentDocumentChange?
+    /// Version 5 (EP129): the teacher's Start or End lesson.
+    public var lesson: PresentLessonCommand?
 
     public init(seq: UInt64) { self.seq = seq }
 
     /// Nothing but the sequence number: a heartbeat.
     public var isEmpty: Bool {
         !open && !reset && !stop && frame == nil && assets.isEmpty && ink.isEmpty && live.isEmpty && laser == nil && trail == nil
+            && document == nil && lesson == nil
     }
 
     private enum CodingKeys: String, CodingKey {
         case seq = "s", open = "o", reset = "r", stop = "x", frame = "f", assets = "a", ink = "i", live = "l"
-        case laser = "p", trail = "t"
+        case laser = "p", trail = "t", document = "d", lesson = "c"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -176,6 +181,8 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
         live = try container.decodeIfPresent([PresentLiveChange].self, forKey: .live) ?? []
         laser = try container.decodeIfPresent(PresentLaserChange.self, forKey: .laser)
         trail = try container.decodeIfPresent([PresentedView.TrailPiece].self, forKey: .trail)
+        document = try container.decodeIfPresent(PresentDocumentChange.self, forKey: .document)
+        lesson = try container.decodeIfPresent(PresentLessonCommand.self, forKey: .lesson)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -190,6 +197,8 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
         if !live.isEmpty { try container.encode(live, forKey: .live) }
         try container.encodeIfPresent(laser, forKey: .laser)
         try container.encodeIfPresent(trail, forKey: .trail)
+        try container.encodeIfPresent(document, forKey: .document)
+        try container.encodeIfPresent(lesson, forKey: .lesson)
     }
 }
 
@@ -201,6 +210,9 @@ public enum PresentReply: Equatable, Codable, Sendable {
     case ack(seq: UInt64)
     /// Something did not fit: send a snapshot. `heldAssets` as for `ready`.
     case resnapshot(heldAssets: [String])
+    /// Version 5 (EP129): the lesson recording's status, sent when the link opens and whenever it changes. An
+    /// older iPad cannot decode it, so it goes only to a version-5 link.
+    case lesson(PresentLessonStatus)
 }
 
 /// Binary property lists: `Data` travels as raw bytes and repeated keys are stored once.

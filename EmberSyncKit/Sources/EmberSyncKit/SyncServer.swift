@@ -633,7 +633,8 @@ final class SyncConnection: @unchecked Sendable {
                 connection.cancel()
                 return
             }
-            let link = presentLink ?? ServerPresentLink(connection: self, queue: queue)
+            let version: UInt16 = if case .ready(let version) = session?.phase { version } else { WireProtocol.presentVersion }
+            let link = presentLink ?? ServerPresentLink(connection: self, queue: queue, version: version)
             presentLink = link
             host.received(payload, on: link)
         }
@@ -699,10 +700,12 @@ final class SyncConnection: @unchecked Sendable {
 final class ServerPresentLink: PresentReplying, @unchecked Sendable {
     private weak var connection: SyncConnection?
     private let queue: DispatchQueue
+    let presentVersion: UInt16
 
-    init(connection: SyncConnection, queue: DispatchQueue) {
+    init(connection: SyncConnection, queue: DispatchQueue, version: UInt16) {
         self.connection = connection
         self.queue = queue
+        presentVersion = version
     }
 
     func reply(_ payload: Data) {

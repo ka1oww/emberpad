@@ -69,7 +69,7 @@ struct WireCodecTests {
                 [6, 0, 0, 0, 8, 1, 2, 3, 4, 10, 11, 12, 13])
         #expect([UInt8](WireCodec.encode(.error(nil, .stalled))) == [9, 0, 0, 0, 6, 0, 0, 0, 0, 0, 5])
         let hello = WireCodec.encode(.hello(WireLimits.standard.hello(role: .client)))
-        #expect(hello == rawHello(role: 1, versions: (1, 4)))
+        #expect(hello == rawHello(role: 1, versions: (1, 5)))
         #expect([UInt8](hello.prefix(9)) == [1, 0, 0, 0, 17] + Array("EMBR".utf8))
     }
 

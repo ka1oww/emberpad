@@ -11,6 +11,10 @@ import EmberSyncKit
 /// What is sent comes only from `StudentDisplayModel`: a Teacher copy reaches it only as `.teacherCopyPrivate`, which
 /// carries no page, paper or ink. The display link reads the model once a frame and `PresentSender` encodes and sends
 /// the difference off the main thread, so the canvas never waits for the radio.
+///
+/// Lesson recording (EP129): when the Mac's Companion records lessons (protocol version 5), the same link carries the
+/// teacher's Start lesson and End lesson to it, the open document's name and role for the lesson's record, and back
+/// from it the recording's status, which the iPad shows. The Mac records; nothing is recorded on the iPad.
 @MainActor
 final class PresentController: ObservableObject {
     /// The small light by the Present control.
@@ -49,6 +53,20 @@ final class PresentController: ObservableObject {
 
     @Published private(set) var isOn = false
     @Published private(set) var light = Light.off
+    /// The Mac's lesson recording, as it last said; nil until a Companion that records answers.
+    @Published private(set) var lesson: PresentLessonStatus?
+    /// The Mac on this link records lessons (protocol version 5). False for an older Companion.
+    @Published private(set) var macRecords = false
+    /// Start or End lesson, sent and not yet acted on by the Mac. It goes again on a new link until the Mac's status
+    /// names it, or `commandTimeout` passes.
+    @Published private(set) var pendingLesson: PresentLessonCommand?
+    /// The Mac did not answer a Start or End lesson.
+    @Published var lessonProblem: String?
+    /// Turning Present off was asked while the Mac records: the teacher chooses whether the lesson ends too.
+    @Published var confirmingStop = false
+    static let commandTimeout: TimeInterval = 10
+    private var pendingSince: TimeInterval = 0
+    private var lastStart: UUID?
     /// Supplies the pairing; nil when this iPad is not paired.
     var credential: () throws -> PairingCredential? = { nil }
     /// Opens one connection to the Mac; tests replace it with an in-process transport.
@@ -72,7 +90,11 @@ final class PresentController: ObservableObject {
     /// The bytes and frames sent on the current link, for Device checks and tests.
     var stats: PresentLink.Stats? { sender?.link.stats }
 
-    func setOn(_ on: Bool) { on ? start() : stop() }
+    /// The Present switch. Turning it off while the Mac records asks first (`confirmingStop`).
+    func setOn(_ on: Bool) {
+        if on { return start() }
+        if isRecordingLesson { confirmingStop = true } else { stop() }
+    }
 
     func start() {
         guard !isOn else { return }
@@ -84,6 +106,9 @@ final class PresentController: ObservableObject {
         let sender = PresentSender(connect: { attempt in try await connect(credential, attempt) },
                                    onState: { [weak self] state in
                                        Task { @MainActor in self?.linkChanged(state) }
+                                   },
+                                   onLesson: { [weak self] status in
+                                       Task { @MainActor in self?.lessonChanged(status) }
                                    })
         self.sender = sender
         isOn = true
@@ -97,6 +122,10 @@ final class PresentController: ObservableObject {
         guard isOn else { return }
         isOn = false
         light = .off
+        lesson = nil
+        macRecords = false
+        pendingLesson = nil
+        confirmingStop = false
         stopTicking()
         suspendWork?.cancel()
         suspendWork = nil
@@ -157,7 +186,9 @@ final class PresentController: ObservableObject {
         guard isOn else { return }
         switch state {
         case .connecting: light = .connecting
-        case .connected: light = .connected
+        case .connected:
+            light = .connected
+            macRecords = sender?.link.supportsLesson ?? false
         case .reconnecting: light = .reconnecting
         case .off: light = suspended ? .reconnecting : light
         case .unsupported:
@@ -185,13 +216,65 @@ final class PresentController: ObservableObject {
     /// One display frame: hands the sender what the student view shows now. Cheap when nothing changed.
     func tick() {
         guard let sender else { return }
-        sender.tick(now: CACurrentMediaTime()) { input() }
+        let now = CACurrentMediaTime()
+        if pendingLesson != nil, now - pendingSince > Self.commandTimeout {
+            pendingLesson = nil
+            lessonProblem = "Your Mac did not answer. Check EmberPad Companion on the Mac."
+        }
+        sender.tick(now: now) { input() }
     }
 
     /// What the student view shows now, with paper and ink for each shown page. A page whose paper is still being
-    /// prepared is left out until it is ready, a frame or two later.
+    /// prepared is left out until it is ready, a frame or two later. To a Mac that records lessons it also names the
+    /// open document and carries a pending Start or End lesson.
     func input() -> PresentInput {
-        Self.input(from: student, paper: paper, ink: ink)
+        var input = Self.input(from: student, paper: paper, ink: ink)
+        if sender?.link.supportsLesson == true {
+            input.document = student.openDocument
+            input.lessonCommand = pendingLesson
+        }
+        return input
+    }
+
+    // MARK: Lesson recording (EP129)
+
+    var isRecordingLesson: Bool { lesson?.state == .recording }
+
+    /// The Mac answered this iPad's Start lesson that the BOYA microphone is not connected: ask the teacher.
+    var asksForMicChoice: Bool {
+        lesson?.state == .needsMicChoice && lesson?.handledCommand == lastStart && pendingLesson == nil
+    }
+
+    func startLesson() { sendLesson(.start) }
+    func startLessonWithBuiltInMic() { sendLesson(.startWithBuiltInMic) }
+    func endLesson() { sendLesson(.end) }
+
+    private func sendLesson(_ action: PresentLessonCommand.Action) {
+        guard isOn, macRecords else { return }
+        let command = PresentLessonCommand(action: action)
+        if action != .end { lastStart = command.id }
+        lessonProblem = nil
+        pendingLesson = command
+        pendingSince = CACurrentMediaTime()
+        tick()
+    }
+
+    /// End lesson, then stop presenting once the Mac has ended it (or after a few seconds without an answer).
+    func endLessonAndStop() async {
+        endLesson()
+        let id = pendingLesson?.id
+        let deadline = Date().addingTimeInterval(3)
+        while id != nil, pendingLesson?.id == id, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        stop()
+    }
+
+    private func lessonChanged(_ status: PresentLessonStatus) {
+        guard isOn else { return }
+        macRecords = true
+        lesson = status
+        if let pending = pendingLesson, status.handledCommand == pending.id { pendingLesson = nil }
     }
 
     static func input(from student: StudentDisplayModel, paper: PresentPaperCache, ink: PresentInkCache) -> PresentInput {
@@ -364,7 +447,8 @@ struct PresentStatusDot: View {
     }
 }
 
-/// Present on Mac, in the Sharing menus: a checkmarked toggle and one line of status under it.
+/// Present on Mac, in the Sharing menus: a checkmarked toggle and one line of status under it; while presenting,
+/// the lesson recording's Start or End lesson (EP129).
 struct PresentOnMacRows: View {
     @ObservedObject var present: PresentController
     var body: some View {
@@ -378,5 +462,137 @@ struct PresentOnMacRows: View {
         } footer: {
             Text("Shows the student view on your Mac over a direct wireless link. No Wi-Fi network needed.")
         }
+        PresentLessonRows(present: present)
+    }
+}
+
+/// Start lesson or End lesson, while presenting to a Mac. The Mac records its presentation and the BOYA microphone.
+struct PresentLessonRows: View {
+    @ObservedObject var present: PresentController
+    var body: some View {
+        if present.isOn, present.light == .connected || present.lesson != nil {
+            Section {
+                if !present.macRecords {
+                    Text("Update EmberPad Companion on your Mac to record lessons")
+                } else if present.isRecordingLesson {
+                    Button(role: .destructive) { present.endLesson() } label: {
+                        Label("End lesson", systemImage: "stop.circle")
+                    }
+                    .disabled(present.pendingLesson != nil)
+                    Text(PresentLessonText.line(present.lesson))
+                } else {
+                    Button { present.startLesson() } label: {
+                        Label("Start lesson", systemImage: "record.circle")
+                    }
+                    .disabled(present.pendingLesson != nil)
+                    if let line = PresentLessonText.idleLine(present.lesson, pending: present.pendingLesson != nil) { Text(line) }
+                }
+            } footer: {
+                if present.macRecords {
+                    Text("Your Mac records the presentation and the BOYA microphone. Teacher copies are never recorded.")
+                }
+            }
+        }
+    }
+}
+
+enum PresentLessonText {
+    /// The recording's line in the menu: the time, the microphone and any warning.
+    static func line(_ status: PresentLessonStatus?, now: Date = Date()) -> String {
+        guard let status else { return "" }
+        var parts = ["Recording \(elapsed(status, now: now))"]
+        if let mic = status.micName { parts.append(status.micIsFallback ? "\(mic), not the BOYA" : mic) }
+        if let warning = status.warning { parts.append(warning) }
+        return parts.joined(separator: " · ")
+    }
+
+    static func idleLine(_ status: PresentLessonStatus?, pending: Bool) -> String? {
+        if pending { return "Waiting for your Mac…" }
+        switch status?.state {
+        case .failed: return status?.message
+        case .needsMicChoice: return status?.message
+        default: return nil
+        }
+    }
+
+    /// Minutes and seconds since the Mac started recording.
+    static func elapsed(_ status: PresentLessonStatus, now: Date = Date()) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(status.startedAt ?? now)))
+        return seconds >= 3_600
+            ? String(format: "%d:%02d:%02d", seconds / 3_600, seconds / 60 % 60, seconds % 60)
+            : String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+/// Over every screen of the iPad's main scene while the Mac records (EP129): a red REC badge with the time, amber
+/// with the warning while the microphone is silent or disconnected; the question when the BOYA is missing; and the
+/// question when Present is turned off during a recording. Never on the student view or the Mac's picture.
+struct PresentLessonChrome: ViewModifier {
+    @ObservedObject var present: PresentController
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottomLeading) {
+                if present.isRecordingLesson, let lesson = present.lesson {
+                    PresentLessonBadge(present: present, lesson: lesson)
+                        .padding(.leading, 16)
+                        .padding(.bottom, 16)
+                }
+            }
+            .alert("BOYA microphone not connected", isPresented: Binding(get: { present.asksForMicChoice }, set: { _ in })) {
+                Button("Record with built-in mic anyway") { present.startLessonWithBuiltInMic() }
+                Button("Cancel", role: .cancel) { present.endLesson() }
+            } message: {
+                Text("Plug the BOYA receiver into your Mac and start again, or record with the Mac's built-in microphone.")
+            }
+            .confirmationDialog("Your Mac is recording this lesson", isPresented: $present.confirmingStop, titleVisibility: .visible) {
+                Button("End lesson and stop presenting", role: .destructive) { Task { await present.endLessonAndStop() } }
+                Button("Stop presenting, keep recording") { present.stop() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("If you keep recording, end the lesson from EmberPad Companion on the Mac.")
+            }
+            .alert("Lesson recording", isPresented: Binding(get: { present.lessonProblem != nil }, set: { if !$0 { present.lessonProblem = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(present.lessonProblem ?? "")
+            }
+    }
+}
+
+/// The REC badge: tap for End lesson.
+struct PresentLessonBadge: View {
+    @ObservedObject var present: PresentController
+    let lesson: PresentLessonStatus
+
+    var body: some View {
+        Menu {
+            Button(role: .destructive) { present.endLesson() } label: { Label("End lesson", systemImage: "stop.circle") }
+        } label: {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                PresentLessonBadgeLabel(lesson: lesson, now: context.date)
+            }
+        }
+        .accessibilityLabel(lesson.warning.map { "Recording lesson. \($0)" } ?? "Recording lesson")
+    }
+}
+
+/// The badge itself: red with the time, amber with the warning.
+struct PresentLessonBadgeLabel: View {
+    let lesson: PresentLessonStatus
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: lesson.warning == nil ? "record.circle.fill" : "exclamationmark.triangle.fill")
+            Text(lesson.warning ?? "REC \(PresentLessonText.elapsed(lesson, now: now))")
+                .monospacedDigit()
+        }
+        .font(.footnote.weight(.semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Capsule().fill(lesson.warning == nil ? Color.red : Color.orange))
+        .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
     }
 }

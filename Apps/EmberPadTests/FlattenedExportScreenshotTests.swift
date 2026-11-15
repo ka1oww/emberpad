@@ -44,7 +44,7 @@ final class FlattenedExportScreenshotTests: XCTestCase {
                 VStack(alignment: .leading, spacing: 10) {
                     Caption("Worksheet · More menu")
                     MenuMock(rows: [("Mirror Presenter Page (follow my view)", nil, false), ("Mirror Full Page", nil, false),
-                                    ("Record lesson", nil, false), ("Export flattened PDF", nil, true)])
+                                    ("Present on Mac", nil, false), ("Export flattened PDF", nil, true)])
                 }
             }
             .padding(28)
