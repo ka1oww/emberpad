@@ -9,7 +9,8 @@ import EmberSyncKit
 /// is sent, and no connection is made, until the teacher turns it on.
 ///
 /// What is sent comes only from `StudentDisplayModel`: a Teacher copy reaches it only as `.teacherCopyPrivate`, which
-/// carries no page, paper or ink. The display link reads the model once a frame and `PresentSender` encodes and sends
+/// carries no page, paper or ink, unless the teacher swaps the class onto it (EP130), when its pages go marked
+/// `role == .teacher`. The display link reads the model once a frame and `PresentSender` encodes and sends
 /// the difference off the main thread, so the canvas never waits for the radio.
 ///
 /// Lesson recording (EP129): when the Mac's Companion records lessons (protocol version 5), the same link carries the
@@ -51,8 +52,12 @@ final class PresentController: ObservableObject {
         }
     }
 
-    @Published private(set) var isOn = false
+    @Published private(set) var isOn = false {
+        didSet { if isOn != oldValue { onRunningChange?() } }
+    }
     @Published private(set) var light = Light.off
+    /// Called when Present turns on or off (EP130: the class goes back to the Student copy).
+    var onRunningChange: (() -> Void)?
     /// The Mac's lesson recording, as it last said; nil until a Companion that records answers.
     @Published private(set) var lesson: PresentLessonStatus?
     /// The Mac on this link records lessons (protocol version 5). False for an older Companion.
@@ -279,7 +284,19 @@ final class PresentController: ObservableObject {
 
     static func input(from student: StudentDisplayModel, paper: PresentPaperCache, ink: PresentInkCache) -> PresentInput {
         let view = student.presented
-        // Only a shown Student page has paper and ink; Paused, the library and a Teacher copy have none.
+        // EP130: the Teacher copy the teacher chose to show has paper but no ink, under its own session, so the Mac
+        // drops the worksheet's ink rather than drawing it on the answers.
+        if view.showsTeacherCopy, !student.paused, let teacher = student.teacherFrame {
+            var pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)] = [:]
+            for slice in teacher.slices {
+                guard let ready = paper.paper(for: slice.page) else { continue }
+                let asset = ready.asset
+                pages[slice.pageIndex] = (PresentPageRef(pageIndex: slice.pageIndex, asset: asset.hash, size: ready.size),
+                                          { @Sendable in asset })
+            }
+            return PresentInput(view: view, session: teacher.documentID, pages: pages)
+        }
+        // Only a shown Student page has paper and ink; Paused, the library and an opened Teacher copy have none.
         guard case .page = view.screen, !student.paused, let snapshot = student.snapshot,
               let framed = snapshot.framed(student.framing) else { return PresentInput(view: view) }
         var pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)] = [:]

@@ -94,6 +94,8 @@ struct SharePillLabel: View {
     let state: SharePillState
     /// Portrait shortens the sharing pill to "Sharing" (design 5.2).
     var short = false
+    /// EP130: the teacher swapped the class onto the Teacher copy.
+    var classCopy = ClassCopy.student
 
     var body: some View {
         Text(title)
@@ -106,6 +108,7 @@ struct SharePillLabel: View {
     private var title: String {
         switch state {
         case .notSharing: "Not sharing"
+        case .sharing where classCopy == .teacher: short ? "Sharing" : "● Students see: Teacher copy"
         case .sharing: short ? "Sharing" : "● Students see: worksheet only"
         case .mirrored: "● Screen mirrored · answers hidden"
         case .paused: "Students see: Paused"
@@ -535,13 +538,16 @@ extension EditorScreen {
                 }
                 // iPad main scene only: the external scene never draws this, and it has no answer URL.
                 if let session {
-                    TeacherCopyCardOverlay(content: .resolve(policy: presentation.policy,
-                                                             mainSceneActive: presentation.mainSceneActive,
-                                                             privateAnswerURL: presentation.privateAnswerURL),
-                                           documentTitle: session.record.title,
-                                           card: teacherCard,
-                                           hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil,
-                                           answersID: teacherCopyID)
+                    ClassCopyReader(indicator: presentation.student.classCopy) { classCopy in
+                        TeacherCopyCardOverlay(content: .resolve(policy: presentation.policy,
+                                                                 mainSceneActive: presentation.mainSceneActive,
+                                                                 privateAnswerURL: presentation.privateAnswerURL),
+                                               documentTitle: session.record.title,
+                                               card: teacherCard,
+                                               hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil,
+                                               answersID: teacherCopyID,
+                                               shownToClass: classCopy == .teacher)
+                    }
                 }
             }
             .overlay(alignment: dock == .bottom ? .bottom : .top) {
@@ -793,12 +799,19 @@ extension EditorScreen {
         }
         .accessibilityLabel(chrome.readOnly ? "Edit" : "Read-only mode")
         .accessibilityHint(chrome.readOnly ? "Shows the tools so the pages take ink again" : "Hides the tools so the pages take no ink")
+        // EP130: while presenting, swaps what the class sees between the Student copy and the Teacher copy.
+        ClassCopySwapControl(presentation: presentation, present: presentation.present,
+                             indicator: presentation.student.classCopy, worksheet: session?.record, short: shortPill)
         Menu {
             WorksheetSharingRows(framing: $presentation.studentFraming)
             PresentOnMacRows(present: presentation.present)
         } label: {
             HStack(spacing: 2) {
-                if pillState.showsHeaderPill { SharePillLabel(state: pillState, short: shortPill) }
+                if pillState.showsHeaderPill {
+                    ClassCopyReader(indicator: presentation.student.classCopy) { classCopy in
+                        SharePillLabel(state: pillState, short: shortPill, classCopy: classCopy)
+                    }
+                }
                 // EP93: Present on Mac's light sits on the student-view icon, where the control is.
                 HeaderIcon(symbol: "airplayvideo")
                     .overlay(alignment: .topTrailing) { PresentStatusDot(present: presentation.present).padding(6) }

@@ -636,6 +636,75 @@ final class DeviceDrawingStressTests: XCTestCase {
         scenario.finish(expectedStrokes: [0: total])
     }
 
+    /// EP128: the toolbar lasso closed round more and more of a page full of ink, as a teacher rings a whole worked
+    /// answer: a small loop, a medium one and a big one drawn slowly (about 2000 Pencil samples). Closing each loop is
+    /// a single moment held to `StressBounds.lassoMoment`: before EP128 the big loop froze the page for about a second
+    /// while every sample of every stroke inside was tested against every edge of the loop. Each loop still selects
+    /// exactly the strokes the old every-edge test selects.
+    func test13c_BigLassoOnAHeavyPage() throws {
+        let heavy = StressInk.heavyPage()
+        let scenario = try StressScenario(tool: "lasso.bigLoop", title: "Big lassos on a page full of ink", self, ink: heavy)
+        let total = scenario.bystanderCount + heavy.count
+        scenario.note("\(heavy.count) strokes of writing, highlights and boxes on the page")
+        scenario.tools.select(.lasso)
+        StressPage.pump(0.3)
+        let centre = scenario.visibleCentre(page: 0)
+        let loops: [(key: String, radius: CGFloat, speed: CGFloat, seed: UInt64, fewest: Int)] = [
+            ("small", 90, 720, 5, 10), ("medium", 160, 720, 6, 80), ("big", 230, 360, 7, 250),
+        ]
+        for loop in loops {
+            var pencil = StressPencil(page: scenario.page, pageIndex: 0)
+            let points = StressInk.samples(StressInk.circle(center: centre, radius: loop.radius), speed: loop.speed, seed: loop.seed)
+            pencil.down(at: points[0])
+            for point in points.dropFirst() { pencil.move(to: point) }
+            StressPage.pump(0.05)
+            // The lift's gesture ends on the next turn of the run loop, so the select runs inside the wait after it,
+            // which goes on until frames are drawn again after the selection shows.
+            var shown = 0.0
+            let select = scenario.frameGaps {
+                let lift = CACurrentMediaTime()
+                pencil.lift()
+                while scenario.controller.inkSelection.selection == nil, CACurrentMediaTime() - lift < 5 { StressPage.pump(0.002) }
+                shown = CACurrentMediaTime() - lift
+                StressPage.pump(0.3)
+            }
+            let selection = scenario.controller.inkSelection.selection
+            let selected = selection?.indices.sorted() ?? []
+            let lasso = selection?.outline ?? []
+            let drawing = scenario.page.canvas(0)?.drawing ?? PKDrawing()
+            // The hit-test alone, as the app runs it and as testing every edge does, outside the frame timing.
+            // The harness's own work, so it is not taken for the app stalling.
+            let (compute, everyEdge, before) = StressHarnessTime.measure {
+                let computeStart = CACurrentMediaTime()
+                _ = LassoGeometry.selectedIndices(in: drawing, lasso: lasso)
+                let compute = CACurrentMediaTime() - computeStart
+                let everyEdgeStart = CACurrentMediaTime()
+                let before = LassoSelectionBefore.selectedIndices(in: drawing, lasso: lasso)
+                return (compute, CACurrentMediaTime() - everyEdgeStart, before)
+            }
+            scenario.metrics["lasso.\(loop.key).hitTestMs"] = compute * 1000
+            scenario.metrics["lasso.\(loop.key).everyEdgeHitTestMs"] = everyEdge * 1000
+            scenario.note(String(format: "%@ loop: %d points, %d strokes selected, lift to selection %.1f ms, hit-test %.1f ms (every edge %.1f ms)",
+                                 loop.key, lasso.count, selected.count, shown * 1000, compute * 1000, everyEdge * 1000))
+            scenario.check("the \(loop.key) loop selects the ink inside it", selected.count >= loop.fewest && selected.count < total,
+                           "selected \(selected.count) of \(total) strokes with a loop of \(lasso.count) points (at least \(loop.fewest))")
+            scenario.check("the \(loop.key) loop selects the same strokes as testing every edge", selected == before,
+                           "selected \(selected.count) strokes, every edge selects \(before.count)")
+            scenario.metrics["lasso.\(loop.key).loopPoints"] = Double(lasso.count)
+            scenario.metrics["lasso.\(loop.key).selected"] = Double(selected.count)
+            scenario.metrics["lasso.\(loop.key).liftToSelectionMs"] = shown * 1000
+            scenario.metrics["lasso.\(loop.key).longestFrameGapMs"] = select.worst * 1000
+            scenario.check("no stall while the \(loop.key) loop selects",
+                           !select.gaps.isEmpty && select.worst <= StressBounds.lassoMoment && shown <= StressBounds.lassoMoment,
+                           String(format: "longest frame gap %.0f ms at %.2f s over %d frames, the selection showed %.0f ms after the lift (bound %.0f ms)",
+                                  select.worst * 1000, select.worstEnd - scenario.sampler.scenarioStart, select.gaps.count,
+                                  shown * 1000, StressBounds.lassoMoment * 1000))
+            scenario.controller.inkSelection.dismiss()
+            StressPage.pump(0.2)
+        }
+        scenario.finish(expectedStrokes: [0: total])
+    }
+
     /// Circle to lasso: a loop drawn round ink just written, then a long press on its line, selects the ink and leaves
     /// the loop off the page.
     func test14_CircleToLasso() throws {

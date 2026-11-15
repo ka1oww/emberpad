@@ -35,9 +35,42 @@ enum TeacherCopyCardGeometry {
     /// The hidden panel's pull tab on its edge.
     static let tabSize = CGSize(width: 34, height: 150)
 
-    /// A tall panel: 380 pt wide and the body's full height, inset 16 pt on every side.
-    static func size(in container: CGSize) -> CGSize {
+    /// A tall panel: `width` wide (380 pt unless the teacher resized it, EP130) and the body's full height, inset 16 pt
+    /// on every side.
+    static func size(in container: CGSize, width: CGFloat = width) -> CGSize {
         CGSize(width: min(width, max(container.width - 2 * inset, 0)), height: max(container.height - 2 * inset, 0))
+    }
+
+    // MARK: Resizing (EP130)
+
+    /// The narrowest the teacher can make it: the answers stay readable.
+    static let minWidth: CGFloat = 300
+    /// The worksheet keeps at least this much beside the widest panel, so its edge and the pull tab stay in reach.
+    static let worksheetKept: CGFloat = 160
+    /// The grip on the panel's inner edge that resizes it.
+    static let gripSize = CGSize(width: 28, height: 88)
+    /// One step of the grip's VoiceOver adjust action.
+    static let widthStep: CGFloat = 60
+
+    /// The widest the panel can be in `container`.
+    static func maxWidth(in container: CGSize) -> CGFloat {
+        max(minWidth, container.width - 2 * inset - worksheetKept)
+    }
+
+    /// `width` kept between the narrowest and the widest the panel can be in `container`.
+    static func clampedWidth(_ width: CGFloat, in container: CGSize) -> CGFloat {
+        min(max(width, minWidth), maxWidth(in: container))
+    }
+
+    /// The width a grip drag of `translation` (pt, rightwards positive) makes from `start`: dragging the inner edge
+    /// away from the panel's own edge widens it.
+    static func resizedWidth(from start: CGFloat, translation: CGFloat, side: TeacherCopyPanelSide, in container: CGSize) -> CGFloat {
+        clampedWidth(start - translation * side.outward, in: container)
+    }
+
+    /// The grip's centre: on the panel's inner edge (the one facing the worksheet), half way down.
+    static func gripCenter(side: TeacherCopyPanelSide, panelX: CGFloat, panelSize: CGSize) -> CGPoint {
+        CGPoint(x: side == .leading ? panelX + panelSize.width : panelX, y: inset + panelSize.height / 2)
     }
 
     /// Top-leading origin of the panel docked at `side`.
@@ -180,11 +213,15 @@ final class TeacherCopyCardState {
     struct Stored: Codable, Equatable {
         var isOpen = true
         var side = TeacherCopyPanelSide.trailing
+        /// EP130: the width the teacher dragged it to, in points; nil (and every launch before EP130) is the default.
+        var width: Double?
     }
 
     /// Whether the panel shows now. A worksheet with no Teacher copy starts closed, whatever was remembered.
     private(set) var isOpen: Bool
     private(set) var side: TeacherCopyPanelSide
+    /// EP130: the panel's width, remembered on this iPad. `TeacherCopyCardGeometry.width` until the teacher resizes it.
+    private(set) var width: CGFloat
     @ObservationIgnored private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -192,7 +229,20 @@ final class TeacherCopyCardState {
         let stored = Self.load(from: defaults)
         isOpen = stored.isOpen
         side = stored.side
+        width = stored.width.map { max(CGFloat($0), TeacherCopyCardGeometry.minWidth) } ?? TeacherCopyCardGeometry.width
     }
+
+    /// Whether the teacher has resized it away from the default.
+    var isResized: Bool { width != TeacherCopyCardGeometry.width }
+
+    /// Keeps `width` (already clamped to the worksheet it was dragged in) for every worksheet and launch on this iPad.
+    func setWidth(_ width: CGFloat) {
+        self.width = max(width, TeacherCopyCardGeometry.minWidth)
+        save()
+    }
+
+    /// Back to the default width.
+    func resetWidth() { setWidth(TeacherCopyCardGeometry.width) }
 
     /// The nav-bar book button's label, which always names what a tap does.
     var toggleAccessibilityLabel: String { isOpen ? "Hide Teacher copy" : "Show Teacher copy" }
@@ -218,7 +268,12 @@ final class TeacherCopyCardState {
     private func update(isOpen: Bool, side: TeacherCopyPanelSide) {
         self.isOpen = isOpen
         self.side = side
-        if let data = try? JSONEncoder().encode(Stored(isOpen: isOpen, side: side)) { defaults.set(data, forKey: Self.defaultsKey) }
+        save()
+    }
+
+    private func save() {
+        let stored = Stored(isOpen: isOpen, side: side, width: isResized ? Double(width) : nil)
+        if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.defaultsKey) }
     }
 
     private static func load(from defaults: UserDefaults) -> Stored {
@@ -280,9 +335,13 @@ struct TeacherCopyCardOverlay: View {
     var hasAnswerPage = true
     /// EP121: the Teacher copy's own library id, under which the panel remembers where its answers were left.
     var answersID: UUID?
+    /// EP130: the class sees this Teacher copy now, so the header says so instead of "Only on this iPad".
+    var shownToClass = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The finger's horizontal travel while a swipe is in progress.
     @State private var drag: CGFloat?
+    /// EP130: the width the grip is dragging the panel to, until it is let go and remembered.
+    @State private var resizing: CGFloat?
     /// A hidden panel stays in the hierarchy until it has finished sliding off, then leaves it (freeing the answers).
     @State private var mounted = false
 
@@ -290,7 +349,8 @@ struct TeacherCopyCardOverlay: View {
         GeometryReader { proxy in
             let container = proxy.size
             let side = card.side
-            let panelSize = TeacherCopyCardGeometry.size(in: container)
+            let width = resizing ?? TeacherCopyCardGeometry.clampedWidth(card.width, in: container)
+            let panelSize = TeacherCopyCardGeometry.size(in: container, width: width)
             let x = TeacherCopySlide.x(side: side, isOpen: card.isOpen, translation: drag ?? 0, panelSize: panelSize, in: container)
             let hiddenOffset = TeacherCopySlide.hiddenX(side: side, panelSize: panelSize, in: container)
                 - TeacherCopySlide.restX(side: side, isOpen: true, panelSize: panelSize, in: container)
@@ -299,7 +359,7 @@ struct TeacherCopyCardOverlay: View {
                     SlideOverSurface(onChanged: { drag = $0 },
                                      onEnded: { settle(translation: $0, velocity: $1, panelSize: panelSize, in: container) }) {
                         TeacherCopyCard(content: content, documentTitle: documentTitle, side: side, hasAnswerPage: hasAnswerPage,
-                                        answersID: answersID,
+                                        answersID: answersID, shownToClass: shownToClass,
                                         onClose: { settle(to: .hide(side), panelSize: panelSize, in: container) },
                                         onMove: { settle(to: .dock(side.opposite), panelSize: panelSize, in: container) })
                     }
@@ -310,6 +370,27 @@ struct TeacherCopyCardOverlay: View {
                     // The book toggle slides it on from its edge; every other move is driven by `x`.
                     .transition(.asymmetric(insertion: .offset(x: hiddenOffset), removal: .identity))
                     .onAppear { mounted = true }
+                }
+                // EP130: the grip on the open panel's inner edge resizes it. It sits outside the panel's swipe surface,
+                // so dragging it never slides the panel away.
+                if card.isOpen, drag == nil {
+                    let grip = TeacherCopyCardGeometry.gripSize
+                    let center = TeacherCopyCardGeometry.gripCenter(side: side, panelX: x, panelSize: panelSize)
+                    TeacherCopyResizeGrip(
+                        width: width, container: container,
+                        onChanged: { translation in
+                            resizing = TeacherCopyCardGeometry.resizedWidth(from: TeacherCopyCardGeometry.clampedWidth(card.width, in: container),
+                                                                            translation: translation, side: side, in: container)
+                        },
+                        onEnded: {
+                            if let resizing { card.setWidth(resizing) }
+                            resizing = nil
+                        },
+                        onSet: { card.setWidth(TeacherCopyCardGeometry.clampedWidth($0, in: container)) },
+                        onReset: { withAnimation(.easeOut(duration: 0.2)) { card.resetWidth() } })
+                    .frame(width: grip.width, height: grip.height)
+                    .offset(x: center.x - grip.width / 2, y: center.y - grip.height / 2)
+                    .transition(.opacity)
                 }
                 if !card.isOpen {
                     let tab = TeacherCopyCardGeometry.tabSize
@@ -623,13 +704,15 @@ struct TeacherCopyCard: View {
     var side: TeacherCopyPanelSide = .trailing
     var hasAnswerPage = true
     var answersID: UUID?
+    /// EP130: the class sees this Teacher copy now.
+    var shownToClass = false
     let onClose: () -> Void
     var onMove: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
             // A sideways finger swipe anywhere on the panel slides it (see SlideOverSurface); the body scrolls.
-            TeacherCopyCardHeader(documentTitle: documentTitle, onClose: onClose)
+            TeacherCopyCardHeader(documentTitle: documentTitle, shownToClass: shownToClass, onClose: onClose)
             TeacherCopyCardBody(content: content, hasAnswerPage: hasAnswerPage, answersID: answersID)
         }
         .background(Theme.surface)
@@ -638,23 +721,26 @@ struct TeacherCopyCard: View {
             .stroke(Theme.line, lineWidth: 1))
         .shadow(color: .black.opacity(0.28), radius: 25, x: 0, y: 18)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Teacher copy, private")
+        .accessibilityLabel(shownToClass ? "Teacher copy, shown to the class" : "Teacher copy, private")
+        .accessibilityIdentifier("TeacherCopyPanel")
         .accessibilityAction(named: "Move to the \(side.opposite.title) side", onMove)
     }
 }
 
 struct TeacherCopyCardHeader: View {
     let documentTitle: String
+    /// EP130: the class sees this Teacher copy now, so it is no longer only on this iPad.
+    var shownToClass = false
     let onClose: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "lock.fill").foregroundStyle(Theme.privateBrand)
+            Image(systemName: shownToClass ? "eye.fill" : "lock.fill").foregroundStyle(Theme.privateBrand)
             VStack(alignment: .leading, spacing: 0) {
                 Text("Teacher copy")
                     .font(.system(.subheadline, design: .default).weight(.bold))
                     .foregroundStyle(Theme.privateBrand)
-                Text("Only on this iPad · \(documentTitle)")
+                Text(shownToClass ? "Shown to the class · \(documentTitle)" : "Only on this iPad · \(documentTitle)")
                     .font(Theme.pageMeta)
                     .foregroundStyle(Theme.text2)
                     .lineLimit(1).truncationMode(.tail)
@@ -743,6 +829,51 @@ struct NoTeacherCopyState: View {
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.canvas)
+    }
+}
+
+/// EP130: the grip on the open panel's inner edge. Drag it sideways to make the Teacher copy wider or narrower; the
+/// width is kept on this iPad for every worksheet. A double tap puts it back to the default width. VoiceOver adjusts it
+/// in steps, and has a "Reset size" action.
+struct TeacherCopyResizeGrip: View {
+    let width: CGFloat
+    let container: CGSize
+    let onChanged: (_ translation: CGFloat) -> Void
+    let onEnded: () -> Void
+    /// VoiceOver's adjust: set this width.
+    let onSet: (CGFloat) -> Void
+    let onReset: () -> Void
+
+    var body: some View {
+        ZStack {
+            Capsule()
+                .fill(Theme.surface)
+                .frame(width: 14, height: 64)
+                .overlay(Capsule().stroke(Theme.line, lineWidth: 1))
+                .shadow(color: .black.opacity(0.18), radius: 4, x: 0, y: 1)
+            Capsule()
+                .fill(Theme.text3)
+                .frame(width: 4, height: 34)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+            .onChanged { onChanged($0.translation.width) }
+            .onEnded { _ in onEnded() })
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onReset() })
+        .accessibilityElement()
+        .accessibilityLabel("Resize Teacher copy")
+        .accessibilityValue("\(Int(width.rounded())) points wide")
+        .accessibilityHint("Drag sideways to make the Teacher copy wider or narrower. Double-tap to reset its size.")
+        .accessibilityIdentifier("TeacherCopyResize")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: onSet(width + TeacherCopyCardGeometry.widthStep)
+            case .decrement: onSet(width - TeacherCopyCardGeometry.widthStep)
+            @unknown default: break
+            }
+        }
+        .accessibilityAction(named: "Reset size", onReset)
     }
 }
 
