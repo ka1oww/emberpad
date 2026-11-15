@@ -1523,4 +1523,3 @@ extension PKCanvasView {
     /// canvas itself when it is not zoomed inside one.
     var pageSpace: UIView { superview as? PageInkView ?? self }
 }
-
