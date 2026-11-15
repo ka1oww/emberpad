@@ -130,16 +130,47 @@ final class ClassCopySwapTests: XCTestCase {
         model.framing = .fullPage
         model.publish(session: session, pageIndex: 1, canvasSize: letter)
         state.setClassCopy(.teacher, worksheet: session.record)
-        XCTAssertEqual(model.classCopy.shown, .teacher)
+        XCTAssertEqual(model.classCopy.shown, .student, "the class sees the Student page, so the indicator says so")
+        XCTAssertTrue(model.classCopy.revealing)
         XCTAssertNil(model.teacherFrame)
         var page = try XCTUnwrap(shownPage(model))
         XCTAssertEqual(page.role, .student)
         XCTAssertEqual(page.pages.map(\.pageIndex), [1])
 
         model.publish(session: session, pageIndex: 2, canvasSize: letter)
+        XCTAssertEqual(model.classCopy.shown, .teacher)
         page = try XCTUnwrap(shownPage(model))
         XCTAssertEqual(page.role, .teacher)
         XCTAssertEqual(page.focusedPageIndex, 1, "worksheet page 3 is the PDF's page 2")
+    }
+
+    /// The sticky reveal: on an unanswered page the indicator reads Student, a tap ends the reveal, and it reads
+    /// Teacher again on an answered page only if the reveal is still on.
+    func testTheIndicatorFollowsWhatTheClassSeesAndATapOnAnUnansweredPageEndsTheReveal() throws {
+        let manifest = PageManifest(pages: [.pdf(0), .template(PaperTemplate(kind: .squared, size: .a4)), .pdf(1), .pdf(2)])
+        let (state, session, _) = try presenting(pages: manifest)
+        let model = state.student
+        model.publish(session: session, pageIndex: 0, canvasSize: letter)
+        state.setClassCopy(.teacher, worksheet: session.record)
+        XCTAssertEqual(model.classCopy.shown, .teacher)
+        XCTAssertEqual(model.classCopy.tapTarget, .student)
+
+        model.publish(session: session, pageIndex: 1, canvasSize: letter)
+        XCTAssertEqual(model.classCopy.shown, .student)
+        XCTAssertEqual(shownPage(model)?.role, .student)
+        XCTAssertEqual(model.classCopy.tapTarget, .student, "a tap while it reads Student ends the reveal")
+
+        model.publish(session: session, pageIndex: 2, canvasSize: letter)
+        XCTAssertEqual(model.classCopy.shown, .teacher)
+        XCTAssertEqual(shownPage(model)?.role, .teacher)
+
+        model.publish(session: session, pageIndex: 1, canvasSize: letter)
+        state.setClassCopy(model.classCopy.tapTarget, worksheet: session.record)
+        XCTAssertFalse(model.classCopy.revealing)
+        model.publish(session: session, pageIndex: 2, canvasSize: letter)
+        XCTAssertEqual(model.classCopy.shown, .student)
+        XCTAssertEqual(shownPage(model)?.role, .student)
+        XCTAssertEqual(model.classCopy.tapTarget, .teacher)
     }
 
     // MARK: When the swap is refused or undone

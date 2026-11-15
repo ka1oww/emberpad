@@ -219,6 +219,12 @@ struct TeacherCopyFrame {
 @MainActor
 final class ClassCopyIndicator: ObservableObject {
     @Published fileprivate(set) var shown = ClassCopy.student
+    /// Whether the teacher's choice to show the Teacher copy is on. It outlasts a page with no answer page, where
+    /// `shown` reads Student, so a tap on the control ends it rather than doing nothing.
+    @Published fileprivate(set) var revealing = false
+
+    /// The copy a tap on the swap control asks for.
+    var tapTarget: ClassCopy { revealing ? .student : .teacher }
 }
 
 /// What the external scene shows besides Paused. Only `.page` carries pixels, and only a Student copy can fill it.
@@ -232,10 +238,14 @@ enum StudentDisplayContent {
 
 @MainActor
 final class StudentDisplayModel: ObservableObject {
-    @Published private(set) var content: StudentDisplayContent = .none
+    @Published private(set) var content: StudentDisplayContent = .none {
+        didSet { refreshClassCopy() }
+    }
     @Published var paused = true
     /// Framing only changes how a published snapshot is drawn; both modes draw from the same role-gated snapshot.
-    @Published var framing: StudentFraming = .presenterPage
+    @Published var framing: StudentFraming = .presenterPage {
+        didSet { refreshClassCopy() }
+    }
     /// Strokes in progress over the published page. Published beside `content`, so the update that brings a stroke's
     /// committed drawing also removes its provisional copy, and the student view never shows both or neither.
     @Published private(set) var liveInk: StudentLiveInk?
@@ -247,7 +257,7 @@ final class StudentDisplayModel: ObservableObject {
     /// EP130: set while the teacher shows this worksheet's Teacher copy to the class. Published with the page, so the
     /// swap lands in one frame on the student view and on the Mac.
     @Published private(set) var teacherReveal: TeacherCopyReveal? {
-        didSet { classCopy.shown = teacherReveal == nil ? .student : .teacher }
+        didSet { refreshClassCopy() }
     }
     /// Which copy the class sees, for the iPad's chrome.
     let classCopy = ClassCopyIndicator()
@@ -256,6 +266,14 @@ final class StudentDisplayModel: ObservableObject {
     var teacherFrame: TeacherCopyFrame? {
         guard let teacherReveal, let snapshot = content.snapshot else { return nil }
         return TeacherCopyFrame(reveal: teacherReveal, snapshot: snapshot, framing: framing)
+    }
+    /// The indicator follows what the class actually sees: the Teacher copy only while a reveal is on and the focused
+    /// page has an answer page.
+    private func refreshClassCopy() {
+        let revealing = teacherReveal != nil
+        let shown: ClassCopy = teacherFrame == nil ? .student : .teacher
+        if classCopy.revealing != revealing { classCopy.revealing = revealing }
+        if classCopy.shown != shown { classCopy.shown = shown }
     }
     private let now: () -> TimeInterval
     private let schedule: MirrorThrottle.Scheduler

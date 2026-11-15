@@ -23,14 +23,14 @@ struct ClassCopySwapControl: View {
         if let worksheet, ClassCopySwapControl.isAvailable(worksheet: worksheet, hasTeacherCopy: presentation.privateAnswerURL != nil,
                                                            presenting: presentation.isPresenting) {
             Button {
-                presentation.setClassCopy(indicator.shown.other, worksheet: worksheet)
+                presentation.setClassCopy(indicator.tapTarget, worksheet: worksheet)
             } label: {
                 ClassCopySwapLabel(shown: indicator.shown, short: short)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Class sees")
             .accessibilityValue(indicator.shown.title)
-            .accessibilityHint("Swaps what the class sees to the \(indicator.shown.other.title)")
+            .accessibilityHint("Swaps what the class sees to the \(indicator.tapTarget.title)")
             .accessibilityIdentifier("ClassCopySwap")
             .transition(.opacity)
         }
