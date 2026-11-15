@@ -13,6 +13,8 @@ struct StudentPageSlice {
     private(set) var inkRevision: UInt64
     /// The page's crop box in the viewport's space (the anchor page's points, top-left origin).
     private(set) var frame: CGRect
+    /// EP130: the Teacher copy page that answers this one (its PDF page), or nil for a page added in Ember Slate.
+    private(set) var answerPage: Int?
 }
 
 /// The external scene receives only this type. It has no answer URL, pairing data or library chrome.
@@ -32,6 +34,8 @@ struct StudentPageSnapshot {
     private(set) var visibleRect: CGRect?
     /// Up to two (page, drawing) pairs under `visibleRect`, in page order.
     private(set) var slices: [StudentPageSlice]
+    /// EP130: the Teacher copy page that answers the focused page, or nil for a page added in Ember Slate.
+    private(set) var answerPage: Int?
     var documentID: UUID { document.id }
 
     @MainActor
@@ -44,12 +48,14 @@ struct StudentPageSnapshot {
         self.page = page
         drawing = session.drawing(on: pageIndex)
         inkRevision = session.inkRevision(on: pageIndex)
+        answerPage = TeacherCopyAnswerPage.pdfPage(for: session.page(at: pageIndex))
         self.canvasSize = canvasSize
         // Every slice comes from this same Student session; a viewport naming a missing page is dropped whole.
         let slices = (viewport?.pages.prefix(MirrorGeometry.maxPages) ?? []).compactMap { placement in
             session.pdf.page(at: placement.pageIndex).map {
                 StudentPageSlice(pageIndex: placement.pageIndex, page: $0, drawing: session.drawing(on: placement.pageIndex),
-                                 inkRevision: session.inkRevision(on: placement.pageIndex), frame: placement.frame)
+                                 inkRevision: session.inkRevision(on: placement.pageIndex), frame: placement.frame,
+                                 answerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: placement.pageIndex)))
             }
         }
         if let viewport, !slices.isEmpty, slices.count == viewport.pages.count {
@@ -79,7 +85,8 @@ struct StudentPageSnapshot {
         guard displayed.width > 0, displayed.height > 0 else { return nil }
         let whole = CGRect(origin: .zero, size: displayed)
         return Framed(visibleRect: whole, slices: [
-            StudentPageSlice(pageIndex: pageIndex, page: page, drawing: drawing, inkRevision: inkRevision, frame: whole)
+            StudentPageSlice(pageIndex: pageIndex, page: page, drawing: drawing, inkRevision: inkRevision, frame: whole,
+                             answerPage: answerPage)
         ], margin: MirrorGeometry.fullPageMargin)
     }
 
@@ -119,6 +126,107 @@ enum StudentViewError: Error, Equatable {
     case teacherCopyIsPrivate
 }
 
+// MARK: - Showing the Teacher copy to the class (EP130)
+
+/// Which copy of the open worksheet the class sees. The student copy unless the teacher swaps it.
+enum ClassCopy: String, Equatable, Sendable {
+    case student, teacher
+
+    var title: String { self == .student ? "Student copy" : "Teacher copy" }
+    var other: ClassCopy { self == .student ? .teacher : .student }
+}
+
+/// The teacher's deliberate choice to show one worksheet's paired Teacher copy to the class (EP130). It is the only
+/// way the Teacher copy's pages can reach the student view: `TeacherCopyFrame` takes one, and only
+/// `PresentationState.setClassCopy` makes one, from the Teacher copy paired with the open Student worksheet.
+struct TeacherCopyReveal {
+    /// The Student worksheet it answers. The reveal applies only while that worksheet is shown.
+    let worksheetID: UUID
+    /// The Teacher copy's pages, opened read-only from the paired copy's file.
+    let pdf: PDFDocument
+    /// Names this reveal's pages on the Mac (Present's session), so the Mac never puts the worksheet's ink on them.
+    let instanceID = UUID()
+
+    fileprivate init(worksheetID: UUID, pdf: PDFDocument) {
+        self.worksheetID = worksheetID
+        self.pdf = pdf
+    }
+}
+
+/// One Teacher copy page the class sees, placed where the Student page it answers sits.
+struct TeacherCopySlice {
+    /// The Teacher copy's PDF page index.
+    private(set) var pageIndex: Int
+    private(set) var page: PDFPage
+    private(set) var frame: CGRect
+}
+
+/// What the class sees while the teacher shows the Teacher copy (EP130): the Teacher copy pages that answer the
+/// Student pages in view, placed and zoomed exactly as those were, with no ink, live ink or laser (none of them was
+/// written on the Teacher copy). When a Student page has no answer page (a page added in Ember Slate) or the two
+/// papers' pages differ in size, the answering page of the focused page is shown whole; with no answer page at all
+/// there is no frame, and the class keeps seeing the Student page.
+struct TeacherCopyFrame {
+    private(set) var reveal: TeacherCopyReveal
+    /// The focused Student page's answer page, in the Teacher copy.
+    private(set) var focusedPageIndex: Int
+    private(set) var visibleRect: CGRect
+    private(set) var margin: CGFloat
+    private(set) var slices: [TeacherCopySlice]
+    var documentID: UUID { reveal.instanceID }
+
+    init?(reveal: TeacherCopyReveal, snapshot: StudentPageSnapshot, framing: StudentFraming) {
+        guard reveal.worksheetID == snapshot.documentID, let focused = snapshot.answerPage,
+              let focusedPage = reveal.pdf.page(at: focused) else { return nil }
+        self.reveal = reveal
+        focusedPageIndex = focused
+        // Following the presenter's view needs every page in view answered by a page of the same size.
+        if let framed = snapshot.framed(framing), framed.margin == 0 {
+            let mapped = framed.slices.compactMap { slice -> TeacherCopySlice? in
+                guard let index = slice.answerPage, let page = reveal.pdf.page(at: index),
+                      Self.sameSize(page.displayedSize, slice.page.displayedSize) else { return nil }
+                return TeacherCopySlice(pageIndex: index, page: page, frame: slice.frame)
+            }
+            if mapped.count == framed.slices.count, Set(mapped.map(\.pageIndex)).count == mapped.count {
+                visibleRect = framed.visibleRect
+                margin = 0
+                slices = mapped
+                return
+            }
+        }
+        let displayed = focusedPage.displayedSize
+        guard displayed.width > 0, displayed.height > 0 else { return nil }
+        let whole = CGRect(origin: .zero, size: displayed)
+        visibleRect = whole
+        margin = MirrorGeometry.fullPageMargin
+        slices = [TeacherCopySlice(pageIndex: focused, page: focusedPage, frame: whole)]
+    }
+
+    /// Whether the student view would draw exactly the same frame for both.
+    func showsSameFrame(as other: TeacherCopyFrame) -> Bool {
+        documentID == other.documentID && focusedPageIndex == other.focusedPageIndex && visibleRect == other.visibleRect
+            && margin == other.margin && slices.map(\.pageIndex) == other.slices.map(\.pageIndex)
+            && slices.map(\.frame) == other.slices.map(\.frame)
+    }
+
+    private static func sameSize(_ a: CGSize, _ b: CGSize) -> Bool {
+        abs(a.width - b.width) <= 1 && abs(a.height - b.height) <= 1
+    }
+}
+
+/// Which copy the class sees, as its own small observable, so the header's swap control follows it without
+/// observing the student model's 30 Hz viewport updates.
+@MainActor
+final class ClassCopyIndicator: ObservableObject {
+    @Published fileprivate(set) var shown = ClassCopy.student
+    /// Whether the teacher's choice to show the Teacher copy is on. It outlasts a page with no answer page, where
+    /// `shown` reads Student, so a tap on the control ends it rather than doing nothing.
+    @Published fileprivate(set) var revealing = false
+
+    /// The copy a tap on the swap control asks for.
+    var tapTarget: ClassCopy { revealing ? .student : .teacher }
+}
+
 /// What the external scene shows besides Paused. Only `.page` carries pixels, and only a Student copy can fill it.
 enum StudentDisplayContent {
     case none
@@ -130,10 +238,14 @@ enum StudentDisplayContent {
 
 @MainActor
 final class StudentDisplayModel: ObservableObject {
-    @Published private(set) var content: StudentDisplayContent = .none
+    @Published private(set) var content: StudentDisplayContent = .none {
+        didSet { refreshClassCopy() }
+    }
     @Published var paused = true
     /// Framing only changes how a published snapshot is drawn; both modes draw from the same role-gated snapshot.
-    @Published var framing: StudentFraming = .presenterPage
+    @Published var framing: StudentFraming = .presenterPage {
+        didSet { refreshClassCopy() }
+    }
     /// Strokes in progress over the published page. Published beside `content`, so the update that brings a stroke's
     /// committed drawing also removes its provisional copy, and the student view never shows both or neither.
     @Published private(set) var liveInk: StudentLiveInk?
@@ -142,7 +254,27 @@ final class StudentDisplayModel: ObservableObject {
     /// The laser's fading trail in Trail mode, gated like the dot. It keeps fading after lift until it is empty.
     @Published private(set) var laserTrail: StudentLaserTrail?
     private var laserTrailTickPending = false
+    /// EP130: set while the teacher shows this worksheet's Teacher copy to the class. Published with the page, so the
+    /// swap lands in one frame on the student view and on the Mac.
+    @Published private(set) var teacherReveal: TeacherCopyReveal? {
+        didSet { refreshClassCopy() }
+    }
+    /// Which copy the class sees, for the iPad's chrome.
+    let classCopy = ClassCopyIndicator()
     var snapshot: StudentPageSnapshot? { content.snapshot }
+    /// What the class sees in place of the Student page while the Teacher copy is shown; nil shows the Student page.
+    var teacherFrame: TeacherCopyFrame? {
+        guard let teacherReveal, let snapshot = content.snapshot else { return nil }
+        return TeacherCopyFrame(reveal: teacherReveal, snapshot: snapshot, framing: framing)
+    }
+    /// The indicator follows what the class actually sees: the Teacher copy only while a reveal is on and the focused
+    /// page has an answer page.
+    private func refreshClassCopy() {
+        let revealing = teacherReveal != nil
+        let shown: ClassCopy = teacherFrame == nil ? .student : .teacher
+        if classCopy.revealing != revealing { classCopy.revealing = revealing }
+        if classCopy.shown != shown { classCopy.shown = shown }
+    }
     private let now: () -> TimeInterval
     private let schedule: MirrorThrottle.Scheduler
 
@@ -165,17 +297,19 @@ final class StudentDisplayModel: ObservableObject {
             if let laserTrail, !laserTrail.belongs(to: next) { clearLaserTrail() }
         }
         catch StudentViewError.teacherCopyIsPrivate {
-            content = .teacherCopyPrivate; setLiveInk(nil); hideLaser(); clearLaserTrail()
+            content = .teacherCopyPrivate; setLiveInk(nil); hideLaser(); clearLaserTrail(); concealTeacherCopy()
         }
-        catch { content = .none; setLiveInk(nil); hideLaser(); clearLaserTrail() } // Never leave a stale page.
+        catch { content = .none; setLiveInk(nil); hideLaser(); clearLaserTrail(); concealTeacherCopy() } // Never leave a stale page.
     }
 
-    /// Called as soon as a document becomes the main page, before any renderer publishes a page.
+    /// Called as soon as a document becomes the main page, before any renderer publishes a page. A new worksheet
+    /// always starts on its Student copy (EP130).
     func opened(_ record: DocumentRecord) {
         content = StudentSafeDocument(record) == nil ? .teacherCopyPrivate : .none
         setLiveInk(nil)
         hideLaser()
         clearLaserTrail()
+        concealTeacherCopy()
     }
 
     func clear() {
@@ -183,6 +317,23 @@ final class StudentDisplayModel: ObservableObject {
         setLiveInk(nil)
         hideLaser()
         clearLaserTrail()
+        concealTeacherCopy()
+    }
+
+    // MARK: Teacher copy for the class (EP130)
+
+    /// Shows `reveal`'s Teacher copy to the class in place of its worksheet's Student pages. Live ink, the laser and
+    /// its trail belong to the Student pages, so they go.
+    func reveal(_ reveal: TeacherCopyReveal) {
+        setLiveInk(nil)
+        hideLaser()
+        clearLaserTrail()
+        teacherReveal = reveal
+    }
+
+    /// Back to the Student copy.
+    func concealTeacherCopy() {
+        if teacherReveal != nil { teacherReveal = nil }
     }
 
     // MARK: Laser pointer (P6)
@@ -190,7 +341,7 @@ final class StudentDisplayModel: ObservableObject {
     /// Shows the laser dot at `location` on `pageIndex`, in that page's ink space. Refused unless the student view is
     /// showing this same Student session's page, so the dot passes the same role gate as ink.
     func pointLaser(session: DocumentSession, pageIndex: Int, location: CGPoint) {
-        guard let snapshot = content.snapshot, snapshot.sessionID == session.instanceID,
+        guard teacherReveal == nil, let snapshot = content.snapshot, snapshot.sessionID == session.instanceID,
               snapshot.documentID == session.record.id,
               let next = try? StudentLaserPointer(session: session, pageIndex: pageIndex, location: location) else {
             return hideLaser()
@@ -206,7 +357,7 @@ final class StudentDisplayModel: ObservableObject {
     /// Trail mode: adds a point at `location` on `pageIndex`, in that page's ink space. Refused, and any trail dropped,
     /// unless the student view is showing this same Student session's page.
     func extendLaserTrail(session: DocumentSession, pageIndex: Int, location: CGPoint) {
-        guard let snapshot = content.snapshot, snapshot.sessionID == session.instanceID,
+        guard teacherReveal == nil, let snapshot = content.snapshot, snapshot.sessionID == session.instanceID,
               snapshot.documentID == session.record.id else { return clearLaserTrail() }
         var trail: StudentLaserTrail
         if let current = laserTrail, current.belongs(to: snapshot) { trail = current }
@@ -246,7 +397,7 @@ final class StudentDisplayModel: ObservableObject {
     /// Starts a provisional stroke on `pageIndex`. Refused unless the student view is showing this same Student
     /// session's page, so live ink passes the same role gate as committed ink.
     func beginLiveStroke(session: DocumentSession, pageIndex: Int, style: LiveInkStyle, points: [CGPoint]) {
-        guard let snapshot = content.snapshot, snapshot.sessionID == session.instanceID,
+        guard teacherReveal == nil, let snapshot = content.snapshot, snapshot.sessionID == session.instanceID,
               snapshot.documentID == session.record.id else { return setLiveInk(nil) }
         var live: StudentLiveInk
         if let current = liveInk, current.belongs(to: snapshot) { live = current }
@@ -307,8 +458,13 @@ final class StudentDisplayModel: ObservableObject {
 @MainActor
 final class PresentationState: ObservableObject {
     let student = StudentDisplayModel()
-    /// Present on Mac (EP93): streams `student` to the paired Companion while the teacher has it on.
-    lazy var present = PresentController(student: student)
+    /// Present on Mac (EP93): streams `student` to the paired Companion while the teacher has it on. Turning it on or
+    /// off puts the class back on the Student copy (EP130).
+    lazy var present: PresentController = {
+        let present = PresentController(student: student)
+        present.onRunningChange = { [weak self] in self?.presentingChanged() }
+        return present
+    }()
     /// The main scene's screen is being captured: Screen Recording, or mirroring to another screen.
     /// Only the pairing camera preview acts on it; answers follow `otherDisplayAttached` (EP54).
     @Published var captureActive = false
@@ -317,7 +473,9 @@ final class PresentationState: ObservableObject {
     /// False from the moment capture starts until the screen list has settled, so a mirrored screen that is not
     /// listed yet still hides the Teacher copy.
     @Published var screensSettled = true
-    @Published var externalSceneCount = 0
+    @Published var externalSceneCount = 0 {
+        didSet { if (oldValue == 0) != (externalSceneCount == 0) { presentingChanged() } }
+    }
     @Published var mainSceneActive = false {
         didSet { student.paused = policy.pauseStudentView }
     }
@@ -331,6 +489,7 @@ final class PresentationState: ObservableObject {
     }
     /// Called by an editor (identified by `owner`) once it knows its worksheet's Teacher copy, or that it has none.
     func showPrivateAnswers(_ url: URL?, owner: UUID) {
+        if url != privateAnswerURL { student.concealTeacherCopy() }
         privateAnswerOwner = owner
         privateAnswerURL = url
     }
@@ -341,6 +500,53 @@ final class PresentationState: ObservableObject {
         guard privateAnswerOwner == owner else { return }
         privateAnswerOwner = nil
         privateAnswerURL = nil
+        revealedDocument = nil
+        student.concealTeacherCopy()
+    }
+
+    // MARK: Which copy the class sees (EP130)
+
+    /// True while the class has a student view: Present on Mac is on, or a projector shows the external scene.
+    var isPresenting: Bool { present.isOn || externalSceneCount > 0 || uiTestPresenting }
+    /// Debug UI tests only: the swap control shows as if presenting, since the Simulator has no Mac to present to.
+    #if DEBUG
+    let uiTestPresenting = ProcessInfo.processInfo.arguments.contains(UITestLaunch.presentingArgument)
+    #else
+    let uiTestPresenting = false
+    #endif
+
+    /// Shows the class `copy` of the worksheet `worksheet`. The Teacher copy is the one paired with it, the same one
+    /// the iPad's panel shows; with none, or a worksheet that is not a Student copy, the class stays on the Student
+    /// copy. Returns what the class sees now.
+    @discardableResult
+    func setClassCopy(_ copy: ClassCopy, worksheet: DocumentRecord) -> ClassCopy {
+        guard copy == .teacher else {
+            student.concealTeacherCopy()
+            return .student
+        }
+        guard StudentSafeDocument(worksheet) != nil, let url = privateAnswerURL else {
+            student.concealTeacherCopy()
+            return .student
+        }
+        if let current = student.teacherReveal, current.worksheetID == worksheet.id { return .teacher }
+        guard let pdf = revealedPDF(url) else { return .student }
+        student.reveal(TeacherCopyReveal(worksheetID: worksheet.id, pdf: pdf))
+        return .teacher
+    }
+
+    /// Presenting started or stopped: either way the class is back on the Student copy, so every presentation starts
+    /// on it, as before EP130.
+    func presentingChanged() {
+        student.concealTeacherCopy()
+    }
+
+    /// The Teacher copy's pages, kept for the worksheet so swapping back and forth does not reopen the file.
+    private var revealedDocument: (url: URL, pdf: PDFDocument)?
+    private func revealedPDF(_ url: URL) -> PDFDocument? {
+        if let revealedDocument, revealedDocument.url == url { return revealedDocument.pdf }
+        guard let pdf = PDFDocument(url: url) else { return nil }
+        revealedDocument = (url, pdf)
+        return pdf
     }
 
     var policy: PresentationPolicy {
@@ -359,7 +565,7 @@ struct StudentDisplayView: View {
                 switch model.content {
                 case .page(let snapshot):
                     StudentPageSurface(snapshot: snapshot, framing: model.framing, liveInk: model.liveInk, laser: model.laser,
-                                       laserTrail: model.laserTrail)
+                                       laserTrail: model.laserTrail, teacher: model.teacherFrame)
                 case .teacherCopyPrivate: Text("Teacher copy · private").font(.largeTitle).foregroundStyle(.white)
                 case .none: StudentIdleMark()
                 }
@@ -389,9 +595,11 @@ private struct StudentPageSurface: UIViewRepresentable {
     let liveInk: StudentLiveInk?
     let laser: StudentLaserPointer?
     let laserTrail: StudentLaserTrail?
+    /// EP130: the Teacher copy pages shown in the Student page's place, while the teacher shows them to the class.
+    var teacher: TeacherCopyFrame?
     func makeUIView(context: Context) -> StudentPageDrawingView { StudentPageDrawingView() }
     func updateUIView(_ uiView: StudentPageDrawingView, context: Context) {
-        uiView.update(snapshot, framing: framing, liveInk: liveInk, laser: laser, laserTrail: laserTrail)
+        uiView.update(snapshot, framing: framing, liveInk: liveInk, laser: laser, laserTrail: laserTrail, teacher: teacher)
     }
 }
 
@@ -420,6 +628,8 @@ final class StudentPageDrawingView: UIView {
     private var liveInk: StudentLiveInk?
     private var laser: StudentLaserPointer?
     private var laserTrail: StudentLaserTrail?
+    /// EP130: while set, its Teacher copy pages are drawn in place of the snapshot's, with no ink, live ink or laser.
+    private var teacher: TeacherCopyFrame?
     let cache = StudentPageImageCache()
 
     override init(frame: CGRect) {
@@ -440,14 +650,20 @@ final class StudentPageDrawingView: UIView {
     required init?(coder: NSCoder) { nil }
 
     func update(_ value: StudentPageSnapshot, framing: StudentFraming, liveInk: StudentLiveInk? = nil,
-                laser: StudentLaserPointer? = nil, laserTrail: StudentLaserTrail? = nil) {
+                laser: StudentLaserPointer? = nil, laserTrail: StudentLaserTrail? = nil, teacher: TeacherCopyFrame? = nil) {
         if snapshot?.documentID != value.documentID || snapshot?.sessionID != value.sessionID { cache.removeAll() }
-        let sameFrame = snapshot.map { $0.showsSameFrame(as: value) } == true && self.framing == framing
+        let sameTeacher = switch (self.teacher, teacher) {
+        case (nil, nil): true
+        case (let old?, let new?): old.showsSameFrame(as: new)
+        default: false
+        }
+        let sameFrame = snapshot.map { $0.showsSameFrame(as: value) } == true && self.framing == framing && sameTeacher
         snapshot = value
         self.framing = framing
         self.liveInk = liveInk
         self.laser = laser
         self.laserTrail = laserTrail
+        self.teacher = teacher
         // A Pencil move changes only the live paths. A new page frame lays everything out in one pass, so a stroke's
         // committed bitmap and the removal of its provisional copy land in the same frame.
         if sameFrame { layoutLiveInk() } else { setNeedsLayout() }
@@ -470,7 +686,7 @@ final class StudentPageDrawingView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        guard let snapshot, let scene = snapshot.framed(framing) else {
+        guard let scene = shownScene() else {
             viewport.isHidden = true
             placedPages = [:]
             layoutLiveInk()
@@ -482,7 +698,7 @@ final class StudentPageDrawingView: UIView {
         let local = CGRect(origin: .zero, size: target.size)
         liveLayer.frame = local
         placedPages = [:]
-        while pageLayers.count < scene.slices.count {
+        while pageLayers.count < scene.pages.count {
             let page = CALayer(); page.backgroundColor = UIColor.white.cgColor
             let ink = CALayer()
             // The ink multiplies into its page, as on the iPad (EP71).
@@ -492,8 +708,8 @@ final class StudentPageDrawingView: UIView {
             pageLayers.append(page); inkLayers.append(ink)
         }
         for (index, (page, ink)) in zip(pageLayers, inkLayers).enumerated() {
-            guard index < scene.slices.count else { page.isHidden = true; ink.isHidden = true; continue }
-            let item = scene.slices[index]
+            guard index < scene.pages.count else { page.isHidden = true; ink.isHidden = true; continue }
+            let item = scene.pages[index]
             let frame = MirrorGeometry.map(item.frame, from: scene.visibleRect, to: local)
             page.isHidden = false; ink.isHidden = false
             page.frame = frame; ink.frame = frame
@@ -501,17 +717,22 @@ final class StudentPageDrawingView: UIView {
             placedPages[item.pageIndex] = (frame, pageSize)
             let scale = MirrorGeometry.rasterScale(pageSize: pageSize, displayedPoints: frame.width,
                                                    screenScale: traitCollection.displayScale)
-            page.contents = cache.image(for: .init(documentID: snapshot.documentID, pageIndex: item.pageIndex, kind: .page, scale: scale)) {
+            page.contents = cache.image(for: .init(documentID: scene.documentID, pageIndex: item.pageIndex, kind: .page, scale: scale)) {
                 Self.rasterise(item.page, size: pageSize, scale: scale)
             }
-            ink.contents = cache.image(for: .init(documentID: snapshot.documentID, pageIndex: item.pageIndex,
-                                                  kind: .ink(session: snapshot.sessionID, revision: item.inkRevision), scale: scale)) {
+            guard let drawing = item.drawing else {
+                // A Teacher copy page shown to the class has no ink (EP130).
+                ink.contents = nil
+                continue
+            }
+            ink.contents = cache.image(for: .init(documentID: scene.documentID, pageIndex: item.pageIndex,
+                                                  kind: .ink(session: scene.sessionID, revision: item.inkRevision), scale: scale)) {
                 // An empty page caches a one-pixel clear bitmap, so blank pages are not re-checked every frame.
-                guard !item.drawing.strokes.isEmpty else { return Self.clearPixel }
+                guard !drawing.strokes.isEmpty else { return Self.clearPixel }
                 // Ink stays light in both themes, as on the iPad's page canvases.
                 var image: CGImage?
                 Self.light.performAsCurrent {
-                    image = item.drawing.image(from: CGRect(origin: .zero, size: pageSize), scale: scale).cgImage
+                    image = drawing.image(from: CGRect(origin: .zero, size: pageSize), scale: scale).cgImage
                 }
                 return image
             }
@@ -519,12 +740,47 @@ final class StudentPageDrawingView: UIView {
         layoutLiveInk()
     }
 
+    /// One page as this view lays it out: the Student page with its ink, or a Teacher copy page with none.
+    private struct ShownPage {
+        let pageIndex: Int
+        let page: PDFPage
+        let frame: CGRect
+        let drawing: PKDrawing?
+        let inkRevision: UInt64
+    }
+
+    /// What this frame draws, and the ids its cached bitmaps are kept under.
+    private struct ShownScene {
+        let documentID: UUID
+        let sessionID: UUID
+        let visibleRect: CGRect
+        let margin: CGFloat
+        let pages: [ShownPage]
+    }
+
+    /// The Teacher copy shown to the class wins over the Student page it stands in for (EP130).
+    private func shownScene() -> ShownScene? {
+        if let teacher {
+            return ShownScene(documentID: teacher.documentID, sessionID: teacher.documentID, visibleRect: teacher.visibleRect,
+                              margin: teacher.margin, pages: teacher.slices.map {
+                                  ShownPage(pageIndex: $0.pageIndex, page: $0.page, frame: $0.frame, drawing: nil, inkRevision: 0)
+                              })
+        }
+        guard let snapshot, let framed = snapshot.framed(framing) else { return nil }
+        return ShownScene(documentID: snapshot.documentID, sessionID: snapshot.sessionID, visibleRect: framed.visibleRect,
+                          margin: framed.margin, pages: framed.slices.map {
+                              ShownPage(pageIndex: $0.pageIndex, page: $0.page, frame: $0.frame, drawing: $0.drawing,
+                                        inkRevision: $0.inkRevision)
+                          })
+    }
+
     /// Draws the provisional strokes of the shown document over their pages; strokes on pages not in view are skipped.
     private func layoutLiveInk() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        let strokes = (snapshot.flatMap { snapshot in liveInk.flatMap { $0.belongs(to: snapshot) ? $0 : nil } })?.strokes.strokes ?? []
+        let strokes = teacher != nil ? []
+            : (snapshot.flatMap { snapshot in liveInk.flatMap { $0.belongs(to: snapshot) ? $0 : nil } })?.strokes.strokes ?? []
         while liveStrokeLayers.count < strokes.count {
             let shape = CAShapeLayer()
             shape.fillColor = nil
@@ -553,7 +809,7 @@ final class StudentPageDrawingView: UIView {
 
     /// Draws the trail over its pages at the trail's own time; pieces on pages not in view are skipped.
     private func layoutLaserTrail() {
-        guard let snapshot, let laserTrail, laserTrail.belongs(to: snapshot) else { return laserTrailLayer.clear() }
+        guard teacher == nil, let snapshot, let laserTrail, laserTrail.belongs(to: snapshot) else { return laserTrailLayer.clear() }
         let pieces = laserTrail.trail.pieces(now: laserTrail.time).compactMap { piece -> (from: CGPoint, to: CGPoint, opacity: Double)? in
             guard let placed = placedPages[piece.place] else { return nil }
             let ends = LiveInkGeometry.map([piece.from, piece.to], pageSize: placed.pageSize, onto: placed.frame)
@@ -565,7 +821,7 @@ final class StudentPageDrawingView: UIView {
 
     /// Places the laser dot over its page; a dot on a page not in view is not drawn.
     private func layoutLaser() {
-        guard let snapshot, let laser, laser.belongs(to: snapshot), let placed = placedPages[laser.pageIndex],
+        guard teacher == nil, let snapshot, let laser, laser.belongs(to: snapshot), let placed = placedPages[laser.pageIndex],
               let center = LiveInkGeometry.map([laser.location], pageSize: placed.pageSize, onto: placed.frame).first,
               placed.frame.contains(center) else {
             laserLayer.isHidden = true

@@ -8,8 +8,16 @@ import Foundation
 /// It describes the screen; it carries no pixels. Committed ink is named by page and ink revision, so a sender can
 /// attach each page's `PKDrawing.dataRepresentation()` once per revision instead of with every scroll frame.
 /// It holds no title, folder, subject, answer URL or chrome state: the library and a Teacher copy reach it only as
-/// the bare `.idle` and `.teacherCopyPrivate` cases.
+/// the bare `.idle` and `.teacherCopyPrivate` cases, unless the teacher swaps the class onto the Teacher copy (EP130),
+/// when a page arrives marked `role == .teacher`.
 public struct PresentedView: Equatable, Codable, Sendable {
+    /// Whose pages a `.page` shows (EP130). The class sees the Student copy unless the teacher swaps it onto the
+    /// Teacher copy. Anything that keeps or passes frames on (a lesson recording) must hold back `.teacher` pages:
+    /// `showsTeacherCopy` says whether this view is one.
+    public enum Role: String, Equatable, Codable, Sendable {
+        case student, teacher
+    }
+
     public enum Screen: Equatable, Codable, Sendable {
         /// No worksheet is open (the library): the Ember mark alone.
         case idle
@@ -34,9 +42,14 @@ public struct PresentedView: Equatable, Codable, Sendable {
         public var liveStrokes: [LiveStroke]
         public var laser: Laser?
         public var laserTrail: [TrailPiece]
+        /// The Teacher copy's pages, shown to the class on purpose (EP130), or the Student copy's. A page sent by an
+        /// iPad from before EP130 has no role and reads as `.student`, which is all it could show.
+        public var role: Role
 
         public init(documentID: UUID, framing: String, focusedPageIndex: Int, visibleRect: CGRect, margin: CGFloat,
-                    pages: [PlacedPage], liveStrokes: [LiveStroke], laser: Laser?, laserTrail: [TrailPiece]) {
+                    pages: [PlacedPage], liveStrokes: [LiveStroke], laser: Laser?, laserTrail: [TrailPiece],
+                    role: Role = .student) {
+            self.role = role
             self.documentID = documentID
             self.framing = framing
             self.focusedPageIndex = focusedPageIndex
@@ -46,6 +59,39 @@ public struct PresentedView: Equatable, Codable, Sendable {
             self.liveStrokes = liveStrokes
             self.laser = laser
             self.laserTrail = laserTrail
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case documentID, framing, focusedPageIndex, visibleRect, margin, pages, liveStrokes, laser, laserTrail, role
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            documentID = try container.decode(UUID.self, forKey: .documentID)
+            framing = try container.decode(String.self, forKey: .framing)
+            focusedPageIndex = try container.decode(Int.self, forKey: .focusedPageIndex)
+            visibleRect = try container.decode(CGRect.self, forKey: .visibleRect)
+            margin = try container.decode(CGFloat.self, forKey: .margin)
+            pages = try container.decode([PlacedPage].self, forKey: .pages)
+            liveStrokes = try container.decode([LiveStroke].self, forKey: .liveStrokes)
+            laser = try container.decodeIfPresent(Laser.self, forKey: .laser)
+            laserTrail = try container.decode([TrailPiece].self, forKey: .laserTrail)
+            role = try container.decodeIfPresent(Role.self, forKey: .role) ?? .student
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(documentID, forKey: .documentID)
+            try container.encode(framing, forKey: .framing)
+            try container.encode(focusedPageIndex, forKey: .focusedPageIndex)
+            try container.encode(visibleRect, forKey: .visibleRect)
+            try container.encode(margin, forKey: .margin)
+            try container.encode(pages, forKey: .pages)
+            try container.encode(liveStrokes, forKey: .liveStrokes)
+            try container.encodeIfPresent(laser, forKey: .laser)
+            try container.encode(laserTrail, forKey: .laserTrail)
+            // Always written, so every frame says whose pages it carries.
+            try container.encode(role, forKey: .role)
         }
     }
 
@@ -105,4 +151,9 @@ public struct PresentedView: Equatable, Codable, Sendable {
     public var screen: Screen
 
     public init(screen: Screen) { self.screen = screen }
+
+    /// True when this view shows the Teacher copy's pages to the class (EP130). A lesson recording holds these back.
+    public var showsTeacherCopy: Bool {
+        if case .page(let page) = screen { page.role == .teacher } else { false }
+    }
 }
