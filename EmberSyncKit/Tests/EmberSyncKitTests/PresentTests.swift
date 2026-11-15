@@ -58,6 +58,96 @@ struct PresentTests {
         }
     }
 
+    // MARK: The Teacher copy shown to the class (EP130)
+
+    /// A page says whose it is on the wire, every time, so a recorder on the Mac can hold back the Teacher copy; a
+    /// page from an iPad before EP130 has no role and reads as the Student copy, which is all it could show.
+    @Test func everyPageCarriesItsRoleAndAnOlderPageReadsAsStudent() throws {
+        let worksheet = FakeWorksheet()
+        let student = worksheet.view(page: 0)
+        #expect(!student.showsTeacherCopy)
+        var teacher = student
+        guard case .page(var page) = teacher.screen else { Issue.record("no page"); return }
+        #expect(page.role == .student)
+        page.role = .teacher
+        teacher.screen = .page(page)
+        #expect(teacher.showsTeacherCopy)
+        for screen: PresentedView.Screen in [.idle, .paused, .teacherCopyPrivate] {
+            #expect(!PresentedView(screen: screen).showsTeacherCopy)
+        }
+
+        for view in [student, teacher] {
+            var update = PresentUpdate(seq: 1)
+            update.frame = PresentFrame(view: view, session: UUID(), pages: [])
+            let decoded = try PresentCodec.decodeUpdate(PresentCodec.encode(update))
+            #expect(decoded.frame?.view == view)
+            #expect(decoded.frame?.view.showsTeacherCopy == view.showsTeacherCopy)
+            #expect(try JSONDecoder().decode(PresentedView.self, from: JSONEncoder().encode(view)) == view)
+        }
+
+        // The student role is written too, not left implied.
+        let written = try JSONSerialization.jsonObject(with: JSONEncoder().encode(page)) as? [String: Any]
+        #expect(written?["role"] as? String == "teacher")
+        var studentPage = page
+        studentPage.role = .student
+        let studentWritten = try JSONSerialization.jsonObject(with: JSONEncoder().encode(studentPage)) as? [String: Any]
+        #expect(studentWritten?["role"] as? String == "student")
+
+        // An iPad from before EP130 sends no role.
+        var older = try #require(studentWritten)
+        older["role"] = nil
+        let olderPage = try JSONDecoder().decode(PresentedView.Page.self, from: JSONSerialization.data(withJSONObject: older))
+        #expect(olderPage.role == .student)
+        #expect(olderPage == studentPage)
+    }
+
+    /// Swapping the class onto the Teacher copy resends the frame marked as the teacher's, under its own session, so
+    /// the Mac drops the worksheet's ink rather than drawing it over the answers; swapping back brings the Student
+    /// page and its ink back whole.
+    @Test func swappingToTheTeacherCopyAndBackKeepsInkOffTheAnswers() throws {
+        let worksheet = FakeWorksheet()
+        worksheet.commit(page: 1, strokes: 3)
+        var encoder = PresentEncoder()
+        var scene = PresentScene()
+        scene.linkOpened()
+        encoder.resnapshot(heldAssets: [])
+        let first = try next(&encoder, worksheet.input(page: 1), now: 0)
+        #expect(scene.apply(first) == .applied)
+        #expect(scene.ink[1]?.revision == worksheet.revision(1))
+        #expect(scene.presented?.showsTeacherCopy == false)
+
+        // The Teacher copy's page 2, on its own paper and session, with no ink.
+        let answers = PresentAsset(kind: .pdf, bytes: Data("%PDF-synthetic-answers".utf8))
+        var teacherView = worksheet.view(page: 1)
+        guard case .page(var page) = teacherView.screen else { Issue.record("no page"); return }
+        page.documentID = UUID()
+        page.role = .teacher
+        page.pages = page.pages.map { .init(pageIndex: $0.pageIndex, frame: $0.frame, inkRevision: 0) }
+        teacherView.screen = .page(page)
+        let reveal = UUID()
+        let teacherInput = PresentInput(view: teacherView, session: reveal, pages: [
+            1: (PresentPageRef(pageIndex: 1, asset: answers.hash, size: CGSize(width: 612, height: 792)), { @Sendable in answers })
+        ])
+        let swapped = try next(&encoder, teacherInput, now: 0.02)
+        #expect(swapped.frame?.view.showsTeacherCopy == true)
+        #expect(swapped.frame?.session == reveal)
+        #expect(swapped.assets == [answers])
+        #expect(swapped.ink.isEmpty)
+        #expect(scene.apply(swapped) == .applied)
+        #expect(scene.presented?.showsTeacherCopy == true)
+        #expect(scene.ink.isEmpty, "the worksheet's ink is not drawn on the answers")
+
+        // Back to the Student copy: its frame, unmarked, and its ink whole again.
+        let back = try next(&encoder, worksheet.input(page: 1), now: 0.04)
+        #expect(back.frame?.view.showsTeacherCopy == false)
+        #expect(back.frame?.session == worksheet.session)
+        #expect(back.assets.isEmpty, "the Mac still holds the worksheet's paper")
+        #expect(back.ink.map(\.mode) == [.replace])
+        #expect(scene.apply(back) == .applied)
+        #expect(scene.ink[1]?.revision == worksheet.revision(1))
+        #expect(scene.presented == worksheet.view(page: 1))
+    }
+
     // MARK: Deltas and sequencing
 
     @Test func deltasCarryOnlyWhatChangedAndAGapAsksForASnapshot() throws {

@@ -19,6 +19,9 @@ enum UITestLaunch {
     /// EP121: a relaunch with this keeps the library and every remembered place from the launch before.
     static let keepArgument = "-EmberPadUITestKeepLibrary"
     static let secondTitle = "Second Notebook"
+    /// EP130: launched with this as well, the worksheet behaves as if it were being presented (the Simulator has no Mac
+    /// to present to), so the header offers the swap between the Student copy and the Teacher copy.
+    static let presentingArgument = "-EmberPadUITestPresenting"
     static let notebookPages = 6
 
     /// Call before the library opens.

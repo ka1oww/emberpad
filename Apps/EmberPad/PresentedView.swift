@@ -11,6 +11,14 @@ extension StudentDisplayModel {
         case .none: return PresentedView(screen: .idle)
         case .teacherCopyPrivate: return PresentedView(screen: .teacherCopyPrivate)
         case .page(let snapshot):
+            // EP130: the Teacher copy the teacher chose to show, marked as the teacher's so a recording holds it back.
+            if let teacher = teacherFrame {
+                return PresentedView(screen: .page(.init(
+                    documentID: teacher.documentID, framing: framing.rawValue, focusedPageIndex: teacher.focusedPageIndex,
+                    visibleRect: teacher.visibleRect, margin: teacher.margin,
+                    pages: teacher.slices.map { .init(pageIndex: $0.pageIndex, frame: $0.frame, inkRevision: 0) },
+                    liveStrokes: [], laser: nil, laserTrail: [], role: .teacher)))
+            }
             guard let framed = snapshot.framed(framing) else { return PresentedView(screen: .idle) }
             let shown = Set(framed.slices.map(\.pageIndex))
             let strokes = liveInk.flatMap { $0.belongs(to: snapshot) ? $0.strokes.strokes : nil } ?? []
