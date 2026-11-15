@@ -9,11 +9,11 @@ Base code for a personal offline iPad teaching app. The Ember House colour token
 | Path | Responsibility |
 | --- | --- |
 | `EmberPad.xcodeproj` | iPad app, macOS Companion, iOS and macOS unit-test bundles, iOS UI-test bundle and inert `resign` aggregate target; local package dependency |
-| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink, student-display scene, the pairing-code scanner, the Mac sync client with its one-way ink backup, and Present on Mac |
-| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, the sync server and its header status line, the ink backup folder, an Open at login switch, a renewal placeholder and the Present on Mac presentation window, plus the Debug-only peer-to-peer hello listener |
+| `Apps/EmberPad` | SwiftUI library with UIKit PDFKit/PencilKit page overlays, model-owned ink, student-display scene, the pairing-code scanner, the Mac sync client with its one-way ink backup, and Present on Mac with its Start and End lesson controls |
+| `Apps/Companion` | macOS menu-bar window: Drive EMBER source folder, document counts per subject with a not-read list, iPad pairing code, the sync server and its header status line, the ink backup folder, an Open at login switch, a renewal placeholder, the Present on Mac presentation window and the lesson recorder, plus the Debug-only peer-to-peer hello listener |
 | `Apps/EmberPadTests` | iOS unit tests of app-layer logic, hosted by the EmberPad app |
 | `Apps/EmberPadCompanionTests` | macOS unit tests of the Companion, hosted by the Companion app (which then starts none of its models) |
-| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, the Debug-only peer-to-peer hello framing and transport, pairing credentials with their Keychain store and TLS-PSK connection parameters, the macOS sync server and ink backup folder, the iPad's Bonjour connector, sync download and ink backup, the Present on Mac messages and link, and tests |
+| `EmberSyncKit` | Swift package target: validated manifests, streaming SHA-256, update planning, disk storage, expiry parser, the macOS Drive EMBER library reader, the transport-agnostic sync wire protocol, the Debug-only peer-to-peer hello framing and transport, pairing credentials with their Keychain store and TLS-PSK connection parameters, the macOS sync server and ink backup folder, the iPad's Bonjour connector, sync download and ink backup, the Present on Mac messages and link, the lesson recording's record, picture rule, audio health and video writer, and tests |
 | `Config/Shared.xcconfig` | Final `EMBERPAD_BUNDLE_ID` `io.github.ka1oww.emberpad` for the iPad app; the Companion target appends `.companion` so it never shares the iPad's App ID |
 | `resign` | Uninstalled renewal script with its optional Outbox delivery, format helpers, disabled example config and LaunchAgent template |
 
@@ -119,6 +119,8 @@ Version 2 adds one upload, PUT, used only by the ink backup and only from the iP
 Version 3 adds one small question, GET_DIGEST (EP91). The iPad sends a request id (a 9-byte frame) and the Mac answers DIGEST with the SHA-256 of the manifest's `ManifestCodec` JSON, exactly the bytes a MANIFEST would carry (a 41-byte frame), or a request ERROR `unavailable` before **Prepare** has run. The Mac reads the manifest afresh for each GET_DIGEST, as for GET_MANIFEST. A sync writes those same bytes as its downloaded manifest, so the digest equals the library's applied-delivery receipt once that manifest is filed. Every peer still offers versions 1 and 2: the iPad sends GET_DIGEST only when version 3 was negotiated, and a session at version 1 or 2 treats one as a protocol violation.
 
 Version 4 adds Present on Mac (EP93): PRESENT (type 17, iPad to Mac, up to 16 MiB) carries one encoded `PresentUpdate`, and PRESENT_REPLY (type 18, Mac to iPad, up to 64 KiB) carries one `PresentReply`. They are opaque to the wire session; `PresentMessages.swift` defines their contents (below). Every peer still offers versions 1 to 3. The iPad sends PRESENT only when version 4 was negotiated, a session at version 1 to 3 treats one as a protocol violation, and a Companion from before EP93 never receives one: the iPad's HELLO tells it the Mac is older and it says so. Sync, GET_DIGEST and the ink backup are unchanged.
+
+Version 5 adds lesson recording (EP129) and no frame type: on a version-5 link a `PresentUpdate` may also carry the open document's name and role (`d`) and the teacher's Start or End lesson (`c`), and a `PresentReply` may be the Mac's lesson status. Unknown keys are ignored by a version-4 decoder, but the iPad still sends them only on a version-5 link, and the Mac sends a lesson status only to a version-5 iPad, so an older peer on either side presents exactly as before. Every peer still offers versions 1 to 4.
 
 Flow control is per transfer credit: the server sends only bytes the client has granted, chunked to the smaller of both peers' limits and round-robin across transfers. The client grants WINDOW increments only as the app reports bytes written, so a slow writer holds at most one window. The client checks every chunk's offset and credit, hashes the bytes as they arrive and reports a completed file only when the size and SHA-256 both match. CANCEL fails a request at once and discards its late bytes until the server acknowledges. A transfer with credit outstanding and no progress stalls on the client; one the client leaves without credit is dropped by the server. Unknown, out-of-direction and oversized frames are rejected from their headers before their payloads are buffered; malformed payloads are rejected when decoded. These violations close the session with a protocol-violation ERROR. Every length is bounded: chunks to 1 MiB, manifests to 32 MiB and credit to 16 MiB per transfer; concurrent requests are limited by `WireLimits`.
 
@@ -297,9 +299,123 @@ The class sees the Teacher copy page that answers the Student page in view (its 
 
 Every presentation starts on the Student copy, as before EP130: turning Present on Mac on or off, a projector joining or leaving, opening or leaving a worksheet, and losing the paired copy all put the class back on it. The Teacher copy's pages reach the student view only through `TeacherCopyReveal`, which only `PresentationState.setClassCopy` makes, from the copy paired with the open Student worksheet (`TeacherCopyFrame`, in `Presentation.swift`).
 
-**On the Mac.** The Teacher copy goes as ordinary paper under its own session, so the Mac drops the worksheet's ink rather than drawing it over the answers, and it needs no Companion change. Every presented page now says whose it is: `PresentedView.Page.role` is `student` or `teacher`, always written, and `PresentedView.showsTeacherCopy` is true for a Teacher copy page, so anything that keeps or passes frames on, such as a lesson recording, can hold the Teacher copy back. A page from an iPad before EP130 has no role and reads as `student`, which is all it could show.
+**On the Mac.** The Teacher copy goes as ordinary paper under its own session, so the Mac drops the worksheet's ink rather than drawing it over the answers, and it needs no Companion change. Every presented page now says whose it is: `PresentedView.Page.role` is `student` or `teacher`, always written, and `PresentedView.showsTeacherCopy` is true for a Teacher copy page, so anything that keeps or passes frames on can hold the Teacher copy back; the lesson recording (EP129, below) holds every such page. A page from an iPad before EP130 has no role and reads as `student`, which is all it could show.
 
 **Tests.** `PresentTests` (EmberSyncKit) cover the role on the wire and an older page without one, and a swap to the Teacher copy and back keeping the worksheet's ink off the answers. `ClassCopySwapTests` cover the swap on the same page and zoom and back, straddled pages, an added page (and the control reading Student there), every reset to the Student copy, live ink and the laser staying off the Teacher copy, Present sending it as paper only and marked as the teacher's, and the panel's width and grip. `PresentTeacherCopyUITests` drive the swap control and the grip in the Simulator; `-EmberPadUITestPresenting` (Debug only) stands in for Present on Mac being on, since the Simulator has no Mac to present to.
+
+### Lesson recording (EP129)
+
+The Mac Companion records a lesson from its own Present on Mac picture and the BOYA microphone into one file on one clock, in place of Voice Memos and the iPad's screen recording. Nothing is uploaded, edited or processed in EmberPad: the voice stays on the Mac, and the video pipeline picks the lesson up from its folder (below).
+
+**Starting and ending.** On the iPad, while presenting to a Companion that records, the Sharing menu (the AirPlay icon and the More menu, where the old disabled "Record lesson" placeholder was) has **Start lesson**, then **End lesson** with a line "Recording 12:03 · BOYA BY-M1". While the Mac records, every screen of the iPad shows a red **REC 12:03** badge in the bottom-left corner (tap it for End lesson); it is drawn in the main scene only, never on the student view or the Mac's picture. An older Companion gets "Update EmberPad Companion on your Mac to record lessons" and presents as before. The Companion's menu-bar window has a **Lesson recording** section with the same **Start lesson** and **End lesson**, the time and microphone, and **Show recordings**; while it records, its menu-bar icon becomes a record symbol. A command carries an id and is sent again on a new link until the Mac's status names it, so a dropped link neither loses nor repeats it. End lesson pressed while a start is still waiting on the microphone prompt cancels that start: nothing records and the End is reported handled once the Mac is idle. See the iPad's [Start lesson](docs/screenshots/ep129/ipad-start-lesson.png) and [End lesson](docs/screenshots/ep129/ipad-end-lesson.png) rows, the [REC badge and its warning](docs/screenshots/ep129/ipad-rec-badge.png), and the Companion's section [while recording](docs/screenshots/ep129/companion-recording.png) and [when the BOYA is missing](docs/screenshots/ep129/companion-boya-missing.png) (Simulator and test captures with the fake microphone; `testCapturesTheLessonControls` and `testCapturesTheMenuSection` write them to `EP129_SHOTS_DIR`).
+
+Turning Present off on the iPad while the Mac records asks first: **End lesson and stop presenting**, **Stop presenting, keep recording** (end it from the Companion), or Cancel. Leaving the presentation on the Mac (Esc, the Exit control, **Exit presentation**; EP127) only hides the Mac's window and never stops or pauses a recording, and neither does the link dropping or the iPad stopping: the audio goes on and the picture holds (below). Only **End lesson** ends a recording, or quitting the Companion, which first finishes the file and closes `lesson.json` as complete.
+
+**Microphone.** The BOYA is found by name (any input whose name contains "BOYA"), whatever the Mac's default input is. When it is not connected, Start lesson records nothing and asks, on the device it was pressed on: "BOYA microphone not connected", with **Record with built-in mic anyway** and Cancel. The built-in microphone is never used without that choice, and `lesson.json` then says `"preferred": false`. Audio is taken as the microphone delivers it at 48 kHz, mono or stereo as the device has it, with no gain, noise reduction or other processing in-app, and encoded once as AAC at 192 kbit/s per channel. If the BOYA is unplugged during a lesson and plugged in again, recording from it resumes by itself. The Companion's Info.plist declares `NSMicrophoneUsageDescription`, so macOS asks for microphone access the first time a lesson starts; if it is off, the Companion and the iPad say so and nothing records.
+
+**Picture.** The picture is drawn by a second, offscreen copy of the presentation canvas from the same PRESENT frames as the projector, never captured from the screen, so it holds only worksheet pages and ink: no library, menus, Exit control, status light or other apps. 1920 by 1080, H.264, a new frame whenever the picture changes up to 30 a second and at least one a second when it is still. Before the iPad presents, after it stops, and in the library, the recording shows the neutral card (the Ember star on black).
+
+**Teacher copy.** The recording never shows a Teacher copy. Each frame is checked on its own (`LessonPicture`): a page marked as the Teacher copy's (`PresentedView.Page.role == .teacher`, which the iPad sets when the teacher swaps the class onto the Teacher copy; EP130, above) is never recorded, whatever the link version; otherwise a page is recorded only when its document is one the iPad named as a Student copy. A Teacher copy, a swapped-in Teacher copy page, or a page whose document the Mac was not told about holds the last Student frame instead (the neutral card if there was none), while the audio carries on. **Paused** and **Teacher copy · private** hold the last Student frame too. The rule is keyed on each frame, not on what the projector may show, so the projector showing the Teacher copy (EP130) never puts it in the recording. The live projector is unchanged. `lesson.json` lists the Teacher copy's name and times, so the pipeline knows what was open; a Teacher copy swapped in for the class is listed under its worksheet's `id` with the role `teacher` and its own times.
+
+**Audio health.** The Companion checks the microphone once a second. Digital silence (every sample below -80 dBFS) or no audio at all (unplugged, or nothing for 2 s) for 60 s raises a warning on the Mac (the menu-bar icon turns to a warning triangle, and the section says "Microphone silent for 3 minutes" or "Microphone disconnected for…") and on the iPad (the REC badge turns amber with the same words). It clears when sound comes back. Every warning is kept in `lesson.json`. While the microphone sends nothing the audio track is filled with silence, so it stays as long as the picture and in step with it.
+
+**Robustness.** The video is a fragmented MP4 that closes a fragment every 2 seconds, and `lesson.json` is rewritten (atomically) every 5 seconds and at every change, so a crash, a forced quit or power loss loses at most the last 2 seconds: the file plays up to its last fragment. At the next launch the Companion closes any lesson left "recording" as `"interrupted"`, at its last write, once nothing has written to it for 60 s (so another running Companion's live lesson is never closed). While recording, the Companion keeps the Mac from idle sleep. If the Mac sleeps anyway (the lid closed), the file is finished as the Mac sleeps and recording continues in a new file, `lesson-2.mp4`, when it wakes. If the encoder fails, the next file starts at once; if a new file cannot be started (for example the disk is full), the Mac and the iPad show a warning, `lesson.json` records a `notRecording` warning, and the Companion tries again on the next second without numbering a new file each time.
+
+#### Output contract
+
+Each lesson lands in its own folder, named for the Mac's local time when it started:
+
+```
+~/EmberRecordings/<YYYY-MM-DD>_<HHMM>/       e.g. ~/EmberRecordings/2026-11-16_1430/
+  lesson.mp4        the lesson; lesson-2.mp4, lesson-3.mp4… only after the Mac slept or the encoder restarted
+  lesson.json       the record below
+```
+
+A second lesson started in the same minute gets `_1430-2`, and so on. A folder is finished when its `lesson.json` says `"status": "complete"` or `"interrupted"`; while it says `"recording"` the Companion is still writing it (read nothing until then, or expect it to grow). Each MP4 holds one H.264 video track and one AAC-LC audio track that start together at the file's start; files follow one another on the lesson's timeline at their `startOffset`, and a gap between them is time the Mac was asleep.
+
+`lesson.json` is UTF-8 JSON with sorted keys. Times are ISO 8601 in UTC with milliseconds and a `Z` (for example `"2026-11-16T06:30:00.000Z"`); offsets are seconds since `startedAt`, rounded to the millisecond, on the same clock as the video, so an offset is the time in the lesson's video. A key whose value is not known yet is absent, never `null`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema` | string | `"emberpad.lesson/1"`. A later incompatible change gets a new name. |
+| `status` | string | `"recording"` while the Companion writes it, `"complete"` after End lesson or quit, `"interrupted"` when it was closed at the next launch after the Companion stopped without finishing. |
+| `startedAt` | time | When recording started. |
+| `endedAt` | time | When it ended; absent while recording. |
+| `updatedAt` | time | When this record was last written. |
+| `timeZone` | string | The Mac's time zone, an IANA name such as `"Asia/Singapore"`. |
+| `utcOffset` | string | That zone's offset from UTC at `startedAt`, such as `"+08:00"`. |
+| `startedFrom` | string | `"ipad"` or `"mac"`: where Start lesson was pressed. |
+| `microphone.name` | string | The input device recorded, as macOS names it, such as `"BOYA BY-M1"`. |
+| `microphone.preferred` | boolean | True for the BOYA; false when the teacher chose the built-in microphone because the BOYA was missing. |
+| `microphone.sampleRate` | number | Hz, `48000`. |
+| `microphone.channels` | integer | 1 or 2, as the device delivers. |
+| `video.codec` | string | `"h264"`. |
+| `video.width`, `video.height` | integer | `1920`, `1080`. |
+| `video.maxFrameRate` | integer | `30`: frames come when the picture changes, at least one a second, so the rate varies up to this. |
+| `audio.codec` | string | `"aac"` (AAC-LC). |
+| `audio.sampleRate` | number | Hz, `48000`. |
+| `audio.channels` | integer | As `microphone.channels`. |
+| `audio.bitRate` | integer | Bits per second, `192000` per channel. |
+| `files` | array | The video files in order. |
+| `files[].name` | string | `"lesson.mp4"`, then `"lesson-2.mp4"`… |
+| `files[].startedAt`, `files[].endedAt` | time | When the file's recording started and ended; `endedAt` is absent while it records. |
+| `files[].startOffset`, `files[].endOffset` | number | The same on the lesson's timeline. |
+| `files[].interrupted` | boolean | Present, and true, only on a file that was cut off by a crash; it plays up to its last fragment. |
+| `documents` | array | Every document open on the iPad while recording, in the order first opened, Teacher copies included. Empty when the iPad's EmberPad is too old to say. |
+| `documents[].id` | string | The document's UUID in the iPad library. A worksheet's Teacher copy swapped in for the class (EP130) is listed under the worksheet's UUID, with the role `"teacher"`, as an entry of its own. |
+| `documents[].title` | string | Its title, as the library shows it. |
+| `documents[].subject` | string | Its subject, such as `"H2 Chemistry"`. |
+| `documents[].classTag` | string | Its class, such as `"MI PU3"`; absent when the library has none. |
+| `documents[].role` | string | `"student"` or `"teacher"`. A Teacher copy's pages are never in the video. |
+| `documents[].ranges` | array | Each time it was open: `from` and `to` (times), `startOffset` and `endOffset` (numbers). `to` and `endOffset` are absent while it is open. |
+| `audioWarnings` | array | Each audio-health warning, in order. Empty when there was none. |
+| `audioWarnings[].kind` | string | `"silent"` (digital silence), `"disconnected"` (unplugged, or no audio) or `"notRecording"` (no video file could be written, so picture and sound were not kept). |
+| `audioWarnings[].from`, `audioWarnings[].to` | time | When the problem began (the last sound before it) and when sound came back or the lesson ended; `to` is absent while it lasts. |
+| `audioWarnings[].warnedAt` | time | When the warning was raised, about 60 s after `from`. |
+| `audioWarnings[].startOffset`, `audioWarnings[].endOffset` | number | `from` and `to` on the lesson's timeline. |
+
+A complete example (synthetic):
+
+```json
+{
+  "audio" : { "bitRate" : 192000, "channels" : 1, "codec" : "aac", "sampleRate" : 48000 },
+  "audioWarnings" : [
+    { "endOffset" : 3125.5, "from" : "2026-11-16T07:11:05.250Z", "kind" : "silent", "startOffset" : 2465.25,
+      "to" : "2026-11-16T07:22:05.500Z", "warnedAt" : "2026-11-16T07:12:05.250Z" }
+  ],
+  "documents" : [
+    { "classTag" : "MI PU3", "id" : "0D8C4E2A-1C1B-4B7E-9D5A-5E9A7B6C0001", "role" : "student", "subject" : "H2 Chemistry",
+      "title" : "Organic Chemistry Tutorial 3",
+      "ranges" : [
+        { "endOffset" : 1800, "from" : "2026-11-16T06:30:02.000Z", "startOffset" : 2, "to" : "2026-11-16T07:00:00.000Z" },
+        { "endOffset" : 5400, "from" : "2026-11-16T07:02:00.000Z", "startOffset" : 1920, "to" : "2026-11-16T08:00:00.000Z" }
+      ] },
+    { "classTag" : "MI PU3", "id" : "0D8C4E2A-1C1B-4B7E-9D5A-5E9A7B6C0002", "role" : "teacher", "subject" : "H2 Chemistry",
+      "title" : "Organic Chemistry Tutorial 3 (Teacher)",
+      "ranges" : [
+        { "endOffset" : 1920, "from" : "2026-11-16T07:00:00.000Z", "startOffset" : 1800, "to" : "2026-11-16T07:02:00.000Z" }
+      ] }
+  ],
+  "endedAt" : "2026-11-16T08:00:00.000Z",
+  "files" : [
+    { "endOffset" : 5400, "endedAt" : "2026-11-16T08:00:00.000Z", "name" : "lesson.mp4", "startOffset" : 0,
+      "startedAt" : "2026-11-16T06:30:00.000Z" }
+  ],
+  "microphone" : { "channels" : 1, "name" : "BOYA BY-M1", "preferred" : true, "sampleRate" : 48000 },
+  "schema" : "emberpad.lesson/1",
+  "startedAt" : "2026-11-16T06:30:00.000Z",
+  "startedFrom" : "ipad",
+  "status" : "complete",
+  "timeZone" : "Asia/Singapore",
+  "updatedAt" : "2026-11-16T08:00:00.000Z",
+  "utcOffset" : "+08:00",
+  "video" : { "codec" : "h264", "height" : 1080, "maxFrameRate" : 30, "width" : 1920 }
+}
+```
+
+(The Companion writes one key per line; the example is folded for reading.) The schema lives in `LessonRecording.swift` (`LessonRecord`).
+
+**Code and tests.** `LessonRecording.swift` in EmberSyncKit holds the parts with no camera or encoder: the picture rule, audio health, the microphone choice, the folder and `lesson.json`, and recovery; `LessonSegmentWriter.swift` writes one fragmented MP4; `PresentLesson.swift` defines the version-5 messages. `CompanionLesson.swift` is the recorder. `LessonRecordingTests` (EmberSyncKit) cover the messages and an older peer on each side, the redaction of a Teacher copy, an unknown document, Paused and the placeholder, the warning timer, the BOYA choice, every `lesson.json` key and value, recovery as interrupted, and a real encoder's file copied mid-recording (what an abrupt stop leaves) playing up to its last fragment. `LessonRecorderTests` (EmberPadCompanionTests) record real files from synthetic PRESENT frames and a synthetic 440 Hz microphone: a whole lesson started and ended from the iPad with the Mac's window left midway, every frame checked for the Teacher copy's red paper; the BOYA missing (asked first, the built-in microphone only when chosen); microphone access off; a microphone going silent and then unplugged (both warn on the Mac and the iPad, both land in `lesson.json`, and the audio stays as long as the video); and an older iPad. `PresentLessonTests` (EmberPadTests) drive the iPad's controller against a real `PresentHost`. A Debug Companion launched with `-EmberLessonFakeAudio boya` (or `builtin`, to see the BOYA question) uses the synthetic microphone, `-EmberLessonFakeSilenceAfter N` silences it, `-EmberLessonFakeRecordFor N` starts a lesson two seconds after launch and ends it N seconds later, and `-EmberLessonRoot <folder>` records somewhere other than `~/EmberRecordings`; with `-EmberPresentFake YES` that is a whole lesson with no iPad, no BOYA and no microphone prompt. The real BOYA, the microphone prompt and the Mac sleeping mid-lesson need the device check.
 
 ### Peer-to-peer hello (Debug only)
 
@@ -320,8 +436,9 @@ The library reads `embedded.mobileprovision` best-effort: amber at 48 hours or l
 - Fountain-pen feel; option A ink quality at 1x and 2x; Pencil model and double-tap; lasso/eraser expectations; undo after moving between pages.
 - External-display sharing/recording method and capture tests; Mirror Presenter Page smoothness, memory and framing on the iPad and MacBook.
 - Present on Mac with the iPad carried around the class: range, how quickly it reconnects, and the light on both screens.
+- Lesson recording with the real BOYA: that macOS names it with "BOYA", its channels at 48 kHz, the microphone prompt the first time, a full lesson's file size, closing the lid mid-lesson, and that the video pipeline reads `lesson.json` as documented.
 - Live-ink latency from Pencil to the MacBook, and the look of the uniform provisional stroke against the committed one, on the iPad.
-- Joint planning before phase 2+: iCloud/Drive, external-scene recording, in-app restore of backed-up ink, library export, lasso/eraser extras, and any Ember publish hook.
+- Joint planning before phase 2+: iCloud/Drive, in-app restore of backed-up ink, library export, lasso/eraser extras, and any Ember publish hook.
 - The on-device automation trial: same account and approved iPad bundle ID, awake Mac on home Wi-Fi, occasional Xcode reauthentication and one unlock after iPad restarts. Keep iPadOS 26.x until a later version is tested.
 
 No GoodNotes binaries or GPL implementation code are included. Tests use synthetic data and contain no students, contacts or rosters.

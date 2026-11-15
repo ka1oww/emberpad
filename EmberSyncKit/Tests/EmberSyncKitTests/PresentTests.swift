@@ -574,7 +574,7 @@ final class Pump: @unchecked Sendable {
     func stop() { task?.cancel() }
 }
 
-/// In-process Mac ends for `PresentSender`: each connect makes a fresh in-memory pair served by a version-4 session
+/// In-process Mac ends for `PresentSender`: each connect makes a fresh in-memory pair served by a session of `versions`
 /// that hands PRESENT payloads to the real `PresentHost`. `dropAll` cuts every open pair, like walking out of range.
 final class LoopbackServers: @unchecked Sendable {
     private let host: PresentHost
@@ -583,8 +583,13 @@ final class LoopbackServers: @unchecked Sendable {
     private var count = 0
 
     var sendDelay: Duration?
+    /// The versions the Mac end offers; `1...4` plays a Companion from before lesson recording (EP129).
+    let versions: ClosedRange<UInt16>
 
-    init(host: PresentHost) { self.host = host }
+    init(host: PresentHost, versions: ClosedRange<UInt16> = WireProtocol.supportedVersions) {
+        self.host = host
+        self.versions = versions
+    }
 
     var connections: Int { lock.withLock { count } }
 
@@ -595,7 +600,8 @@ final class LoopbackServers: @unchecked Sendable {
             count += 1
         }
         let host = self.host
-        Task { await Self.serve(server, host: host) }
+        let versions = self.versions
+        Task { await Self.serve(server, host: host, versions: versions) }
         if let sendDelay { return SlowTransport(client, delay: sendDelay) }
         return client
     }
@@ -611,6 +617,12 @@ final class LoopbackServers: @unchecked Sendable {
     private final class Link: PresentReplying, @unchecked Sendable {
         let replies: AsyncStream<Data>.Continuation
         let transport: InMemoryWireTransport
+        private let lock = NSLock()
+        private var version = WireProtocol.presentVersion
+        var presentVersion: UInt16 {
+            get { lock.withLock { version } }
+            set { lock.withLock { version = newValue } }
+        }
         init(_ replies: AsyncStream<Data>.Continuation, _ transport: InMemoryWireTransport) {
             self.replies = replies
             self.transport = transport
@@ -619,8 +631,8 @@ final class LoopbackServers: @unchecked Sendable {
         func close() { replies.finish() }
     }
 
-    private static func serve(_ transport: InMemoryWireTransport, host: PresentHost) async {
-        var session = WireServerSession(provider: TestProvider(), now: .now)
+    private static func serve(_ transport: InMemoryWireTransport, host: PresentHost, versions: ClosedRange<UInt16>) async {
+        var session = WireServerSession(provider: TestProvider(), versions: versions, now: .now)
         let (outgoing, continuation) = AsyncStream.makeStream(of: Data.self)
         let link = Link(continuation, transport)
         // One writer, so the transport never sees two senders.
@@ -635,6 +647,7 @@ final class LoopbackServers: @unchecked Sendable {
                     let out = session.receive(input, now: .now)
                     input = Data()
                     if !out.outbound.isEmpty { continuation.yield(out.bytes) }
+                    for case .ready(let version) in out.events { link.presentVersion = version }
                     for case .present(let payload) in out.events { host.received(payload, on: link) }
                     if out.closeTransport { throw WireTestFailure() }
                 } while session.hasPendingInput

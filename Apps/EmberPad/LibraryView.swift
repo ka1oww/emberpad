@@ -88,6 +88,8 @@ struct LibraryView: View {
         }
         .background(DocumentTransitionWindowReader(cover: navigator.cover))
         .tint(Theme.tint)
+        // EP129: the Mac's lesson recording, over every screen.
+        .modifier(PresentLessonChrome(present: presentation.present))
         .sheet(isPresented: $showImport) { ImportWorksheetView(library: library, isPresented: $showImport) }
         .sheet(isPresented: $showPairing) { PairingScannerSheet(pairing: pairing, presentation: presentation) }
         .confirmationDialog("Forget this Mac?", isPresented: $confirmForget, titleVisibility: .visible) {

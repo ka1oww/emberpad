@@ -37,6 +37,14 @@ public struct PresentScene: Sendable {
     public private(set) var live: [(id: UInt32, stroke: PresentedView.LiveStroke)] = []
     public private(set) var laser: PresentedView.Laser?
     public private(set) var trail: [PresentedView.TrailPiece] = []
+    /// Version 5 (EP129): the document open on the iPad, for the lesson's record.
+    public private(set) var document: PresentLessonDocument?
+    /// Version 5 (EP129): every document named on this link, by id, so a frame's `documentID` can be checked
+    /// against its role (`LessonPicture`).
+    public private(set) var documents: [UUID: PresentLessonDocument] = [:]
+    /// The link negotiated version 5, so it names its documents; set by `PresentHost`.
+    public internal(set) var namesDocuments = false
+    public static let maxDocuments = 64
     /// The iPad stopped presenting.
     public private(set) var stopped = false
     public private(set) var lastSeq: UInt64?
@@ -86,6 +94,7 @@ public struct PresentScene: Sendable {
             live = []
             laser = nil
             trail = []
+            document = nil
             stopped = false
         } else {
             guard !awaitingSnapshot else { return .ignored }
@@ -130,6 +139,13 @@ public struct PresentScene: Sendable {
                 live[index].stroke.points += points.points
             case .end(let id):
                 live.removeAll { $0.id == id }
+            }
+        }
+        if let change = update.document {
+            document = change.document
+            if let named = change.document {
+                if documents.count >= Self.maxDocuments, documents[named.id] == nil { documents = [:] }
+                documents[named.id] = named
             }
         }
         if let change = update.laser { laser = change.dot }

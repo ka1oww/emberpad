@@ -185,6 +185,9 @@ public struct WireClientSession: Sendable {
     /// The peer negotiated version 4 or later, so it takes PRESENT.
     public var supportsPresent: Bool { (version ?? 0) >= WireProtocol.presentVersion }
 
+    /// The peer negotiated version 5 or later, so its PRESENT payloads carry lesson recording (EP129).
+    public var supportsLesson: Bool { (version ?? 0) >= WireProtocol.lessonVersion }
+
     /// Version 4: one PRESENT carrying `bytes` (`PresentCodec`), sent outside any request.
     public mutating func present(_ bytes: Data) throws(WireSessionError) -> WireClientOutput {
         guard case .ready = phase else { throw .notReady }

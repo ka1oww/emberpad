@@ -1,6 +1,6 @@
 import Foundation
 
-/// The private EmberPad sync protocol, versions 1 to 4. Frames are `type (1 byte) | payload length (4 bytes,
+/// The private EmberPad sync protocol, versions 1 to 5. Frames are `type (1 byte) | payload length (4 bytes,
 /// big-endian) | payload`, and every integer is big-endian. The client (iPad) opens with HELLO, the server (Mac)
 /// answers HELLO, then the client asks for the manifest and fetches files by SHA-256 with credit-based flow control.
 /// Version 2 adds one upward message family, PUT: the client sends a file to the server (the EP-33 ink backup) with
@@ -8,18 +8,22 @@ import Foundation
 /// highest they share, so a version-1 peer never sees a PUT frame. Version 3 adds one small request, GET_DIGEST: the
 /// SHA-256 of the manifest the server would serve, so the iPad can ask whether the library changed for a few dozen
 /// bytes instead of the whole manifest. Version 4 adds Present (EP93): the iPad streams what its student view shows
-/// as PRESENT frames and the Mac answers with PRESENT_REPLY, on a connection that carries nothing else. The protocol
-/// is transport-agnostic: sessions
+/// as PRESENT frames and the Mac answers with PRESENT_REPLY, on a connection that carries nothing else. Version 5 adds
+/// no frame type: it says the PRESENT payloads may carry lesson recording (EP129), the iPad's Start and End lesson
+/// commands and the open document's name up, and the recording's status down, so an older peer is never sent them.
+/// The protocol is transport-agnostic: sessions
 /// consume and produce bytes and never open a connection themselves.
 public enum WireProtocol {
     public static let magic: [UInt8] = Array("EMBR".utf8)
-    public static let supportedVersions: ClosedRange<UInt16> = 1...4
+    public static let supportedVersions: ClosedRange<UInt16> = 1...5
     /// The first version that carries PUT.
     public static let putVersion: UInt16 = 2
     /// The first version that carries GET_DIGEST.
     public static let digestVersion: UInt16 = 3
     /// The first version that carries PRESENT and PRESENT_REPLY.
     public static let presentVersion: UInt16 = 4
+    /// The first version whose PRESENT payloads carry lesson recording (EP129).
+    public static let lessonVersion: UInt16 = 5
     /// The largest PRESENT payload: one presentation update, which may carry a page's PDF.
     public static let maxPresentBytes: UInt32 = 16_777_216
     /// The largest PRESENT_REPLY payload.

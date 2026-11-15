@@ -55,6 +55,7 @@ public final class PresentLink: @unchecked Sendable {
     private var outbox: AsyncStream<Outgoing>.Continuation?
     private var currentState = State.off
     private var currentGeneration = 0
+    private var currentVersion: UInt16?
     private var accepting = false
     private var queued = 0
     private var currentStats = Stats()
@@ -78,6 +79,10 @@ public final class PresentLink: @unchecked Sendable {
     public var generation: Int { lock.withLock { currentGeneration } }
     /// A connection is negotiated and takes updates.
     public var isAccepting: Bool { lock.withLock { accepting } }
+    /// The version the current connection negotiated, while one is up.
+    public var peerVersion: UInt16? { lock.withLock { accepting ? currentVersion : nil } }
+    /// The Mac on the current connection records lessons (version 5, EP129).
+    public var supportsLesson: Bool { (peerVersion ?? 0) >= WireProtocol.lessonVersion }
 
     public func start() {
         lock.withLock {
@@ -267,7 +272,7 @@ public final class PresentLink: @unchecked Sendable {
                         return .unsupported
                     }
                     lastHeard = clock.now
-                    generation = openGeneration()
+                    generation = openGeneration(version: session.version)
                     onOpened(generation)
                 case .presentReply(let bytes):
                     lastHeard = clock.now
@@ -294,10 +299,11 @@ public final class PresentLink: @unchecked Sendable {
         return .dropped(answered: answered)
     }
 
-    private func openGeneration() -> Int {
+    private func openGeneration(version: UInt16?) -> Int {
         lock.lock()
         defer { lock.unlock() }
         currentGeneration += 1
+        currentVersion = version
         accepting = true
         return currentGeneration
     }
@@ -338,8 +344,13 @@ public final class PresentSender: @unchecked Sendable {
     private var encoding = 0
     private let queue = DispatchQueue(label: "EmberSyncKit.PresentSender", qos: .userInitiated)
 
+    private let onLesson: @Sendable (PresentLessonStatus) -> Void
+
+    /// `onLesson` gets the Mac's lesson recording status (EP129) on the link's own task.
     public init(connect: @escaping PresentLink.Connect, timing: PresentLink.Timing = PresentLink.Timing(),
-                onState: @escaping @Sendable (PresentLink.State) -> Void = { _ in }) {
+                onState: @escaping @Sendable (PresentLink.State) -> Void = { _ in },
+                onLesson: @escaping @Sendable (PresentLessonStatus) -> Void = { _ in }) {
+        self.onLesson = onLesson
         let box = WeakBox<PresentSender>()
         link = PresentLink(connect: connect, timing: timing, onState: onState,
                            onOpened: { generation in box.value?.opened(generation) },
@@ -404,6 +415,7 @@ public final class PresentSender: @unchecked Sendable {
     }
 
     private func replied(_ reply: PresentReply, generation: Int) {
+        if case .lesson(let status) = reply { return onLesson(status) }
         lock.lock()
         defer { lock.unlock() }
         switch reply {
@@ -412,7 +424,7 @@ public final class PresentSender: @unchecked Sendable {
             readyFor = generation
         case .resnapshot(let held):
             encoder.resnapshot(heldAssets: held)
-        case .ack:
+        case .ack, .lesson:
             break
         }
     }
@@ -427,6 +439,13 @@ final class WeakBox<Value: AnyObject>: @unchecked Sendable {
 public protocol PresentReplying: AnyObject, Sendable {
     func reply(_ payload: Data)
     func close()
+    /// The protocol version this connection negotiated; version 5 links take lesson replies (EP129).
+    var presentVersion: UInt16 { get }
+}
+
+extension PresentReplying {
+    /// A link that does not say is a version-4 one, which never sees a lesson reply.
+    public var presentVersion: UInt16 { WireProtocol.presentVersion }
 }
 
 /// The Mac side of Present (EP93): takes updates from whichever connection presents last, keeps the `PresentScene`,
@@ -452,7 +471,11 @@ public final class PresentHost: @unchecked Sendable {
 
     public static let ackInterval: TimeInterval = 0.5
     public let silenceLimit: TimeInterval
+    /// Commands remembered, so one sent again on a new link counts once.
+    static let rememberedCommands = 32
     private let lock = NSLock()
+    private var lessonStatus = PresentLessonStatus.idle
+    private var handledCommands: [UUID] = []
     private var scene = PresentScene()
     private var active: ObjectIdentifier?
     private var activeLink: (any PresentReplying)?
@@ -462,13 +485,32 @@ public final class PresentHost: @unchecked Sendable {
     private var currentStats = Stats()
     private let now: @Sendable () -> TimeInterval
     private let onChange: @Sendable (PresentScene, Status) -> Void
+    private let onLesson: @Sendable (PresentLessonCommand) -> Void
 
+    /// `onLesson` gets each Start or End lesson from the iPad once (EP129), on the caller's thread.
     public init(silenceLimit: TimeInterval = 3, now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-                onChange: @escaping @Sendable (PresentScene, Status) -> Void = { _, _ in }) {
+                onChange: @escaping @Sendable (PresentScene, Status) -> Void = { _, _ in },
+                onLesson: @escaping @Sendable (PresentLessonCommand) -> Void = { _ in }) {
         self.silenceLimit = silenceLimit
         self.now = now
         self.onChange = onChange
+        self.onLesson = onLesson
     }
+
+    /// The lesson recording's status (EP129): sent to the presenting iPad now, if its link takes it, and to every
+    /// version-5 link when it opens.
+    public func setLessonStatus(_ status: PresentLessonStatus) {
+        lock.lock()
+        guard status != lessonStatus else { return lock.unlock() }
+        lessonStatus = status
+        let link = activeLink
+        lock.unlock()
+        if let link, link.presentVersion >= WireProtocol.lessonVersion, let bytes = try? PresentCodec.encode(PresentReply.lesson(status)) {
+            link.reply(bytes)
+        }
+    }
+
+    public var currentLessonStatus: PresentLessonStatus { lock.withLock { lessonStatus } }
 
     public var status: Status { lock.withLock { currentStatus } }
     public var current: PresentScene { lock.withLock { scene } }
@@ -480,7 +522,9 @@ public final class PresentHost: @unchecked Sendable {
         var replies: [PresentReply] = []
         var superseded: (any PresentReplying)?
         var changed: (PresentScene, Status)?
+        var command: PresentLessonCommand?
         let id = ObjectIdentifier(link)
+        let lessonLink = link.presentVersion >= WireProtocol.lessonVersion
         lock.lock()
         let time = now()
         if update.open {
@@ -492,10 +536,18 @@ public final class PresentHost: @unchecked Sendable {
                 currentStats.links += 1
             }
             scene.linkOpened()
+            scene.namesDocuments = lessonLink
             lastHeard = time
             lastAck = time
             replies.append(.ready(heldAssets: scene.heldAssets))
+            if lessonLink { replies.append(.lesson(lessonStatus)) }
         } else if active == id {
+            // A command counts once, whether or not the scene could take this update.
+            if lessonLink, let sent = update.lesson, !handledCommands.contains(sent.id) {
+                handledCommands.append(sent.id)
+                if handledCommands.count > Self.rememberedCommands { handledCommands.removeFirst() }
+                command = sent
+            }
             lastHeard = time
             currentStats.updates += 1
             currentStats.updateBytes += payload.count
@@ -522,6 +574,7 @@ public final class PresentHost: @unchecked Sendable {
             if let bytes = try? PresentCodec.encode(reply) { link.reply(bytes) }
         }
         if let changed { onChange(changed.0, changed.1) }
+        if let command { onLesson(command) }
     }
 
     /// `link`'s connection closed.

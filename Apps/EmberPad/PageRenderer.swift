@@ -822,9 +822,6 @@ extension EditorScreen {
             pageRows
             WorksheetSharingRows(framing: $presentation.studentFraming)
             PresentOnMacRows(present: presentation.present)
-            Button {} label: {
-                HStack { Text("Record lesson"); Spacer(); PhaseTag(text: "Phase 3") }
-            }.disabled(true)
             exportRows
         } label: {
             HeaderIcon(symbol: "ellipsis")

@@ -1,0 +1,931 @@
+import AppKit
+import AVFoundation
+import CoreAudio
+import CoreMedia
+import CoreVideo
+import EmberSyncKit
+import IOKit.pwr_mgt
+import SwiftUI
+
+// Lesson recording (EP129). The Companion records a lesson from its own Present on Mac picture plus the BOYA
+// microphone into one file on one clock, replacing Voice Memos and the iPad's screen recording. The teacher starts and
+// ends it from the iPad (Start lesson and End lesson, sent over the Present link) or from the Companion's menu-bar
+// window. What lands, and `lesson.json`, is the contract the video pipeline reads: see the README.
+//
+// The picture is drawn by a second, offscreen `PresentCanvasView` from the same PRESENT frames as the projector, never
+// captured from the screen, so it holds only worksheet pages and ink. It follows `LessonPicture`: a Teacher copy is
+// never recorded (the last Student frame is held instead), even if the projector shows one. Leaving the presentation
+// on the Mac, the iPad turning Present off or the link dropping never stops a recording; only End lesson does, or
+// quitting the Companion, which finishes the file first.
+
+// MARK: - Microphones
+
+/// A microphone delivering audio for a lesson: 48 kHz interleaved float PCM in `LessonSegmentWriter`'s source format,
+/// time-stamped on the host clock (`CMClockGetHostTimeClock`), the clock the picture uses.
+protocol LessonAudioSource: AnyObject {
+    var name: String { get }
+    var channels: Int { get }
+    /// `onSample` and `onEvent` are called on the source's own queue.
+    func start(settings: LessonSegmentWriter.Settings, onSample: @escaping @Sendable (CMSampleBuffer) -> Void,
+               onEvent: @escaping @Sendable (LessonAudioEvent) -> Void) throws
+    func stop()
+}
+
+enum LessonAudioEvent: Sendable {
+    /// The device was unplugged, or capture stopped by itself.
+    case disconnected
+}
+
+/// The Mac's microphones, and the permission to record them.
+protocol LessonMicrophoneSystem: AnyObject {
+    func candidates() -> [LessonMicrophone.Candidate]
+    /// The channels the microphone delivers, 1 or 2; the lesson keeps them as they are.
+    func channels(of candidate: LessonMicrophone.Candidate) -> Int
+    /// Asks for microphone access if it was never asked; false when it is off.
+    func authorize() async -> Bool
+    func makeSource(_ candidate: LessonMicrophone.Candidate) throws -> LessonAudioSource
+    /// Called on the main thread when a microphone is plugged in or out.
+    var onChange: (() -> Void)? { get set }
+}
+
+enum LessonAudioFailure: Error, LocalizedError {
+    case deviceGone(String)
+    case cannotCapture(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .deviceGone(let name): "\(name) is no longer connected."
+        case .cannotCapture(let name): "Could not record from \(name)."
+        }
+    }
+}
+
+/// The real microphones, through AVFoundation. The BOYA is picked by name (`LessonMicrophone`), whatever the Mac's
+/// default input is; its audio is taken unprocessed at 48 kHz.
+final class CaptureMicrophones: LessonMicrophoneSystem {
+    var onChange: (() -> Void)?
+    private var observers: [NSObjectProtocol] = []
+
+    init() {
+        for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                guard (note.object as? AVCaptureDevice)?.hasMediaType(.audio) == true else { return }
+                self?.onChange?()
+            })
+        }
+    }
+
+    deinit {
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    private func devices() -> [AVCaptureDevice] {
+        AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone], mediaType: .audio, position: .unspecified).devices
+    }
+
+    func candidates() -> [LessonMicrophone.Candidate] {
+        devices().map { device in
+            LessonMicrophone.Candidate(id: device.uniqueID, name: device.localizedName,
+                                       isBuiltIn: device.transportType == Int32(bitPattern: kAudioDeviceTransportTypeBuiltIn))
+        }
+    }
+
+    func channels(of candidate: LessonMicrophone.Candidate) -> Int {
+        guard let device = AVCaptureDevice(uniqueID: candidate.id),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(device.activeFormat.formatDescription)?.pointee
+        else { return 1 }
+        return max(1, min(2, Int(asbd.mChannelsPerFrame)))
+    }
+
+    func authorize() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return true
+        case .notDetermined: return await AVCaptureDevice.requestAccess(for: .audio)
+        default: return false
+        }
+    }
+
+    func makeSource(_ candidate: LessonMicrophone.Candidate) throws -> LessonAudioSource {
+        guard let device = AVCaptureDevice(uniqueID: candidate.id) else { throw LessonAudioFailure.deviceGone(candidate.name) }
+        return CaptureAudioSource(device: device, channels: channels(of: candidate))
+    }
+}
+
+/// One microphone through an `AVCaptureSession`. The output converts nothing but the sample layout: the writer's
+/// interleaved float at the writer's rate, which for the BOYA is its own 48 kHz.
+final class CaptureAudioSource: NSObject, LessonAudioSource, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
+    let device: AVCaptureDevice
+    let channels: Int
+    private let session = AVCaptureSession()
+    private let output = AVCaptureAudioDataOutput()
+    private let queue = DispatchQueue(label: "EmberPadCompanion.lesson.audio", qos: .userInitiated)
+    private var onSample: (@Sendable (CMSampleBuffer) -> Void)?
+    private var onEvent: (@Sendable (LessonAudioEvent) -> Void)?
+    private var observers: [NSObjectProtocol] = []
+
+    init(device: AVCaptureDevice, channels: Int) {
+        self.device = device
+        self.channels = channels
+    }
+
+    var name: String { device.localizedName }
+
+    func start(settings: LessonSegmentWriter.Settings, onSample: @escaping @Sendable (CMSampleBuffer) -> Void,
+               onEvent: @escaping @Sendable (LessonAudioEvent) -> Void) throws {
+        self.onSample = onSample
+        self.onEvent = onEvent
+        let input = try AVCaptureDeviceInput(device: device)
+        session.beginConfiguration()
+        guard session.canAddInput(input), session.canAddOutput(output) else {
+            session.commitConfiguration()
+            throw LessonAudioFailure.cannotCapture(device.localizedName)
+        }
+        session.addInput(input)
+        output.audioSettings = LessonSegmentWriter.sourceAudioSettings(settings)
+        output.setSampleBufferDelegate(self, queue: queue)
+        session.addOutput(output)
+        session.commitConfiguration()
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: device, queue: nil) { [weak self] _ in
+            self?.onEvent?(.disconnected)
+        })
+        observers.append(center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil) { [weak self] _ in
+            self?.onEvent?(.disconnected)
+        })
+        session.startRunning()
+    }
+
+    func stop() {
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        observers = []
+        output.setSampleBufferDelegate(nil, queue: nil)
+        session.stopRunning()
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        // Bring the time onto the host clock, the picture's clock.
+        let host = CMClockGetHostTimeClock()
+        let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard let clock = session.synchronizationClock, !CFEqual(clock, host) else {
+            onSample?(sampleBuffer)
+            return
+        }
+        var timing = CMSampleTimingInfo(duration: CMSampleBufferGetDuration(sampleBuffer),
+                                        presentationTimeStamp: CMSyncConvertTime(time, from: clock, to: host),
+                                        decodeTimeStamp: .invalid)
+        var retimed: CMSampleBuffer?
+        CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sampleBuffer, sampleTimingEntryCount: 1,
+                                              sampleTimingArray: &timing, sampleBufferOut: &retimed)
+        if let retimed { onSample?(retimed) }
+    }
+}
+
+// MARK: - Recorder
+
+/// Where the audio callback hands audio to the current video file, and what it heard, for the health check.
+/// Shared between the microphone's queue and the main thread.
+final class LessonAudioSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var writer: LessonSegmentWriter?
+    private var lastBuffer: CMTime?
+    private var lastSound: CMTime?
+    private var peak: Float = 0
+    private var received = false
+
+    func use(_ writer: LessonSegmentWriter?) { lock.withLock { self.writer = writer } }
+
+    func take(_ sample: CMSampleBuffer) {
+        let level = lessonAudioPeak(sample)
+        let time = CMSampleBufferGetPresentationTimeStamp(sample)
+        let writer = lock.withLock {
+            lastBuffer = time
+            received = true
+            if level >= LessonAudioHealth.silenceThreshold { lastSound = time }
+            peak = max(peak, level)
+            return self.writer
+        }
+        writer?.appendAudio(sample)
+    }
+
+    /// What arrived since the last call: the latest buffer's time, the latest buffer with sound and the loudest peak.
+    func drain() -> (buffer: CMTime, sound: CMTime?, peak: Float)? {
+        lock.withLock {
+            defer {
+                received = false
+                lastSound = nil
+                peak = 0
+            }
+            guard received, let lastBuffer else { return nil }
+            return (lastBuffer, lastSound, peak)
+        }
+    }
+
+    /// The latest audio buffer's time, for filling silence while none arrives.
+    var latest: CMTime? { lock.withLock { lastBuffer } }
+}
+
+/// The lesson recording on the Mac: its state for the menu and the iPad, and while it records, the picture, the
+/// microphone, the video files and `lesson.json`.
+@MainActor
+final class CompanionLessonModel: ObservableObject {
+    struct Options {
+        var root = LessonFolder.defaultRoot
+        var settings = LessonSegmentWriter.Settings()
+        var maxFrameRate = 30
+        /// A frame is written at least this often while the picture is still.
+        var keepAlive: TimeInterval = 1
+        var warnAfter = LessonAudioHealth.warnAfter
+        var checkpointInterval: TimeInterval = 5
+        var timeZone = TimeZone.current
+        /// Close lessons a crash left open, at launch; never in a test run, which must not touch the real folder.
+        var recoverAtLaunch = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+        var watchSleep = true
+    }
+
+    /// The recording as the iPad and the menu show it.
+    @Published private(set) var status = PresentLessonStatus.idle {
+        didSet { if status != oldValue { onStatus?(status) } }
+    }
+    /// The lesson being recorded, while it records.
+    @Published private(set) var folder: URL?
+    /// The lesson recorded last, for **Show recordings**.
+    @Published private(set) var lastLesson: URL?
+    /// Closed at launch after a crash.
+    @Published private(set) var recovered: [URL] = []
+    /// Sent to the iPad through `PresentHost.setLessonStatus`.
+    var onStatus: ((PresentLessonStatus) -> Void)? {
+        didSet { onStatus?(status) }
+    }
+
+    let options: Options
+    private var microphones: LessonMicrophoneSystem
+    private let hostClock = CMClockGetHostTimeClock()
+    private var recording: Recording?
+    private var starting = false
+    private var handled: UUID?
+    private var endWhileStarting: UUID?
+    private var scene: PresentScene?
+    private var presenting = PresentHost.Status.off
+    private var sleepObservers: [NSObjectProtocol] = []
+
+    /// Everything one lesson holds while it records.
+    private final class Recording {
+        let folder: URL
+        let hostStart: CMTime
+        let dateStart: Date
+        let candidate: LessonMicrophone.Candidate
+        let channels: Int
+        var settings: LessonSegmentWriter.Settings
+        var log: LessonLog
+        var writer: LessonSegmentWriter?
+        var segment = 0
+        var source: LessonAudioSource?
+        var sourceDisconnected = false
+        let sink = LessonAudioSink()
+        var health: LessonAudioHealth
+        /// Warnings from before the Mac slept; the health check starts again on waking.
+        var earlierEpisodes: [LessonAudioHealth.Episode] = []
+        /// Stretches when no video file could be written; the last is open until a file starts again.
+        var writeFailures: [LessonAudioHealth.Episode] = []
+        var picture = LessonPicture()
+        var lastChoice: LessonPicture.Choice?
+        let canvas: PresentCanvasView
+        var dirty = true
+        var lastFrame: CVPixelBuffer?
+        var lastFrameTime: CMTime?
+        var document: PresentLessonDocument??
+        var lastCheckpoint: CMTime
+        var frameTimer: Timer?
+        var healthTimer: Timer?
+        var powerAssertion: IOPMAssertionID?
+        var sleeping = false
+
+        init(folder: URL, hostStart: CMTime, dateStart: Date, candidate: LessonMicrophone.Candidate, channels: Int,
+             settings: LessonSegmentWriter.Settings, log: LessonLog, health: LessonAudioHealth) {
+            self.folder = folder
+            self.hostStart = hostStart
+            self.dateStart = dateStart
+            self.candidate = candidate
+            self.channels = channels
+            self.settings = settings
+            self.log = log
+            self.health = health
+            lastCheckpoint = hostStart
+            canvas = PresentCanvasView(frame: CGRect(x: 0, y: 0, width: settings.width, height: settings.height))
+            canvas.showsStatusDot = false
+            canvas.scaleOverride = 1
+        }
+
+        var episodes: [LessonAudioHealth.Episode] { earlierEpisodes + writeFailures + health.episodes }
+    }
+
+    init(options: Options = Options(), microphones: LessonMicrophoneSystem? = nil) {
+        self.options = options
+        self.microphones = microphones ?? Self.defaultMicrophones()
+        self.microphones.onChange = { [weak self] in self?.microphonesChanged() }
+        if options.recoverAtLaunch { recovered = LessonRecovery.recover(in: options.root) }
+        if options.watchSleep {
+            let center = NSWorkspace.shared.notificationCenter
+            sleepObservers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.willSleep() }
+            })
+            sleepObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.didWake() }
+            })
+        }
+    }
+
+    private static func defaultMicrophones() -> LessonMicrophoneSystem {
+#if DEBUG
+        if let fake = FakeMicrophones.fromLaunchArguments() { return fake }
+#endif
+        return CaptureMicrophones()
+    }
+
+    var isRecording: Bool { recording != nil }
+
+    // MARK: Commands
+
+    /// The teacher's Start or End lesson from the iPad.
+    func handle(_ command: PresentLessonCommand) {
+        guard command.id != handled else { return }
+        perform(command.action, id: command.id, origin: .ipad)
+    }
+
+    /// **Start lesson** in the Companion's menu.
+    func start() { perform(.start, id: UUID(), origin: .mac) }
+    /// **Record with built-in mic anyway**, after the Companion said the BOYA is not connected.
+    func startWithBuiltInMic() { perform(.startWithBuiltInMic, id: UUID(), origin: .mac) }
+    /// **End lesson** in the Companion's menu.
+    func end() { perform(.end, id: UUID(), origin: .mac) }
+
+    private func perform(_ action: PresentLessonCommand.Action, id: UUID, origin: LessonRecord.Origin) {
+        if action == .end, recording == nil, starting {
+            endWhileStarting = id
+            return
+        }
+        handled = id
+        switch action {
+        case .end:
+            if recording != nil {
+                Task { await finish() }
+            } else {
+                setStatus(.idle)
+            }
+        case .start, .startWithBuiltInMic:
+            endWhileStarting = nil
+            guard recording == nil, !starting else { return setStatus(status) }
+            switch LessonMicrophone.choose(from: microphones.candidates(), allowBuiltIn: action == .startWithBuiltInMic) {
+            case .askFirst:
+                setStatus(PresentLessonStatus(state: .needsMicChoice, message: "The \(LessonMicrophone.preferredName) microphone is not connected."))
+            case .none:
+                setStatus(PresentLessonStatus(state: .failed, message: "No microphone found on the Mac."))
+            case .preferred(let candidate):
+                begin(candidate, fallback: false, origin: origin)
+            case .builtIn(let candidate):
+                begin(candidate, fallback: true, origin: origin)
+            }
+        }
+    }
+
+    private func setStatus(_ new: PresentLessonStatus) {
+        var new = new
+        new.handledCommand = handled
+        status = new
+    }
+
+    // MARK: Starting
+
+    private func begin(_ candidate: LessonMicrophone.Candidate, fallback: Bool, origin: LessonRecord.Origin) {
+        starting = true
+        Task {
+            defer { starting = false }
+            let authorized = await microphones.authorize()
+            if let end = endWhileStarting {
+                endWhileStarting = nil
+                handled = end
+                return setStatus(.idle)
+            }
+            guard authorized else {
+                return setStatus(PresentLessonStatus(state: .failed, message:
+                    "Microphone access is off for EmberPad Companion. Turn it on in System Settings, Privacy & Security, Microphone."))
+            }
+            do {
+                try start(candidate, fallback: fallback, origin: origin)
+            } catch {
+                setStatus(PresentLessonStatus(state: .failed, message: "Could not start recording: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    private func start(_ candidate: LessonMicrophone.Candidate, fallback: Bool, origin: LessonRecord.Origin) throws {
+        var settings = options.settings
+        settings.channels = microphones.channels(of: candidate)
+        let dateStart = Date()
+        let hostStart = CMClockGetTime(hostClock)
+        let folder = try LessonFolder.make(in: options.root, start: dateStart, timeZone: options.timeZone)
+        let log = LessonLog(start: dateStart, timeZone: options.timeZone, origin: origin,
+                            microphone: .init(name: candidate.name, preferred: !fallback, sampleRate: settings.sampleRate,
+                                              channels: settings.channels),
+                            video: .init(codec: "h264", width: settings.width, height: settings.height, maxFrameRate: options.maxFrameRate),
+                            audio: .init(codec: "aac", sampleRate: settings.sampleRate, channels: settings.channels,
+                                         bitRate: settings.audioBitRate))
+        let recording = Recording(folder: folder, hostStart: hostStart, dateStart: dateStart, candidate: candidate,
+                                  channels: settings.channels, settings: settings, log: log,
+                                  health: LessonAudioHealth(start: 0, warnAfter: options.warnAfter))
+        do {
+            // The record first, so even a lesson that stops while its encoder starts says what it is.
+            try recording.log.record.write(to: folder)
+            try startSegment(recording, at: hostStart)
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
+        self.recording = recording
+        self.folder = folder
+        recording.document = .some(presenting == .off ? nil : scene?.document)
+        recording.log.show(presenting == .off ? nil : scene?.document, at: dateStart)
+        startSource(recording)
+        holdPower(recording)
+        recording.frameTimer = repeating(1 / Double(max(1, options.maxFrameRate))) { [weak self] in self?.frame() }
+        recording.healthTimer = repeating(1) { [weak self] in self?.check() }
+        frame()
+        checkpoint(recording)
+        setStatus(PresentLessonStatus(state: .recording, startedAt: dateStart, micName: candidate.name, micIsFallback: fallback))
+    }
+
+    private func repeating(_ interval: TimeInterval, _ body: @escaping @MainActor () -> Void) -> Timer {
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in MainActor.assumeIsolated { body() } }
+        // Common modes: the recording keeps its frames while the menu-bar window is open or a menu tracks.
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
+    }
+
+    /// Starts the next video file at `time`.
+    private func startSegment(_ recording: Recording, at time: CMTime) throws {
+        let number = recording.segment + 1
+        let name = LessonFolder.videoName(segment: number)
+        let writer = try LessonSegmentWriter(url: recording.folder.appendingPathComponent(name), settings: recording.settings)
+        try writer.start(at: time)
+        recording.segment = number
+        recording.writer = writer
+        recording.sink.use(writer)
+        recording.log.startFile(name, at: date(time, in: recording))
+        recording.lastFrameTime = nil
+        recording.dirty = true
+    }
+
+    /// Starts the next video file after a sleep or a failed file; when none can be written, says so on the Mac and the
+    /// iPad and in `lesson.json`, and the next tick tries again.
+    private func resumeSegment(_ recording: Recording, at time: CMTime) {
+        let at = seconds(time, in: recording)
+        do {
+            try startSegment(recording, at: time)
+            if let last = recording.writeFailures.indices.last, recording.writeFailures[last].to == nil {
+                recording.writeFailures[last].to = at
+                checkpoint(recording)
+            }
+        } catch {
+            if recording.writeFailures.last?.to != nil || recording.writeFailures.isEmpty {
+                recording.writeFailures.append(.init(problem: .notRecording, from: at, warnedAt: at))
+                checkpoint(recording)
+            }
+        }
+    }
+
+    private func startSource(_ recording: Recording) {
+        recording.source?.stop()
+        recording.source = nil
+        recording.sourceDisconnected = false
+        do {
+            let source = try microphones.makeSource(recording.candidate)
+            let sink = recording.sink
+            try source.start(settings: recording.settings, onSample: { sink.take($0) }, onEvent: { [weak self] event in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.audioEvent(event) } }
+            })
+            recording.source = source
+        } catch {
+            sourceGone(recording)
+        }
+    }
+
+    private func sourceGone(_ recording: Recording) {
+        recording.source?.stop()
+        recording.source = nil
+        recording.sourceDisconnected = true
+        recording.health.disconnected(at: seconds(CMClockGetTime(hostClock), in: recording))
+    }
+
+    private func audioEvent(_ event: LessonAudioEvent) {
+        guard let recording else { return }
+        switch event {
+        case .disconnected: sourceGone(recording)
+        }
+    }
+
+    /// A microphone was plugged in or out: when the lesson's microphone is back, record from it again.
+    private func microphonesChanged() {
+        guard let recording, recording.sourceDisconnected, !recording.sleeping else { return }
+        let candidates = microphones.candidates()
+        let back = candidates.contains { $0.id == recording.candidate.id }
+            || candidates.contains { $0.name == recording.candidate.name }
+        if back { startSource(recording) }
+    }
+
+    // MARK: Picture
+
+    /// A new scene from the iPad, whether or not the presentation window is shown.
+    func present(_ scene: PresentScene, status: PresentHost.Status) {
+        self.scene = scene
+        presenting = status
+        guard let recording else { return }
+        recording.dirty = true
+        let document = status == .off ? nil : Self.shownDocument(scene)
+        if recording.document != .some(document) {
+            recording.document = .some(document)
+            recording.log.show(document, at: Date())
+            checkpoint(recording)
+        }
+    }
+
+    /// The document the class sees, for `lesson.json`: the one the iPad named, or, while the teacher has swapped the
+    /// class onto that worksheet's Teacher copy (EP130), its Teacher copy, listed under the worksheet's id with the
+    /// role `teacher`. Its pages are never recorded (`LessonPicture`).
+    static func shownDocument(_ scene: PresentScene) -> PresentLessonDocument? {
+        guard var document = scene.document else { return nil }
+        if scene.presented?.showsTeacherCopy == true, document.role == .student { document.role = .teacher }
+        return document
+    }
+
+    /// The scene the recording shows now; nil is the neutral card.
+    private func recordedScene(_ recording: Recording) -> (scene: PresentScene?, changed: Bool) {
+        let current = presenting == .off ? nil : scene
+        let choice = LessonPicture.choice(for: current)
+        let shown = recording.picture.next(current)
+        // A held frame or the card does not change while it is held.
+        let changed = choice == .live || choice != recording.lastChoice
+        recording.lastChoice = choice
+        return (shown, changed)
+    }
+
+    private func frame() {
+        guard let recording, !recording.sleeping, let writer = recording.writer else { return }
+        let now = CMClockGetTime(hostClock)
+        var buffer = recording.lastFrame
+        if recording.dirty || buffer == nil {
+            recording.dirty = false
+            let (shown, changed) = recordedScene(recording)
+            if changed || buffer == nil, let fresh = draw(shown, recording: recording, writer: writer) { buffer = fresh }
+        } else if let last = recording.lastFrameTime, (now - last).seconds < options.keepAlive {
+            return
+        }
+        guard let buffer, writer.appendVideo(buffer, at: now) else { return }
+        recording.lastFrame = buffer
+        recording.lastFrameTime = now
+    }
+
+    private func draw(_ scene: PresentScene?, recording: Recording, writer: LessonSegmentWriter) -> CVPixelBuffer? {
+        recording.canvas.render(scene ?? PresentScene(), status: .off)
+        guard let buffer = writer.makePixelBuffer() else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: CVPixelBufferGetWidth(buffer),
+                                      height: CVPixelBufferGetHeight(buffer), bitsPerComponent: 8,
+                                      bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
+        context.setFillColor(NSColor.black.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: context.width, height: context.height))
+        recording.canvas.draw(into: context, scale: CGFloat(context.width) / recording.canvas.bounds.width)
+        return buffer
+    }
+
+    // MARK: Health and checkpoints
+
+    /// Once a second: the microphone's health, silence for a microphone that sends nothing, a file that failed, and
+    /// `lesson.json` every few seconds.
+    private func check() {
+        guard let recording, !recording.sleeping else { return }
+        let now = CMClockGetTime(hostClock)
+        if let heard = recording.sink.drain() {
+            if let sound = heard.sound { recording.health.heard(peak: heard.peak, at: seconds(sound, in: recording)) }
+            if heard.sound != heard.buffer { recording.health.heard(peak: 0, at: seconds(heard.buffer, in: recording)) }
+        }
+        let changed = recording.health.tick(at: seconds(now, in: recording))
+        // While the microphone sends nothing, the audio track is kept level with the picture in silence.
+        let latest = recording.sink.latest ?? recording.hostStart
+        if (now - latest).seconds > 1 { recording.writer?.fillSilence(until: now - CMTime(value: 1, timescale: 4)) }
+        if let writer = recording.writer, writer.error != nil {
+            // The file can no longer be written: keep what it holds and go on in the next one.
+            recording.log.endFile(at: date(now, in: recording))
+            recording.writer = nil
+            recording.sink.use(nil)
+            Task { _ = await writer.finish() }
+        }
+        if recording.writer == nil { resumeSegment(recording, at: now) }
+        let failure = recording.writeFailures.last.flatMap { $0.to == nil ? $0 : nil }
+        let warning = (failure ?? recording.health.warning).map { LessonAudioHealth.text(for: $0, at: seconds(now, in: recording)) }
+        if warning != status.warning {
+            var next = status
+            next.warning = warning
+            setStatus(next)
+        }
+        if changed || (now - recording.lastCheckpoint).seconds >= options.checkpointInterval { checkpoint(recording) }
+    }
+
+    private func checkpoint(_ recording: Recording) {
+        let now = CMClockGetTime(hostClock)
+        recording.lastCheckpoint = now
+        recording.log.setWarnings(recording.episodes)
+        recording.log.touch(at: date(now, in: recording))
+        try? recording.log.record.write(to: recording.folder)
+    }
+
+    private func seconds(_ time: CMTime, in recording: Recording) -> TimeInterval {
+        (time - recording.hostStart).seconds
+    }
+
+    private func date(_ time: CMTime, in recording: Recording) -> Date {
+        recording.dateStart.addingTimeInterval(seconds(time, in: recording))
+    }
+
+    // MARK: Sleep
+
+    /// The Mac is going to sleep (its lid closed): finish the file so it is whole, and go on in a new one on waking.
+    private func willSleep() {
+        guard let recording, !recording.sleeping else { return }
+        let now = CMClockGetTime(hostClock)
+        recording.sleeping = true
+        recording.source?.stop()
+        recording.source = nil
+        recording.sink.use(nil)
+        recording.log.endFile(at: date(now, in: recording))
+        // A warning open when the Mac slept ends then; the check starts afresh on waking.
+        var episodes = recording.health.episodes
+        if let last = episodes.indices.last, episodes[last].to == nil { episodes[last].to = seconds(now, in: recording) }
+        recording.earlierEpisodes += episodes
+        checkpoint(recording)
+        if let writer = recording.writer {
+            recording.writer = nil
+            Task { _ = await writer.finish(at: now) }
+        }
+    }
+
+    private func didWake() {
+        guard let recording, recording.sleeping else { return }
+        let now = CMClockGetTime(hostClock)
+        recording.sleeping = false
+        recording.health = LessonAudioHealth(start: seconds(now, in: recording), warnAfter: options.warnAfter)
+        resumeSegment(recording, at: now)
+        startSource(recording)
+        checkpoint(recording)
+    }
+
+    private func holdPower(_ recording: Recording) {
+        var id = IOPMAssertionID(0)
+        if IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                       "EmberPad lesson recording" as CFString, &id) == kIOReturnSuccess {
+            recording.powerAssertion = id
+        }
+    }
+
+    // MARK: Ending
+
+    /// Ends the lesson: the file is finished and `lesson.json` closed as complete. Waits until both are on disk.
+    func finish() async {
+        guard let recording else { return }
+        self.recording = nil
+        let now = CMClockGetTime(hostClock)
+        recording.frameTimer?.invalidate()
+        recording.healthTimer?.invalidate()
+        recording.source?.stop()
+        recording.source = nil
+        recording.sink.use(nil)
+        if let id = recording.powerAssertion { IOPMAssertionRelease(id) }
+        folder = nil
+        lastLesson = recording.folder
+        setStatus(.idle)
+        if let writer = recording.writer {
+            recording.writer = nil
+            _ = await writer.finish(at: now)
+        }
+        let end = date(now, in: recording)
+        recording.log.endFile(at: end)
+        recording.log.setWarnings(recording.episodes)
+        recording.log.finish(at: end)
+        try? recording.log.record.write(to: recording.folder)
+    }
+
+    // MARK: Menu text
+
+    func showRecordings() {
+        let target = lastLesson ?? options.root
+        try? FileManager.default.createDirectory(at: options.root, withIntermediateDirectories: true)
+        if lastLesson != nil { NSWorkspace.shared.activateFileViewerSelecting([target]) } else { NSWorkspace.shared.open(target) }
+    }
+}
+
+// MARK: - Menu
+
+/// The menu-bar icon: the Companion's glyph, or a record symbol while a lesson records (a warning symbol while the
+/// microphone is silent or gone).
+struct CompanionLessonLabel: View {
+    @ObservedObject var model: CompanionLessonModel
+
+    var body: some View {
+        switch model.status.state {
+        case .recording:
+            Image(systemName: model.status.warning == nil ? "record.circle" : "exclamationmark.triangle.fill")
+                .accessibilityLabel(model.status.warning ?? "EmberPad, recording a lesson")
+        default:
+            Image("MenuBarGlyph").accessibilityLabel("EmberPad")
+        }
+    }
+}
+
+/// The Companion window's Lesson recording section: Start and End lesson, the time and microphone while it records,
+/// any warning, the choice when the BOYA is missing, and the recordings folder.
+struct CompanionLessonSection: View {
+    @ObservedObject var model: CompanionLessonModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Lesson recording").font(.headline)
+            switch model.status.state {
+            case .recording:
+                HStack(spacing: 6) {
+                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                    if let start = model.status.startedAt {
+                        Text("Recording ") + Text(start, style: .timer)
+                    } else {
+                        Text("Recording")
+                    }
+                }
+                .font(.callout.weight(.semibold))
+                if let mic = model.status.micName {
+                    Text(model.status.micIsFallback ? "\(mic) (not the \(LessonMicrophone.preferredName))" : mic)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let warning = model.status.warning {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.orange)
+                }
+                Button("End lesson") { model.end() }
+            case .needsMicChoice:
+                Label(model.status.message ?? "The BOYA microphone is not connected.", systemImage: "mic.slash")
+                    .font(.callout).foregroundStyle(.orange)
+                Text("Plug it in and start again, or record with the Mac's built-in microphone.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Record with built-in mic anyway") { model.startWithBuiltInMic() }
+                    Button("Cancel") { model.end() }
+                }
+            case .idle, .failed:
+                if model.status.state == .failed, let message = model.status.message {
+                    Text(message).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                }
+                Text("Records the presentation and the \(LessonMicrophone.preferredName) microphone. Teacher copies are never recorded.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button("Start lesson") { model.start() }
+            }
+            Button(model.lastLesson == nil ? "Show recordings" : "Show last recording") { model.showRecordings() }
+                .buttonStyle(.link)
+        }
+        .padding(14)
+    }
+}
+
+// MARK: - Debug microphones
+
+#if DEBUG
+/// Debug-only microphones (EP129), so a lesson can be recorded on a Mac without the BOYA or a microphone prompt.
+/// `-EmberLessonFakeAudio boya` offers a synthetic "BOYA BY-M1 (fake)" and a built-in microphone; `builtin` offers only
+/// the built-in one, so starting asks first. The synthetic tone goes silent after `-EmberLessonFakeSilenceAfter N`
+/// seconds, to see the audio-health warning. Compiled out of Release builds.
+final class FakeMicrophones: LessonMicrophoneSystem {
+    static let audioKey = "EmberLessonFakeAudio"
+    static let silenceKey = "EmberLessonFakeSilenceAfter"
+    static let boya = LessonMicrophone.Candidate(id: "fake-boya", name: "BOYA BY-M1 (fake)", isBuiltIn: false)
+    static let builtIn = LessonMicrophone.Candidate(id: "fake-builtin", name: "MacBook Pro Microphone (fake)", isBuiltIn: true)
+
+    var onChange: (() -> Void)?
+    var available: [LessonMicrophone.Candidate]
+    var silenceAfter: TimeInterval?
+    var authorized = true
+    /// How long `authorize` takes, as when the first-run permission prompt waits for the teacher.
+    var authorizeDelay: TimeInterval = 0
+    private(set) var sources: [SyntheticAudioSource] = []
+
+    init(available: [LessonMicrophone.Candidate], silenceAfter: TimeInterval? = nil) {
+        self.available = available
+        self.silenceAfter = silenceAfter
+    }
+
+    static func fromLaunchArguments() -> FakeMicrophones? {
+        guard let value = UserDefaults.standard.string(forKey: audioKey)?.lowercased(), !value.isEmpty else { return nil }
+        let silence = UserDefaults.standard.double(forKey: silenceKey)
+        return FakeMicrophones(available: value == "builtin" ? [builtIn] : [boya, builtIn], silenceAfter: silence > 0 ? silence : nil)
+    }
+
+    func candidates() -> [LessonMicrophone.Candidate] { available }
+    func channels(of candidate: LessonMicrophone.Candidate) -> Int { 1 }
+    func authorize() async -> Bool {
+        if authorizeDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(authorizeDelay * 1_000_000_000)) }
+        return authorized
+    }
+
+    func makeSource(_ candidate: LessonMicrophone.Candidate) throws -> LessonAudioSource {
+        guard available.contains(candidate) else { throw LessonAudioFailure.deviceGone(candidate.name) }
+        let source = SyntheticAudioSource(name: candidate.name, silenceAfter: silenceAfter)
+        sources.append(source)
+        return source
+    }
+}
+
+/// A 440 Hz tone at 48 kHz in 20 ms buffers on the host clock, or digital silence after `silenceAfter` seconds.
+final class SyntheticAudioSource: LessonAudioSource, @unchecked Sendable {
+    let name: String
+    let channels = 1
+    private let silenceAfter: TimeInterval?
+    private let queue = DispatchQueue(label: "EmberPadCompanion.lesson.fake-audio")
+    private var timer: DispatchSourceTimer?
+    private var onEvent: (@Sendable (LessonAudioEvent) -> Void)?
+    private var next: CMTime?
+    private var started: CMTime?
+    private var phase: Double = 0
+    private(set) var isRunning = false
+
+    init(name: String, silenceAfter: TimeInterval?) {
+        self.name = name
+        self.silenceAfter = silenceAfter
+    }
+
+    func start(settings: LessonSegmentWriter.Settings, onSample: @escaping @Sendable (CMSampleBuffer) -> Void,
+               onEvent: @escaping @Sendable (LessonAudioEvent) -> Void) throws {
+        self.onEvent = onEvent
+        var description = AudioStreamBasicDescription(
+            mSampleRate: settings.sampleRate, mFormatID: kAudioFormatLinearPCM, mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: UInt32(4 * settings.channels), mFramesPerPacket: 1, mBytesPerFrame: UInt32(4 * settings.channels),
+            mChannelsPerFrame: UInt32(settings.channels), mBitsPerChannel: 32, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        CMAudioFormatDescriptionCreate(allocator: nil, asbd: &description, layoutSize: 0, layout: nil, magicCookieSize: 0,
+                                       magicCookie: nil, extensions: nil, formatDescriptionOut: &format)
+        guard let format else { throw LessonAudioFailure.cannotCapture(name) }
+        let rate = settings.sampleRate, channels = settings.channels
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(20))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let clock = CMClockGetHostTimeClock()
+            let now = CMClockGetTime(clock)
+            let start = self.started ?? now
+            self.started = start
+            var cursor = self.next ?? now
+            // Whole 20 ms buffers up to now, as a microphone delivers them.
+            while (now - cursor).seconds >= 0.02 {
+                let frames = Int(rate / 50)
+                let silent = self.silenceAfter.map { (cursor - start).seconds >= $0 } ?? false
+                var samples = [Float](repeating: 0, count: frames * channels)
+                if !silent {
+                    for frame in 0..<frames {
+                        let value = Float(sin(self.phase) * 0.2)
+                        self.phase += 2 * .pi * 440 / rate
+                        for channel in 0..<channels { samples[frame * channels + channel] = value }
+                    }
+                }
+                if let sample = Self.sample(samples, frames: frames, at: cursor, format: format, rate: rate) { onSample(sample) }
+                cursor = cursor + CMTime(value: CMTimeValue(frames), timescale: CMTimeScale(rate))
+            }
+            self.next = cursor
+        }
+        self.timer = timer
+        isRunning = true
+        timer.resume()
+    }
+
+    private static func sample(_ samples: [Float], frames: Int, at time: CMTime, format: CMAudioFormatDescription,
+                               rate: Double) -> CMSampleBuffer? {
+        let bytes = samples.count * 4
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: bytes, blockAllocator: nil,
+                                                 customBlockSource: nil, offsetToData: 0, dataLength: bytes,
+                                                 flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block) == noErr,
+              let block else { return nil }
+        let copied = samples.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block,
+                                                                             offsetIntoDestination: 0, dataLength: bytes) }
+        guard copied == noErr else { return nil }
+        return LessonSegmentWriter.audioSample(block: block, frames: frames, at: time, format: format, sampleRate: rate)
+    }
+
+    /// The microphone was unplugged.
+    func unplug() {
+        stop()
+        onEvent?(.disconnected)
+    }
+
+    func stop() {
+        timer?.cancel()
+        timer = nil
+        isRunning = false
+    }
+}
+#endif

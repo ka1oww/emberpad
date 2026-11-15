@@ -44,14 +44,21 @@ public struct PresentInput: Sendable {
     public var pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)]
     /// Ink of each placed page, keyed by page index.
     public var ink: [Int: PresentInkInput]
+    /// Version 5 (EP129): the open document, for the lesson's record. Leave nil on an older link.
+    public var document: PresentLessonDocument?
+    /// Version 5 (EP129): the teacher's Start or End lesson not yet handled by the Mac. Sent once per link.
+    public var lessonCommand: PresentLessonCommand?
 
     public init(view: PresentedView, session: UUID? = nil,
                 pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)] = [:],
-                ink: [Int: PresentInkInput] = [:]) {
+                ink: [Int: PresentInkInput] = [:], document: PresentLessonDocument? = nil,
+                lessonCommand: PresentLessonCommand? = nil) {
         self.view = view
         self.session = session
         self.pages = pages
         self.ink = ink
+        self.document = document
+        self.lessonCommand = lessonCommand
     }
 }
 
@@ -93,6 +100,9 @@ public struct PresentEncoder: Sendable {
     private var nextLiveID: UInt32 = 1
     private var sentLaser: PresentedView.Laser?
     private var sentTrail: [PresentedView.TrailPiece] = []
+    /// The document last named on this link; `.none` until the snapshot names it.
+    private var sentDocument: PresentLessonDocument?? = .none
+    private var sentCommand: UUID?
     private var macAssets: Set<String> = []
     private var lastSent: TimeInterval = -.infinity
 
@@ -125,7 +135,19 @@ public struct PresentEncoder: Sendable {
             sentLive = []
             sentLaser = nil
             sentTrail = []
+            sentDocument = .none
+            sentCommand = nil
             needsReset = false
+        }
+
+        // The open document goes with the frame that shows it, so the Mac never has a page without its role.
+        if sentDocument != .some(input.document) {
+            out.update.document = PresentDocumentChange(document: input.document)
+            sentDocument = .some(input.document)
+        }
+        if let command = input.lessonCommand, command.id != sentCommand {
+            out.update.lesson = command
+            sentCommand = command.id
         }
 
         // The frame, without live parts, and paper for any shown page the Mac does not hold.

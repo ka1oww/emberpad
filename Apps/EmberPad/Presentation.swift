@@ -275,6 +275,9 @@ final class StudentDisplayModel: ObservableObject {
         if classCopy.revealing != revealing { classCopy.revealing = revealing }
         if classCopy.shown != shown { classCopy.shown = shown }
     }
+    /// The document open as the main page, Teacher copy or not, for a lesson recording's record (EP129). Only its
+    /// name and role leave the iPad, and only to a Companion that records lessons; never its pages.
+    private(set) var openDocument: PresentLessonDocument?
     private let now: () -> TimeInterval
     private let schedule: MirrorThrottle.Scheduler
 
@@ -305,6 +308,7 @@ final class StudentDisplayModel: ObservableObject {
     /// Called as soon as a document becomes the main page, before any renderer publishes a page. A new worksheet
     /// always starts on its Student copy (EP130).
     func opened(_ record: DocumentRecord) {
+        openDocument = PresentLessonDocument(record)
         content = StudentSafeDocument(record) == nil ? .teacherCopyPrivate : .none
         setLiveInk(nil)
         hideLaser()
@@ -313,6 +317,7 @@ final class StudentDisplayModel: ObservableObject {
     }
 
     func clear() {
+        openDocument = nil
         content = .none
         setLiveInk(nil)
         hideLaser()

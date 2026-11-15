@@ -34,11 +34,14 @@ final class CompanionPresentModel: ObservableObject {
     let host: PresentHost
     private let mailbox: PresentMailbox
     let window: PresentWindowController
+    /// The lesson recording (EP129). It gets every scene, whether or not the window is shown: leaving the
+    /// presentation on the Mac never stops or pauses a recording; only **End lesson** does.
+    let lesson: CompanionLessonModel
     private var ticker: Timer?
     private var screenObserver: NSObjectProtocol?
     private var sleepAssertion: IOPMAssertionID?
 
-    init(window: PresentWindowController? = nil) {
+    init(window: PresentWindowController? = nil, lesson: CompanionLessonModel? = nil) {
         self.window = window ?? PresentWindowController()
         let mailbox = PresentMailbox()
         let box = WeakPresentModel()
@@ -47,13 +50,17 @@ final class CompanionPresentModel: ObservableObject {
             if mailbox.put(scene, status) {
                 DispatchQueue.main.async { MainActor.assumeIsolated { box.model?.drain() } }
             }
+        }, onLesson: { command in
+            DispatchQueue.main.async { MainActor.assumeIsolated { box.model?.lesson.handle(command) } }
         })
         self.mailbox = mailbox
+        self.lesson = lesson ?? CompanionLessonModel()
+        let host = host
+        self.lesson.onStatus = { host.setLessonStatus($0) }
         displayChoice = UserDefaults.standard.string(forKey: Self.displayKey) ?? ""
         box.model = self
         self.window.onHide = { [weak self] in self?.hide() }
         refreshScreens()
-        let host = self.host
         ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in host.tick() }
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
@@ -103,6 +110,7 @@ final class CompanionPresentModel: ObservableObject {
 
     private func drain() {
         guard let (scene, status) = mailbox.take() else { return }
+        lesson.present(scene, status: status)
         let started = self.status == .off && status != .off
         self.status = status
         if status == .off {
@@ -506,6 +514,10 @@ final class PresentExitButton: NSButton {
 /// strokes; a scroll moves layers without rasterising anything.
 final class PresentCanvasView: NSView {
     var onEscape: (() -> Void)?
+    /// The corner light; the lesson recording's copy of the canvas (EP129) has none.
+    var showsStatusDot = true
+    /// Pixels per point when the canvas is not in a window, as for the lesson recording.
+    var scaleOverride: CGFloat?
 
     private let root = CALayer()
     private let viewport = CALayer()
@@ -591,7 +603,7 @@ final class PresentCanvasView: NSView {
         redraw()
     }
 
-    private var screenScale: CGFloat { window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2 }
+    private var screenScale: CGFloat { scaleOverride ?? window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2 }
 
     private func redraw() {
         CATransaction.begin()
@@ -636,7 +648,7 @@ final class PresentCanvasView: NSView {
         case .reconnecting: CGColor(srgbRed: 0.95, green: 0.62, blue: 0.1, alpha: 1)
         case .off: nil
         }
-        statusDot.isHidden = color == nil
+        statusDot.isHidden = color == nil || !showsStatusDot
         statusDot.backgroundColor = color
         let size: CGFloat = 10
         statusDot.frame = CGRect(x: bounds.maxX - size - 14, y: bounds.maxY - size - 14, width: size, height: size)
@@ -744,6 +756,15 @@ final class PresentCanvasView: NSView {
         } else {
             laserLayer.isHidden = true
         }
+    }
+
+    /// Draws the picture into `context`, `bounds` filling it at `scale` pixels per point, top-left first (EP129).
+    func draw(into context: CGContext, scale: CGFloat) {
+        context.saveGState()
+        context.translateBy(x: 0, y: CGFloat(context.height))
+        context.scaleBy(x: scale, y: -scale)
+        root.render(in: context)
+        context.restoreGState()
     }
 
     /// The window's picture, for screenshots in tests and the PR.

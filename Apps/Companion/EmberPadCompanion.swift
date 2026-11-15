@@ -26,7 +26,23 @@ struct CompanionTestHost: App {
     }
 }
 
+/// Finishes a lesson recording before the Companion quits, so its file is whole and `lesson.json` says complete.
+final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
+    @MainActor static weak var lesson: CompanionLessonModel?
+
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let lesson = Self.lesson, lesson.isRecording else { return .terminateNow }
+        Task { @MainActor in
+            await lesson.finish()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+}
+
 struct EmberPadCompanion: App {
+    @NSApplicationDelegateAdaptor(CompanionAppDelegate.self) private var appDelegate
     @StateObject private var model: CompanionModel
     @StateObject private var pairing: CompanionPairingModel
     @StateObject private var sync: CompanionSyncModel
@@ -41,7 +57,15 @@ struct EmberPadCompanion: App {
         CompanionPeerHelloModel.shared.startIfRequested()
 #endif
         let model = CompanionModel()
-        let present = CompanionPresentModel()
+        var lessonOptions = CompanionLessonModel.Options()
+#if DEBUG
+        // A debug run can record into a folder of its own, away from the lessons the video pipeline reads.
+        if let root = UserDefaults.standard.string(forKey: "EmberLessonRoot"), !root.isEmpty {
+            lessonOptions.root = URL(fileURLWithPath: (root as NSString).expandingTildeInPath, isDirectory: true)
+        }
+#endif
+        let present = CompanionPresentModel(lesson: CompanionLessonModel(options: lessonOptions))
+        CompanionAppDelegate.lesson = present.lesson
 #if DEBUG
         let pairing = CompanionPresentFake.isEnabled
             ? CompanionPairingModel(keychain: PairingKeychain(service: CompanionPresentFake.pairingService)) : CompanionPairingModel()
@@ -61,11 +85,18 @@ struct EmberPadCompanion: App {
             CompanionPresentFake.running = fake
             fake.start()
         }
+        // EP129: `-EmberLessonFakeRecordFor N` starts a lesson two seconds after launch, as Start lesson in the menu
+        // does, and ends it N seconds later.
+        let recordFor = UserDefaults.standard.double(forKey: "EmberLessonFakeRecordFor")
+        if recordFor > 0, let lesson = CompanionAppDelegate.lesson {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { lesson.start() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2 + recordFor) { lesson.end() }
+        }
 #endif
     }
 
     var body: some Scene {
-        MenuBarExtra("EmberPad", image: "MenuBarGlyph") {
+        MenuBarExtra {
             CompanionPresentBanner(model: present).frame(width: 340)
             CompanionLibraryContent(
                 folder: model.folder,
@@ -97,6 +128,8 @@ struct EmberPadCompanion: App {
             .frame(width: 340)
             Divider()
             CompanionPresentSection(model: present).frame(width: 340, alignment: .leading)
+            Divider()
+            CompanionLessonSection(model: present.lesson).frame(width: 340, alignment: .leading)
 #if DEBUG
             Divider()
             CompanionPeerHelloSection(model: peerHello).frame(width: 340)
@@ -105,6 +138,8 @@ struct EmberPadCompanion: App {
             Button("Quit EmberPad Companion") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
                 .padding([.horizontal, .bottom], 14)
+        } label: {
+            CompanionLessonLabel(model: present.lesson)
         }.menuBarExtraStyle(.window)
     }
 }
