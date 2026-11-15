@@ -91,7 +91,7 @@ final class PageInkView: UIView {
         guard !setAsideLeaving.isEmpty else { return }
         let now = CACurrentMediaTime()
         setAsideLeaving.removeAll { item in
-            if now - item.since > Self.handoverPatience || showsInk(at: item.points, tiles: tiles, unreadable: { _ in true }) {
+            if now - item.since > Self.handoverPatience || showsInk(at: item.points, tiles: tiles, unreadable: Self.cannotBeRead) {
                 item.view.removeFromSuperview()
                 return true
             }
@@ -693,8 +693,11 @@ final class PageInkView: UIView {
         // A layer handed over is checked all the same: the page may have lost the stroke again since (EP113).
         guard !layer.view.isHidden || handedOver.contains(id) else { return true }
         let before = seedsAtChange
+        // EP113: a layer still drawing the stroke stays while a tile is busy, as at the handover. One already hidden
+        // was hidden once its tiles showed the ink, so a tile redrawn since the drawing changed counts for it, as before.
+        let showing = !layer.view.isHidden
         return showsInk(of: layer, tiles: tileLayers()) { tile in
-            before?[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false
+            (!showing || Self.cannotBeRead(tile)) && before?[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false
         }
     }
 
@@ -776,7 +779,9 @@ final class PageInkView: UIView {
             // drawing it was given in turn, those a landing passes through on the way too, and adds a new stroke to a
             // tile without redrawing the rest of it, so a tile can be redrawn without a stroke that is on the page.
             // Only a tile whose pixels cannot be read counts once redrawn since the stroke landed, as before.
-            let redrawnSince: (Tile) -> Bool = { tile in seeds[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false }
+            let redrawnSince: (Tile) -> Bool = { tile in
+                Self.cannotBeRead(tile) && seeds[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false
+            }
             if showsInk(of: layer, tiles: tiles, unreadable: redrawnSince) {
                 layer.view.isHidden = true
                 handovers[id] = nil
@@ -1377,6 +1382,13 @@ final class PageInkView: UIView {
     private var inkReadsRefused: [IOSurfaceID: (seed: UInt32, since: CFTimeInterval)] = [:]
     /// A tile that has refused such a read for this long, at the same seed, is read waiting for the GPU.
     static let inkReadWaitsAfter: TimeInterval = 0.1
+
+    /// Whether `tile`'s pixels can never be read here: not 4 bytes each. A tile the GPU is still drawing is read again
+    /// later (waiting for the GPU once it has refused for `inkReadWaitsAfter`), so it is never taken to show a stroke a
+    /// layer could leave for: on a slow GPU (the CI runner's, or this Mac's under GPU load) a landed stroke's layer went
+    /// on such a tile while the page was still drawing a drawing without the stroke, and the stroke was off the screen
+    /// (EP113).
+    private static func cannotBeRead(_ tile: Tile) -> Bool { tile.surface.bytesPerElement != 4 }
 
     /// Whether `tile` shows ink at page point `point`: the most opaque of the 5 by 5 pixels there (about 2 points
     /// across at the usual ink scale, so the pen's thinnest strokes still read as ink). Nil when its pixels cannot be
