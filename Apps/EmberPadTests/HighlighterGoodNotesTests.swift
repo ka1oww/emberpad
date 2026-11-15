@@ -65,6 +65,11 @@ final class HighlighterGoodNotesTests: XCTestCase {
                               "the highlight is cut where the eraser crossed it")
             }
             XCTAssertEqual(canvas.drawing.dataRepresentation(), drawing.dataRepresentation(), "\(mode): the canvas holds the whole page again")
+            // EP113: the set-aside layer leaves as the page's own tiles show the pen ink it held, within the handover's
+            // patience; removed at once, that ink vanished until PencilKit redrew the page.
+            let leaveBy = Date().addingTimeInterval(PageInkView.handoverPatience + 0.5)
+            while !canvas.subviews.compactMap({ $0 as? PKCanvasView }).allSatisfy({ (canvas.superview as? PageInkView)?.isLivePenLayer($0) == true }),
+                  Date() < leaveBy { PencilStroke.turn(0.02) }
             XCTAssertTrue(canvas.subviews.compactMap { $0 as? PKCanvasView }.allSatisfy { (canvas.superview as? PageInkView)?.isLivePenLayer($0) == true },
                           "\(mode): the set-aside layer is gone")
             XCTAssertEqual(canvas.undoManager?.undoActionName, "Erase", "\(mode): one undo step")

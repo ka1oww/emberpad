@@ -317,6 +317,43 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         }
     }
 
+    /// EP113: a landing never tries EmberPad's own step just below it. Tried, a step is undone and redone, and
+    /// PencilKit draws the page as it was in between: a straight highlight below a landing went for a frame and came
+    /// back (just before an eraser took it, it was erased ink coming back).
+    func testALandingNeverUndoesEmberPadsOwnStepBelowIt() async throws {
+        let (controller, session) = try await PenFeelTests.makeController()
+        let canvas = try PenFeelTests.canvas(controller, session)
+        let hold = try XCTUnwrap(PDFOverlayPageController.holdRecognizer(on: canvas))
+        let undo = Self.pencilKitUndo(for: controller)
+        let strokes = (0..<2).map { Self.liveStroke(y: 100 + CGFloat($0) * 60, at: $0) }
+        Self.pencilKitStep(undo, on: canvas, removing: [strokes[0]])
+        hold.pencilStroke = true
+        hold.heldAtEnd = true
+        hold.lineLikeAtHold = true
+        Self.commit(strokes[0], on: canvas, controller)
+        await InkSettle.settle()
+        XCTAssertEqual(undo.undoActionName, PendingInkEdit.straightLineActionName, "the line has its own step")
+        let redone = UndoCount()
+        let observer = NotificationCenter.default.addObserver(forName: .NSUndoManagerDidRedoChange, object: undo,
+                                                              queue: nil) { _ in redone.count += 1 }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        Self.pencilKitStep(undo, on: canvas, removing: [strokes[1]])
+        Self.commit(strokes[1], on: canvas, controller)
+        controller.inkTiming.lastLift = nil
+        controller.scheduleInkLanding()
+        await InkSettle.settle()
+        XCTAssertEqual(redone.count, 0, "the line's step was never undone and put back")
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 2, "every stroke is saved")
+        for (left, name) in zip([1, 0], [PendingInkEdit.inkActionName, PendingInkEdit.straightLineActionName]) {
+            XCTAssertEqual(undo.undoActionName, name)
+            undo.undo()
+            XCTAssertEqual(canvas.drawing.strokes.count, left, "one undo takes one stroke")
+        }
+        XCTAssertFalse(undo.canUndo, "no step is left over")
+    }
+
+    private final class UndoCount: @unchecked Sendable { var count = 0 }
+
     /// On a slow device PencilKit can take a stroke it has committed back off the page as it commits the next one,
     /// outside undo, in a change of its own or in that commit's. The stroke goes back on the page with the pen feel,
     /// as its own undo step, and the strokes after it land too (EP98). Before, none landed (all stayed in PencilKit's
