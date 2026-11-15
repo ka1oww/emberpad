@@ -10,6 +10,11 @@ import SwiftUI
 /// it holds in a presentation window: full screen on the projector (the first display that is not the Mac's own,
 /// unless another is chosen), or a normal window when the Mac has no other display. The window opens when the iPad
 /// starts presenting and closes when it stops. While it is up the Mac's display does not sleep.
+///
+/// The teacher can leave the presentation from the Mac at any time (EP127, `PresentWindowController`). That hides only
+/// the Mac's window, as **Exit presentation** in the menu always has: the iPad keeps presenting (its switch is the
+/// iPad's own, and a dropped link would only reconnect), the window stays hidden while it does, **Show presentation**
+/// brings it back, and the next Present from the iPad shows it again.
 @MainActor
 final class CompanionPresentModel: ObservableObject {
     static let displayKey = "EmberPadCompanion.presentDisplayName"
@@ -23,17 +28,18 @@ final class CompanionPresentModel: ObservableObject {
         }
     }
     @Published private(set) var screenNames: [String] = []
-    /// The teacher hid the window from the menu; the next Present shows it again.
+    /// The teacher left the presentation on the Mac; the next Present, or **Show presentation**, shows it again.
     @Published private(set) var hidden = false
 
     let host: PresentHost
     private let mailbox: PresentMailbox
-    private let window = PresentWindowController()
+    let window: PresentWindowController
     private var ticker: Timer?
     private var screenObserver: NSObjectProtocol?
     private var sleepAssertion: IOPMAssertionID?
 
-    init() {
+    init(window: PresentWindowController? = nil) {
+        self.window = window ?? PresentWindowController()
         let mailbox = PresentMailbox()
         let box = WeakPresentModel()
         host = PresentHost(onChange: { scene, status in
@@ -45,7 +51,7 @@ final class CompanionPresentModel: ObservableObject {
         self.mailbox = mailbox
         displayChoice = UserDefaults.standard.string(forKey: Self.displayKey) ?? ""
         box.model = self
-        window.onHide = { [weak self] in self?.hide() }
+        self.window.onHide = { [weak self] in self?.hide() }
         refreshScreens()
         let host = self.host
         ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in host.tick() }
@@ -74,7 +80,14 @@ final class CompanionPresentModel: ObservableObject {
         }
     }
 
-    /// **Hide presentation**: closes the window until the iPad presents again or **Show presentation**.
+    /// Whether the presentation window is up on the Mac.
+    var isShowing: Bool { status != .off && !hidden }
+
+    /// The display the presentation is shown on, for the menu.
+    var screenName: String? { targetScreen()?.localizedName }
+
+    /// Leaves the presentation on the Mac (Esc, the Exit control, **Exit presentation**): closes the window until the
+    /// iPad presents again or **Show presentation**. The iPad is not told; it keeps presenting.
     func hide() {
         hidden = true
         window.close()
@@ -175,62 +188,101 @@ extension NSScreen {
 // MARK: - Window
 
 /// The presentation window. On a projector it is borderless and covers the whole display above the menu bar and
-/// Dock, so the class sees only the worksheet. On the Mac's own display it is an ordinary window that can go full
-/// screen, so the Mac stays usable. Esc or Close hides it.
+/// Dock, so the class sees only the worksheet; it is a non-activating panel that takes the keyboard when it opens, so
+/// Esc reaches it even though the Companion, a menu-bar app, is not the active app (EP127). It covers only when the
+/// Mac has another display, so the teacher always keeps a menu bar. On the Mac's own display, or when the projector is
+/// the only display, it is an ordinary window that can go full screen, so the Mac stays usable.
+///
+/// Leaving it from the Mac, as presentation apps do: Esc, Command-W or Command-period; the Exit control that fades in
+/// when the pointer moves over the window and fades out again when it rests; the window's Close button; and **Exit
+/// presentation** in the Companion's menu-bar window. Each only hides the Mac's window (`onHide`); see
+/// `CompanionPresentModel.hide()`.
 @MainActor
 final class PresentWindowController: NSObject, NSWindowDelegate {
     var onHide: (() -> Void)?
-    private var window: NSWindow?
-    private var coversScreen = false
+    private(set) var window: NSWindow?
+    private(set) var coversScreen = false
+    /// The window is leaving native full screen before it hides.
+    private var closingFromFullScreen = false
     let canvas = PresentCanvasView()
+    let content = PresentContentView()
 
-    var isShown: Bool { window?.isVisible == true }
+    override init() {
+        super.init()
+        content.install(canvas)
+        content.onExit = { [weak self] in self?.onHide?() }
+        canvas.onEscape = { [weak self] in self?.onHide?() }
+    }
+
+    var isShown: Bool { window?.isVisible == true && !closingFromFullScreen }
+
+    /// Whether the window covers `screen`: only a display other than the Mac's own, and only while another display
+    /// is left for the teacher, so a projector that is the Mac's only display never loses its menu bar.
+    static func covers(isBuiltIn: Bool, screenCount: Int) -> Bool {
+        !isBuiltIn && screenCount > 1
+    }
 
     func show(on screen: NSScreen?) {
         guard let screen = screen ?? NSScreen.main else { return }
-        let cover = !screen.isBuiltIn
+        show(on: screen, cover: Self.covers(isBuiltIn: screen.isBuiltIn, screenCount: NSScreen.screens.count))
+    }
+
+    func show(on screen: NSScreen, cover: Bool) {
+        let wasShown = isShown
+        closingFromFullScreen = false
         if let window, coversScreen == cover, !cover || window.screen == screen {
             if cover { window.setFrame(screen.frame, display: true) }
-            window.orderFrontRegardless()
+            if wasShown { window.orderFrontRegardless() } else { takeKeyboard(window) }
             return
         }
         window?.delegate = nil
         window?.orderOut(nil)
-        canvas.removeFromSuperview()
+        content.removeFromSuperview()
         let made: NSWindow
         if cover {
-            made = PresentWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-            made.level = .screenSaver
-            made.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-            made.setFrame(screen.frame, display: false)
-            made.hasShadow = false
+            made = PresentCoverPanel(frame: screen.frame)
         } else {
             let size = CGSize(width: min(1_280, screen.visibleFrame.width * 0.8), height: min(800, screen.visibleFrame.height * 0.8))
-            made = NSWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.titled, .closable, .resizable, .miniaturizable],
-                            backing: .buffered, defer: false)
+            made = PresentTitledWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                                       backing: .buffered, defer: false)
             made.title = "EmberPad Presentation"
             made.collectionBehavior = [.fullScreenPrimary]
-            made.center()
+            made.setFrame(CGRect(origin: CGPoint(x: screen.visibleFrame.midX - size.width / 2, y: screen.visibleFrame.midY - size.height / 2),
+                                 size: made.frameRect(forContentRect: CGRect(origin: .zero, size: size)).size), display: false)
         }
         made.isReleasedWhenClosed = false
         made.backgroundColor = .black
         made.delegate = self
-        canvas.onEscape = { [weak self] in self?.onHide?() }
-        made.contentView = canvas
+        made.contentView = content
         coversScreen = cover
         window = made
-        if cover {
-            made.orderFrontRegardless()
-            made.makeKey()
-        } else {
-            NSApp.activate(ignoringOtherApps: true)
-            made.makeKeyAndOrderFront(nil)
-        }
-        made.makeFirstResponder(canvas)
+        takeKeyboard(made)
     }
 
+    /// Brings the window up with the keyboard, so Esc reaches it at once. The panel takes it without activating the
+    /// Companion, as Spotlight does, so the teacher's frontmost app stays frontmost.
+    private func takeKeyboard(_ window: NSWindow) {
+        if coversScreen {
+            window.orderFrontRegardless()
+            window.makeKey()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
+        window.makeFirstResponder(canvas)
+    }
+
+    /// Hides the window. A window in native full screen leaves full screen first, so no empty full-screen Space is
+    /// left behind, and hides when it is out (`windowDidExitFullScreen`).
     func close() {
-        window?.orderOut(nil)
+        content.hideExitControl(animated: false)
+        guard let window else { return }
+        if window.styleMask.contains(.fullScreen) {
+            closingFromFullScreen = true
+            window.toggleFullScreen(nil)
+        } else {
+            window.orderOut(nil)
+        }
     }
 
     func render(_ scene: PresentScene, status: PresentHost.Status) {
@@ -241,11 +293,209 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
         onHide?()
         return false
     }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard closingFromFullScreen else { return }
+        closingFromFullScreen = false
+        window?.orderOut(nil)
+    }
 }
 
-/// A borderless window that still takes keys, for Esc.
-private final class PresentWindow: NSWindow {
+/// The projector window: borderless, above the menu bar and Dock on every Space, and a non-activating panel that can
+/// still become key, so it takes Esc, Command-W and clicks without making the Companion the active app.
+final class PresentCoverPanel: NSPanel {
+    init(frame: CGRect) {
+        super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        // Do not set `isFloatingPanel` after this: it resets the level.
+        level = .screenSaver
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        hidesOnDeactivate = false
+        becomesKeyOnlyIfNeeded = false
+        hasShadow = false
+        setFrame(frame, display: false)
+    }
+
     override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        PresentExitKeys.handle(event, in: self) || super.performKeyEquivalent(with: event)
+    }
+}
+
+/// The window on the Mac's own display. Command-W closes it although the Companion has no File menu.
+final class PresentTitledWindow: NSWindow {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        PresentExitKeys.handle(event, in: self) || super.performKeyEquivalent(with: event)
+    }
+}
+
+/// The keys that leave the presentation, as in macOS presentation apps: Esc, Command-W and Command-period.
+enum PresentExitKeys {
+    static let escape: UInt16 = 53
+
+    static func isExit(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function])
+        if event.keyCode == escape { return modifiers.isEmpty }
+        guard modifiers == .command, let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
+        return key == "w" || key == "."
+    }
+
+    /// Sends a Command-W or Command-period to the presentation's exit; Esc goes through the canvas's `keyDown`.
+    @MainActor static func handle(_ event: NSEvent, in window: NSWindow) -> Bool {
+        guard event.keyCode != escape, isExit(event), let content = window.contentView as? PresentContentView else { return false }
+        content.onExit?()
+        return true
+    }
+}
+
+/// The window's content: the canvas, with the Exit control over it. The control fades in when the pointer moves
+/// over the window, even when the Companion is not the active app, and fades out once the pointer has rested for
+/// `restDelay` and is not on it. The class sees it only while the teacher moves the pointer on the projector.
+final class PresentContentView: NSView {
+    var onExit: (() -> Void)?
+    let exitButton = PresentExitButton()
+    /// Seconds the pointer rests before the Exit control fades out.
+    var restDelay: TimeInterval = 2.5
+    private var fadeTimer: Timer?
+    private(set) var isExitControlShown = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        exitButton.target = self
+        exitButton.action = #selector(exitPressed)
+        exitButton.alphaValue = 0
+        exitButton.isHidden = true
+        addTrackingArea(Self.pointerArea(owner: self))
+    }
+
+    /// Mouse moves over the whole window, even while another app is active.
+    private static func pointerArea(owner: NSView) -> NSTrackingArea {
+        NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: owner)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func install(_ canvas: NSView) {
+        canvas.frame = bounds
+        canvas.autoresizingMask = [.width, .height]
+        addSubview(canvas)
+        addSubview(exitButton)
+        layoutExitButton()
+    }
+
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func layout() {
+        super.layout()
+        layoutExitButton()
+    }
+
+    private func layoutExitButton() {
+        let size = exitButton.intrinsicContentSize
+        exitButton.frame = CGRect(x: 20, y: 20, width: size.width, height: size.height)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self { removeTrackingArea(area) }
+        addTrackingArea(Self.pointerArea(owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) { showExitControl() }
+    override func mouseEntered(with event: NSEvent) { showExitControl() }
+    override func mouseExited(with event: NSEvent) { scheduleFade(after: 0.6) }
+
+    /// Fades the Exit control in and starts the rest timer again.
+    func showExitControl() {
+        if !isExitControlShown {
+            isExitControlShown = true
+            exitButton.isHidden = false
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                exitButton.animator().alphaValue = 1
+            }
+        }
+        scheduleFade(after: restDelay)
+    }
+
+    func hideExitControl(animated: Bool) {
+        fadeTimer?.invalidate()
+        fadeTimer = nil
+        guard isExitControlShown else { return }
+        isExitControlShown = false
+        guard animated else {
+            exitButton.alphaValue = 0
+            exitButton.isHidden = true
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.4
+            exitButton.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.isExitControlShown else { return }
+                self.exitButton.isHidden = true
+            }
+        })
+    }
+
+    private func scheduleFade(after delay: TimeInterval) {
+        fadeTimer?.invalidate()
+        fadeTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.fadeIfResting() }
+        }
+    }
+
+    private func fadeIfResting() {
+        if let window, exitButton.frame.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) {
+            scheduleFade(after: restDelay)
+        } else {
+            hideExitControl(animated: true)
+        }
+    }
+
+    @objc private func exitPressed() {
+        onExit?()
+    }
+}
+
+/// The Exit control: a dark rounded pill with a cross and "Exit presentation", readable over any page.
+final class PresentExitButton: NSButton {
+    static let title = "Exit presentation"
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .regularSquare
+        refusesFirstResponder = true
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.35).cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = 18
+        image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 15, weight: .semibold))
+        imagePosition = .imageLeading
+        imageHugsTitle = true
+        contentTintColor = .white
+        attributedTitle = NSAttributedString(string: " " + Self.title, attributes: [.foregroundColor: NSColor.white,
+                                                                              .font: NSFont.systemFont(ofSize: 15, weight: .semibold)])
+        setAccessibilityLabel(Self.title)
+        setAccessibilityIdentifier("present-exit")
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize {
+        let inner = super.intrinsicContentSize
+        return NSSize(width: inner.width + 32, height: 36)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 // MARK: - Canvas
@@ -320,8 +570,10 @@ final class PresentCanvasView: NSView {
     override var isFlipped: Bool { true }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { onEscape?() } else { super.keyDown(with: event) }
+        if event.keyCode == PresentExitKeys.escape, PresentExitKeys.isExit(event) { onEscape?() } else { super.keyDown(with: event) }
     }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func layout() {
         super.layout()
@@ -723,7 +975,33 @@ enum PresentStar {
 
 // MARK: - Menu
 
-/// The Companion window's Present section: the light, which display, and Hide or Show.
+/// While the presentation is up, the first thing in the Companion's menu-bar window: where it is shown and
+/// **Exit presentation**, so the way out is visible without scrolling to the Present section.
+struct CompanionPresentBanner: View {
+    @ObservedObject var model: CompanionPresentModel
+
+    var body: some View {
+        if model.isShowing {
+            HStack(spacing: 8) {
+                Circle().fill(model.statusColor ?? .green).frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Presenting").font(.callout.weight(.semibold))
+                    if let name = model.screenName {
+                        Text("on \(name)").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                Spacer(minLength: 8)
+                Button("Exit presentation") { model.hide() }
+                    .help("Hides the presentation on this Mac. The iPad keeps presenting; Show presentation brings it back.")
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.accentColor.opacity(0.12))
+        }
+    }
+}
+
+/// The Companion window's Present section: the light, which display, and Show after the teacher left it.
 struct CompanionPresentSection: View {
     @ObservedObject var model: CompanionPresentModel
 
@@ -738,10 +1016,9 @@ struct CompanionPresentSection: View {
                 Text("Automatic (projector when connected)").tag("")
                 ForEach(model.screenNames, id: \.self) { Text($0).tag($0) }
             }
-            if model.status != .off {
-                Button(model.hidden ? "Show presentation" : "Hide presentation") {
-                    if model.hidden { model.show() } else { model.hide() }
-                }
+            // While the presentation is up, **Exit presentation** is in the banner at the top of the window.
+            if model.status != .off, model.hidden {
+                Button("Show presentation") { model.show() }
             }
         }
         .padding(14)

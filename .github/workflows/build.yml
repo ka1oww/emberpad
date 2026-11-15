@@ -19,6 +19,8 @@ jobs:
         run: xcodebuild -project EmberPad.xcodeproj -scheme EmberPad -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/ios-build" CODE_SIGNING_ALLOWED=NO build
       - name: Build Companion without signing
         run: xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' -configuration Debug -destination 'generic/platform=macOS' -derivedDataPath "$RUNNER_TEMP/mac-build" CODE_SIGNING_ALLOWED=NO build
+      - name: Test Companion on macOS
+        run: xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' -configuration Debug -destination 'platform=macOS' -derivedDataPath "$RUNNER_TEMP/mac-build" CODE_SIGNING_ALLOWED=NO test
       - name: Lint renewal artifacts without executing them
         run: |
           zsh -n resign/renew.zsh
