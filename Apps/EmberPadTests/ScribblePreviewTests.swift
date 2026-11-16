@@ -388,6 +388,9 @@ final class ScribblePreviewTests: XCTestCase {
             controller.liveInk.onStroke?(.moved(Array(samples[index..<end]), predicted: []))
             index = end
             await settle()
+            // EP140: the scribble is judged off the main thread; each step reads it once it has caught up.
+            let deadline = Date().addingTimeInterval(2)
+            while controller.scribbleJudgementInFlight, Date() < deadline { await InkSettle.turn() }
             steps.append(Step(erased: controller.scribblePreview?.erased ?? [],
                               outlined: controller.scribbleOutline.superlayer != nil && controller.scribbleOutline.path != nil))
         }

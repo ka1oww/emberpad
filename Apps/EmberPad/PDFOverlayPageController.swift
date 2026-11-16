@@ -109,7 +109,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// round the ink it will erase. Internal for tests and for `ScribblePreview.swift`.
     var scribblePreview: ScribblePreview?
     let scribbleOutline = InkSelectionController.makeLassoPath()
-    var scribbleUpdateScheduled = false
+    /// A scribble's judgement is under way off the main thread (EP140, `ScribblePreview.swift`).
+    var scribbleJudgementInFlight = false
     var scribbleExpiry: DispatchWorkItem?
     /// Each page's drawing revision, counted on every change to its canvas, so the page's strokes as the scribble
     /// test reads them (`scribbleInkCache`) are read again only when they change.
@@ -905,7 +906,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// Draws the live pen's strokes on `page` above its committed ink.
     private func showLivePen(page: Int) {
         guard let view = canvases[page]?.superview as? PageInkView else { return }
-        view.showLivePen(livePen.shown(page: page)) { livePen.stroke(id: $0)?.shaped }
+        // EP140: each stroke as it is now, shaped only if it is drawn, and then off the main thread.
+        view.showLivePenShapes(livePen.shown(page: page)) { id in
+            livePen.stroke(id: id).map { stroke in PageInkView.LivePenShape(making: { stroke.shaped }) }
+        }
     }
 
     /// Clears live strokes whose commit or page drawing never came, once they are due.
