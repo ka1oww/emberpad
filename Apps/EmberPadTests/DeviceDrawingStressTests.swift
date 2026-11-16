@@ -37,6 +37,16 @@ final class DeviceDrawingStressTests: XCTestCase {
         StressPage.pump(1.2)
         func seenAll() -> Bool { ids.allSatisfy { id in scenario.sampler.mark(id)?.firstSeen.allSatisfy { $0 != nil } ?? false } }
         var seen = seenAll()
+        // Which points the first look never read as ink, so a failure on a device can be told apart
+        // from a page drawn blank (EP113: on the iPad the trial flip after it read the page's ink as missing).
+        let firstRows = StressRun.rowsTopDown ? "top down" : "bottom up"
+        let unseen = ids.compactMap { id -> String? in
+            guard let mark = scenario.sampler.mark(id) else { return nil }
+            let missed = mark.firstSeen.indices.filter { mark.firstSeen[$0] == nil }
+            guard !missed.isEmpty else { return nil }
+            return "\(mark.label): points \(missed.map { String($0 + 1) }.joined(separator: ",")) of \(mark.points.count) at "
+                + missed.map { String(format: "(%.0f, %.0f)", mark.points[$0].x, mark.points[$0].y) }.joined(separator: " ")
+        }
         if !seen {
             // Rows bottom to top on this GPU: read them the other way round and look again.
             StressRun.rowsTopDown.toggle()
@@ -51,7 +61,9 @@ final class DeviceDrawingStressTests: XCTestCase {
         StressRun.samplerSelfCheck = StressRun.samplerWorks
             ? "pass (\(frames) frames read; rows \(StressRun.rowsTopDown ? "top down" : "bottom up"))"
             : "FAIL (ink seen \(seen), ink read on bare paper \(phantom), frames \(frames))"
-        scenario.check("sees the page's ink", seen, "every point of the handwriting already on the page reads as ink")
+        scenario.check("sees the page's ink", seen, "every point of the handwriting already on the page reads as ink"
+                       + (unseen.isEmpty ? "" : "; first look (rows \(firstRows)) missed "
+                          + unseen.joined(separator: "; ")))
         scenario.check("reads no ink on bare paper", !phantom, "points on bare paper read as bare")
         scenario.check("reads every display frame", frames > 30, "\(frames) frames read in about 1.2 s")
         _ = scenario.sampler.picture(page: 0, name: "sampler-page.png")
@@ -1044,6 +1056,68 @@ final class DeviceDrawingStressTests: XCTestCase {
         var expected = written
         expected[0, default: 0] += scenario.bystanderCount
         scenario.finish(expectedStrokes: expected)
+    }
+
+    /// Erasing and writing straight on, as in a lesson: a row of pen ink, three of its strokes erased with the
+    /// whole-stroke eraser while the row may still be landing, and the pen back at once for fresh strokes just below
+    /// them on the same tiles; then more fresh strokes after a scroll away and back, and after a page change and back.
+    /// What was erased never shows again (EP113: old ink the eraser took came back while writing went on).
+    func test23_EraseThenKeepWriting() throws {
+        let scenario = try StressScenario(tool: "eraser.thenKeepWriting", title: "Erase, then keep writing", self)
+        var kept = scenario.bystanderCount
+        guard let scroll = scenario.scrollView else {
+            scenario.check("finds the pages' scroll view", false, "no scroll view in the PDF view")
+            return scenario.finish(expectedStrokes: nil)
+        }
+        var seed = 0
+        // Fresh strokes 45 pt below the row: clear of the erased ink and the eraser's path, and never crossing other
+        // ink (a scribble to erase).
+        func fresh(_ xs: [CGFloat], y: CGFloat, _ label: String) {
+            scenario.tools.select(.pen)
+            for (k, x) in xs.enumerated() {
+                seed += 1
+                scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: x, y: y + 45), seed: seed), speed: 420,
+                                               seed: UInt64(500 + seed)), "\(label) #\(k + 1)")
+                kept += 1
+                StressPage.pump([0.012, 0.03, 0.06][k % 3])
+            }
+        }
+        for (cycle, y) in scenario.fit([190, 360, 530]).enumerated() {
+            scenario.tools.select(.pen)
+            var row: [Int] = []
+            for n in 0..<6 {
+                seed += 1
+                row.append(scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: 60 + CGFloat(n) * 90, y: y), seed: seed),
+                                                          speed: 450, seed: UInt64(seed)), "row \(cycle + 1) stroke \(n + 1)"))
+                kept += 1
+                StressPage.pump([0.03, 0.012, 0.06][n % 3])
+            }
+            // Through the first three strokes, with the default eraser, while the row is still landing.
+            scenario.tools.select(.eraser)
+            scenario.tools.setEraserMode(.wholeStroke)
+            scenario.tools.selectEraserSize(Theme.eraserDefaultSizeIndex)
+            scenario.erase(StressInk.line(from: CGPoint(x: 40, y: y + 4), to: CGPoint(x: 236, y: y + 4), steps: 60),
+                           removing: Array(row.prefix(3)), "row \(cycle + 1) erase")
+            kept -= 3
+            // Straight back to the pen, under the ink just erased.
+            fresh([60, 120, 180, 240], y: y, "row \(cycle + 1) fresh")
+            scenario.note("row \(cycle + 1) scroll away and back")
+            let home = scroll.contentOffset
+            scroll.setContentOffset(CGPoint(x: home.x, y: home.y + 400), animated: cycle % 2 == 1)
+            StressPage.pump(cycle % 2 == 1 ? 0.4 : 0.05)
+            scroll.setContentOffset(home, animated: cycle % 2 == 1)
+            StressPage.pump(cycle % 2 == 1 ? 0.4 : 0.05)
+            fresh([330, 390], y: y, "row \(cycle + 1) after scroll")
+            scenario.note("row \(cycle + 1) page change and back")
+            scenario.controller.goToPage(1)
+            StressPage.pump(0.15)
+            scenario.controller.goToPage(0)
+            let start = CACurrentMediaTime()
+            while scenario.page.canvas(0)?.window == nil, CACurrentMediaTime() - start < 2 { StressPage.pump(0.004) }
+            fresh([450, 510], y: y, "row \(cycle + 1) after page change")
+            scenario.settle()
+        }
+        scenario.finish(expectedStrokes: [0: kept])
     }
 
     // MARK: - Summary

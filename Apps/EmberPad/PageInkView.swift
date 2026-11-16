@@ -74,6 +74,36 @@ final class PageInkView: UIView {
         fitSetAsideInk()
     }
 
+    /// The ink set aside in `layer` is back on the page (EP113). The layer leaves as the page's tiles show that ink,
+    /// masked off each tile that does, as a landed live stroke's does: removed at once, the pen ink it held vanished
+    /// for a few frames, until PencilKit had redrawn the page with it. Never kept longer than `handoverPatience`.
+    func removeSetAsideInk(_ layer: PKCanvasView) {
+        let points = Self.checkPoints(of: layer.drawing.strokes)
+        guard window != nil, !points.isEmpty else { return layer.removeFromSuperview() }
+        setAsideLeaving.append((layer, points, CACurrentMediaTime()))
+        if handoverWatch == nil { handoverWatch = HandoverWatch(self) }
+        checkHandovers()
+    }
+
+    private var setAsideLeaving: [(view: PKCanvasView, points: [CGPoint], since: CFTimeInterval)] = []
+
+    private func checkSetAsideLeaving(_ tiles: [Tile]) {
+        guard !setAsideLeaving.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        setAsideLeaving.removeAll { item in
+            if now - item.since > Self.handoverPatience || showsInk(at: item.points, tiles: tiles, unreadable: Self.cannotBeRead) {
+                item.view.removeFromSuperview()
+                return true
+            }
+            let drawn = tiles.filter { tile in
+                let inside = item.points.filter { tile.frame.contains($0) }
+                return !inside.isEmpty && inside.allSatisfy { showsInk(at: $0, in: tile) ?? true }
+            }
+            if !drawn.isEmpty { mask(item.view, off: drawn.map(\.frame)) }
+            return false
+        }
+    }
+
     // MARK: Live pen (EP56, EP94, EP103)
 
     /// One live pen stroke's own layer, drawn by PencilKit at the canvas's zoom above its own ink, so it looks exactly
@@ -104,6 +134,8 @@ final class PageInkView: UIView {
         /// one may (EP114, `livePenInterval`).
         var lastGiven: CFTimeInterval = -.infinity
         var flushScheduled = false
+        /// Where the page is checked for `latest`'s ink (EP113), worked out once per drawing.
+        var checkPoints: [CGPoint]?
 
         init(view: PKCanvasView) { self.view = view }
     }
@@ -163,7 +195,15 @@ final class PageInkView: UIView {
     /// in minutes of writing and stalled the page for up to a fifth of a second.
     func showLivePen(_ shown: [LivePenStrokes.Shown], stroke: (UInt64) -> PKStroke?) {
         let ids = Set(shown.map(\.id))
-        for layer in livePenLayers where layer.id.map({ !ids.contains($0) }) ?? false {
+        for id in ids { leaving[id] = nil }
+        for layer in livePenLayers where layer.id.map({ !ids.contains($0) && leaving[$0] == nil }) ?? false {
+            // EP113: a stroke taken off the page (undone, erased) while the page still draws ink that has just landed
+            // keeps its layer until the page is done: PencilKit draws the landed drawing after the change, so the
+            // stroke, gone with its layer, came back on the page for a few frames.
+            if let id = layer.id, !layer.view.isHidden, window != nil, isDrawingLanding {
+                leave(layer, id: id)
+                continue
+            }
             retire(layer)
         }
         livePenOrder = shown.map(\.id)
@@ -213,10 +253,49 @@ final class PageInkView: UIView {
         DispatchQueue.main.async { [weak self] in self?.prepareSpareLivePenLayer() }
     }
 
+    /// Live layers whose strokes left the page while it was drawing a landing, by live stroke id: when they left, and
+    /// whether the tiles have shown the stroke since (EP113). Each goes once the tiles have shown the stroke and lost it
+    /// again (PencilKit has drawn the landing, and then the page without it), or once the page is done drawing the
+    /// landing without it, and never later than `landingDrawPatience` after it left. Waiting for PencilKit's report
+    /// alone kept an undone stroke up for a sixth of a second after the page had lost it.
+    private var leaving: [UInt64: (since: CFTimeInterval, seen: Bool)] = [:]
+
+    private func leave(_ layer: LivePenLayer, id: UInt64) {
+        leaving[id] = (CACurrentMediaTime(), false)
+        handovers[id] = nil
+        handedOver.remove(id)
+        maskedOff[id] = nil
+        if handoverWatch == nil { handoverWatch = HandoverWatch(self) }
+    }
+
+    private func checkLeaving(_ tiles: [Tile]) {
+        guard !leaving.isEmpty else { return }
+        let now = CACurrentMediaTime()
+        for (id, item) in leaving {
+            guard let layer = livePenLayers.first(where: { $0.id == id }) else {
+                leaving[id] = nil
+                continue
+            }
+            if now - item.since < Self.landingDrawPatience {
+                // A tile whose pixels cannot be read may still show it.
+                if showsInk(of: layer, tiles: tiles, unreadable: { _ in true }) {
+                    leaving[id]?.seen = true
+                    continue
+                }
+                if !item.seen, isDrawingLanding { continue }
+            }
+            retire(layer)
+        }
+    }
+
     /// Hides `layer` at once and clears it while hidden, so it is blank when it is next used; or, past the spares
     /// kept, removes it.
     private func retire(_ layer: LivePenLayer) {
-        if let id = layer.id { handovers[id] = nil }
+        if let id = layer.id {
+            handovers[id] = nil
+            handedOver.remove(id)
+            leaving[id] = nil
+        }
         layer.id = nil
         layer.revision = -1
         layer.waiting = nil
@@ -238,6 +317,7 @@ final class PageInkView: UIView {
     /// `livePenInterval`.
     private func render(_ stroke: PKStroke?, revision: Int, on layer: LivePenLayer, now: Bool = false) {
         layer.latest = stroke
+        layer.checkPoints = nil
         let time = CACurrentMediaTime()
         if !now, let rendering = layer.rendering, time - rendering.since < Self.livePenRenderPatience {
             layer.waiting = (stroke, revision)
@@ -351,7 +431,7 @@ final class PageInkView: UIView {
         var shown = false
         var moved: CGAffineTransform = .identity
         /// Dropped back on the page: the page's tiles then, nil while the page was still drawing an earlier change.
-        var dropped: (seeds: [ObjectIdentifier: UInt32]?, since: CFTimeInterval)?
+        var dropped: (seeds: [ObjectIdentifier: UInt64]?, since: CFTimeInterval)?
 
         init(view: PKCanvasView) { self.view = view }
     }
@@ -519,7 +599,7 @@ final class PageInkView: UIView {
     }
 
     /// Hides each dropped lift once the page has redrawn every tile under it, and masks it off those redrawn so far.
-    private func checkDroppedLifts(_ tiles: [(layer: CALayer, frame: CGRect, seed: UInt32)]) {
+    private func checkDroppedLifts(_ tiles: [Tile]) {
         let now = CACurrentMediaTime()
         for lift in lifts {
             guard let dropped = lift.dropped else { continue }
@@ -560,17 +640,18 @@ final class PageInkView: UIView {
     /// not have the stroke. PencilKit sends no report after it commits a Pencil stroke, so the page counts as idle
     /// once every tile has been redrawn since its drawing last changed; otherwise the layer waits for the report.
     struct PageTiles {
-        fileprivate let seeds: [ObjectIdentifier: UInt32]
+        fileprivate let seeds: [ObjectIdentifier: UInt64]
         /// Every tile has been redrawn since the page's drawing last changed.
         fileprivate let idle: Bool
     }
 
     /// The tiles' seeds when the page's drawing or zoom last changed; nil before it first changed.
-    private var seedsAtChange: [ObjectIdentifier: UInt32]?
+    private var seedsAtChange: [ObjectIdentifier: UInt64]?
 
     /// The page's drawing has just changed, so PencilKit will redraw its tiles.
     func pageDrawingDidChange() {
         seedsAtChange = tileSeeds()
+        if isDrawingLanding { changedWhileDrawingLanding = true }
         // EP108: a handover still waiting is given its full patience again. PencilKit leaves the page as it is while it
         // draws a stroke, so strokes that landed as the Pencil came down are redrawn only after that stroke's commit.
         if !handovers.isEmpty { handoverStarted = CACurrentMediaTime() }
@@ -588,62 +669,318 @@ final class PageInkView: UIView {
     }
 
     /// Live strokes `ids` have just landed on the page, whose tiles were `tiles` before: each one's layer is masked off
-    /// each tile under it once the page has redrawn that tile, and hidden once it has redrawn them all. While the page
-    /// was still drawing an earlier change, the layers wait for the page's report instead.
+    /// each tile under it once that tile shows the stroke's ink, and hidden once the page shows all of it.
+    /// EP113: whatever the page was drawing when they landed, as the tiles' own pixels are what is checked.
     func handOver(_ ids: [UInt64], since tiles: PageTiles) {
-        guard tiles.idle, !tiles.seeds.isEmpty, !ids.isEmpty else { return }
+        landedAt = CACurrentMediaTime()
+        landingReported = false
+        changedWhileDrawingLanding = false
+        guard !tiles.seeds.isEmpty, !ids.isEmpty else { return }
         for id in ids { handovers[id] = tiles.seeds }
         handoverStarted = CACurrentMediaTime()
         if handoverWatch == nil { handoverWatch = HandoverWatch(self) }
         checkHandovers()
     }
 
-    /// Whether the page itself now draws live stroke `id`, which has landed on it (EP108): every tile under the stroke
-    /// has been redrawn since the page's drawing last changed, at or after the landing. A stroke with no tile under it
-    /// is not known to be drawn. PencilKit leaves the page's tiles as they are while it draws a stroke, so a stroke
-    /// that landed as the Pencil came down is drawn by its own layer alone until the Pencil lifts.
+    /// Whether the page itself now draws live stroke `id`, which has landed on it (EP108): its own tiles show the
+    /// stroke's ink (EP113). A stroke with no tile under it is not drawn. PencilKit leaves the page's tiles as they are
+    /// while it draws a stroke, so a stroke that landed as the Pencil came down is drawn by its own layer alone until
+    /// the Pencil lifts.
     func hasDrawn(liveStroke id: UInt64) -> Bool {
         guard let layer = livePenLayers.first(where: { $0.id == id }) else { return true }
-        guard !layer.view.isHidden else { return true }
-        guard let before = seedsAtChange else { return false }
-        let bounds = layer.latestBounds.insetBy(dx: -1, dy: -1)
-        let under = tileLayers().filter { $0.frame.intersects(bounds) }
-        return !under.isEmpty && under.allSatisfy { tile in before[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false }
+        // A page off screen has no tiles drawn to check, and its layer shows nothing either: PencilKit's report holds.
+        guard window != nil else { return true }
+        // A layer handed over is checked all the same: the page may have lost the stroke again since (EP113).
+        guard !layer.view.isHidden || handedOver.contains(id) else { return true }
+        let before = seedsAtChange
+        // EP113: a layer still drawing the stroke stays while a tile is busy, as at the handover. One already hidden
+        // was hidden once its tiles showed the ink, so a tile redrawn since the drawing changed counts for it, as before.
+        let showing = !layer.view.isHidden
+        return showsInk(of: layer, tiles: tileLayers()) { tile in
+            (!showing || Self.cannotBeRead(tile)) && before?[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false
+        }
     }
 
+    /// Whether every tile under live stroke `id` has been redrawn since the page's drawing last changed, so that what
+    /// the page shows there is its drawing as it is now (EP113). PencilKit leaves the page's tiles as they are while it
+    /// draws a stroke, for as long as that stroke is in flight; until it redraws them, a stroke that landed is shown by
+    /// its own layer alone, however long that takes. A point under no tile at all is off the part of the page PencilKit
+    /// draws, and is left out; a stroke with none of its points under a tile has not been redrawn.
+    func hasRedrawnSinceChange(liveStroke id: UInt64) -> Bool {
+        guard let layer = livePenLayers.first(where: { $0.id == id }), let before = seedsAtChange else { return true }
+        let tiles = tileLayers()
+        let over = checkPoints(of: layer).map { point in tiles.filter { $0.frame.contains(point) } }.filter { !$0.isEmpty }
+        return !over.isEmpty && over.allSatisfy { tiles in
+            tiles.allSatisfy { tile in before[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? true }
+        }
+    }
+
+    /// Whether the page is still drawing ink that has just landed on it (EP113): PencilKit has not reported the page
+    /// drawn since the landing, or its tiles have not all been redrawn since its drawing last changed. PencilKit draws
+    /// every drawing a landing passes through, and not always in turn, so a change made now could be drawn before one
+    /// of those: a stroke the change takes off the page showed again for a frame, after it had gone. A redrawn tile
+    /// alone is no proof the page is done. Never for longer than `landingDrawPatience` after the landing.
+    var isDrawingLanding: Bool {
+        CACurrentMediaTime() - landedAt < Self.landingDrawPatience && !(landingReported && pageTiles().idle)
+    }
+    private var landedAt: CFTimeInterval = -.infinity
+    private var landingReported = false
+    /// Whether the page's drawing has changed again (an undo, an erase) since the latest landing, while it was still
+    /// drawing that landing (EP113).
+    private var changedWhileDrawingLanding = false
+    static let landingDrawPatience: TimeInterval = 0.4
+
     /// The tiles each landed stroke is waiting for, by live stroke id: their seeds when it landed.
-    private var handovers: [UInt64: [ObjectIdentifier: UInt32]] = [:]
+    private var handovers: [UInt64: [ObjectIdentifier: UInt64]] = [:]
+    /// Landed strokes whose layers the handover has hidden, by live stroke id, watched until they leave (EP113).
+    private var handedOver: Set<UInt64> = []
+    /// Live layers masked off tiles that showed their ink, by live stroke id: those tiles' seeds then (EP113). A layer
+    /// stays up until the page shows all of its stroke, long after its handover gave up, and on the simulator
+    /// PencilKit redrew a tile without the stroke while the layer was still masked off it: the stroke showed nowhere
+    /// for a frame. So each mask is checked again whenever one of its tiles is redrawn.
+    private var maskedOff: [UInt64: [ObjectIdentifier: UInt64]] = [:]
+    /// Whether a landed live stroke, by id, is on the page's drawing now, where its layer draws it (its bounds, in
+    /// page points). Set by the page's controller.
+    var landedStrokeIsOnPage: ((UInt64, CGRect) -> Bool)?
     private var handoverWatch: HandoverWatch?
     private var handoverStarted: CFTimeInterval = 0
     /// A handover gives up this long after it began or the page's drawing last changed, and what is left of its
     /// strokes waits for the page's report.
     static let handoverPatience: TimeInterval = 2
 
-    fileprivate func checkHandovers() {
+    /// How many times the handover watch has checked the page (for tests).
+    private(set) var handoverChecks = 0
+    /// The tiles' stamps at the watch's last check.
+    private var checkedTileStamps: [UInt64] = []
+
+    /// `betweenFrames`: a pass of the main run loop, not a display frame. EP113: the checks read the tiles' pixels,
+    /// which takes milliseconds, and the run loop can pass hundreds of times a second; checked on every pass, the
+    /// watch kept the main thread busy, and PencilKit took a quarter of a second to redraw an undone stroke away. So
+    /// between frames the page is checked only once a tile has been redrawn, which is what the watch waits for.
+    fileprivate func checkHandovers(betweenFrames: Bool = false) {
         let tiles = tileLayers()
+        let stamps = tiles.map(\.seed)
+        if betweenFrames, stamps == checkedTileStamps { return }
+        checkedTileStamps = stamps
+        handoverChecks += 1
+        // EP113: no layer is hidden or masked while the page is still drawing a landing its drawing has changed
+        // since (an undo just after writing). PencilKit then draws the drawings the landing passed through after the
+        // landed one, and a tile redrawn without strokes still on the page came to the screen a frame before the
+        // layer was shown again there: those strokes blinked out for a frame. A landing left alone is handed over as
+        // its tiles show it (EP103).
+        let landing = changedWhileDrawingLanding && isDrawingLanding
         for (id, seeds) in handovers {
             guard let layer = livePenLayers.first(where: { $0.id == id }), !layer.view.isHidden else {
                 handovers[id] = nil
                 continue
             }
-            let bounds = layer.latestBounds.insetBy(dx: -1, dy: -1)
-            let under = tiles.filter { $0.frame.intersects(bounds) }
-            // A tile counts once it has been redrawn since the stroke landed. One made since may not be drawn yet.
-            let redrawn = under.filter { tile in seeds[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false }
-            if !under.isEmpty, redrawn.count == under.count {
+            if landing { continue }
+            // EP113: a tile counts once it shows the stroke's ink. A redraw alone is no proof: PencilKit draws every
+            // drawing it was given in turn, those a landing passes through on the way too, and adds a new stroke to a
+            // tile without redrawing the rest of it, so a tile can be redrawn without a stroke that is on the page.
+            // Only a tile whose pixels cannot be read counts once redrawn since the stroke landed, as before.
+            let redrawnSince: (Tile) -> Bool = { tile in
+                Self.cannotBeRead(tile) && seeds[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false
+            }
+            if showsInk(of: layer, tiles: tiles, unreadable: redrawnSince) {
                 layer.view.isHidden = true
                 handovers[id] = nil
-            } else if !redrawn.isEmpty {
-                mask(layer.view, off: redrawn.map(\.frame))
+                maskedOff[id] = nil
+                handedOver.insert(id)
+            } else {
+                // A tile that has lost the stroke again (a drawing from before the landing) is unmasked at once.
+                maskOff(layer, tiles: tiles, unreadable: redrawnSince)
             }
         }
+        checkMasks(tiles)
+        checkHandedOver(tiles)
+        checkLandingGuard(tiles)
+        checkSetAsideLeaving(tiles)
+        checkLeaving(tiles)
         if CACurrentMediaTime() - handoverStarted > Self.handoverPatience { handovers = [:] }
         checkScribbleCuts()
         checkDroppedLifts(tiles)
-        if handovers.isEmpty, !scribbleCutLanded, !liftDropping {
+        if handovers.isEmpty, handedOver.isEmpty, maskedOff.isEmpty, landingGuard == nil, setAsideLeaving.isEmpty,
+           leaving.isEmpty, !scribbleCutLanded, !liftDropping {
             handoverWatch?.stop()
             handoverWatch = nil
         }
+    }
+
+    /// Masks `layer` off each tile under its stroke that shows all of its ink there, or unmasks it when none does.
+    /// `unreadable` decides for a tile whose pixels cannot be read.
+    private func maskOff(_ layer: LivePenLayer, tiles: [Tile], unreadable: (Tile) -> Bool) {
+        guard let id = layer.id else { return }
+        let points = checkPoints(of: layer)
+        let drawn = tiles.filter { tile in
+            let inside = points.filter { tile.frame.contains($0) }
+            return !inside.isEmpty && inside.allSatisfy { showsInk(at: $0, in: tile) ?? unreadable(tile) }
+        }
+        if !drawn.isEmpty {
+            mask(layer.view, off: drawn.map(\.frame))
+            maskedOff[id] = Dictionary(drawn.map { (ObjectIdentifier($0.layer), $0.seed) }, uniquingKeysWith: { a, _ in a })
+        } else {
+            if layer.view.layer.mask != nil { layer.view.layer.mask = nil }
+            maskedOff[id] = nil
+        }
+    }
+
+    /// A showing live layer masked off tiles, its handover over, is masked afresh as soon as one of those tiles is
+    /// redrawn or goes, off just the tiles that show its ink now (EP113). A tile whose pixels cannot be read does not.
+    private func checkMasks(_ tiles: [Tile]) {
+        guard !maskedOff.isEmpty else { return }
+        let seeds = Dictionary(tiles.map { (ObjectIdentifier($0.layer), $0.seed) }, uniquingKeysWith: { a, _ in a })
+        for (id, masked) in maskedOff where handovers[id] == nil {
+            guard let layer = livePenLayers.first(where: { $0.id == id }), !layer.view.isHidden,
+                  layer.view.layer.mask != nil else {
+                maskedOff[id] = nil
+                continue
+            }
+            guard masked.contains(where: { seeds[$0.key] != $0.value }) else { continue }
+            maskOff(layer, tiles: tiles, unreadable: { _ in false })
+        }
+    }
+
+    /// EP113: a stroke's layer is hidden as soon as the page shows its ink, but PencilKit draws every drawing a
+    /// landing passes through, and on the simulator one it was given before the landing came to the tiles after the
+    /// landed one: the stroke vanished, for up to a second, until the page's drawing next changed. So a layer handed
+    /// over is watched until it leaves, and shows again whenever the page loses its stroke while the stroke is still
+    /// on the page; it is handed over afresh. A tile whose pixels cannot be read is taken to show it.
+    private func checkHandedOver(_ tiles: [Tile]) {
+        // A scribble's cut hides the layers of the live strokes it takes off (EP115); those stay hidden with it.
+        let cut = scribbleCuts.reduce(Set<UInt64>()) { $0.union($1.liveStrokes) }
+        for id in handedOver {
+            guard let layer = livePenLayers.first(where: { $0.id == id }), layer.view.isHidden, !cut.contains(id) else {
+                handedOver.remove(id)
+                continue
+            }
+            if showsInk(of: layer, tiles: tiles, unreadable: { _ in true }) { continue }
+            handedOver.remove(id)
+            // Erased or undone, it leaves with the live pen's next look at the page.
+            guard landedStrokeIsOnPage?(id, layer.latestBounds) == true else { continue }
+            layer.view.layer.mask = nil
+            layer.view.isHidden = false
+            handovers[id] = Dictionary(tiles.map { (ObjectIdentifier($0.layer), $0.seed) }, uniquingKeysWith: { a, _ in a })
+            handoverStarted = CACurrentMediaTime()
+        }
+    }
+
+    // MARK: Landed ink with no live layer (EP113)
+
+    /// A landing replaces strokes PencilKit committed by popping their undo steps and setting the drawing again, and
+    /// PencilKit draws every drawing that passes through, the popped ones without those strokes. On the simulator one
+    /// of those sometimes came to the tiles after the landed drawing and stayed there until the drawing next changed:
+    /// a highlight, which has no live layer to fall back on, vanished for half a second while the next stroke was
+    /// written. So the strokes a landing sets again with no live layer are watched until PencilKit reports the page
+    /// drawn and its tiles show them: whenever the tiles lose one the page has shown and still holds, a cover layer
+    /// draws it until they show it again. The tiles are looked at only once PencilKit has drawn the landing.
+    private struct LandingGuard {
+        /// Each stroke, where it is checked, and the tiles when it landed.
+        var strokes: [(id: InkStrokeID, stroke: PKStroke, points: [CGPoint], since: [ObjectIdentifier: UInt64])]
+        /// The strokes the tiles have shown since the landing. A stroke is covered once they have and lose it, or once
+        /// every tile under it has been redrawn since it landed without it; never while PencilKit may still draw it
+        /// some other way, as just after its commit.
+        var seen: Set<InkStrokeID> = []
+        var covered: Set<InkStrokeID> = []
+        var reported = false
+        let since: CFTimeInterval
+    }
+
+    private var landingGuard: LandingGuard?
+    private var landingCover: PKCanvasView?
+    /// A landing is never watched longer than this.
+    static let landingGuardPatience: TimeInterval = 10
+
+    /// The strokes the cover draws now, the page having lost them (for tests).
+    var landingCoverStrokes: [PKStroke] {
+        guard let watch = landingGuard, landingCover?.isHidden == false else { return [] }
+        return watch.strokes.filter { watch.covered.contains($0.id) }.map(\.stroke)
+    }
+
+    /// Strokes `strokes`, with no live layer, have just been set on the page again by a landing: watched until the page
+    /// has drawn them. Those still watched from an earlier landing stay watched.
+    func guardLanding(_ strokes: [PKStroke]) {
+        var entries = (landingGuard?.strokes ?? [])
+        let since = tileSeeds()
+        for stroke in strokes {
+            let id = InkStrokeID(stroke)
+            let points = Self.checkPoints(of: [stroke])
+            // PencilKit's clear copy of a stroke shows no ink to lose.
+            guard !points.isEmpty, stroke.ink.color.cgColor.alpha > 0.01, !entries.contains(where: { $0.id == id }) else { continue }
+            entries.append((id, stroke, points, since))
+        }
+        guard !entries.isEmpty else { return }
+        landingGuard = LandingGuard(strokes: entries, seen: landingGuard?.seen ?? [], covered: landingGuard?.covered ?? [],
+                                    since: CACurrentMediaTime())
+        // Drawn now, hidden, so it shows the moment it is needed: PencilKit takes a few frames to draw a drawing.
+        (landingCover ?? makeLandingCover()).drawing = PKDrawing(strokes: entries.map(\.stroke))
+        if handoverWatch == nil { handoverWatch = HandoverWatch(self) }
+    }
+
+    private func checkLandingGuard(_ tiles: [Tile]) {
+        guard var watch = landingGuard else { return }
+        guard CACurrentMediaTime() - watch.since < Self.landingGuardPatience else { return endLandingGuard() }
+        // Nothing is read while PencilKit draws the landing (until it reports the page drawn, or `landingDrawPatience`).
+        // It empties each tile it redraws for a frame or two, a blink of its own that a cover only lengthened, and on
+        // the simulator reading the tiles it was drawing into slowed that redraw, so more highlights blinked for longer.
+        guard watch.reported || CACurrentMediaTime() - watch.since >= Self.landingDrawPatience else { return }
+        var lost: Set<InkStrokeID> = []
+        for entry in watch.strokes {
+            // A tile not redrawn since the landing is not read: it still shows the stroke, which was on the page before.
+            let shows = entry.points.allSatisfy { point in
+                tiles.contains { tile in
+                    tile.frame.contains(point)
+                        && (entry.since[ObjectIdentifier(tile.layer)] == tile.seed || (showsInk(at: point, in: tile) ?? true))
+                }
+            }
+            if shows {
+                watch.seen.insert(entry.id)
+            } else if watch.seen.contains(entry.id) || entry.points.allSatisfy({ point in
+                let over = tiles.filter { $0.frame.contains(point) }
+                return !over.isEmpty && over.allSatisfy { tile in entry.since[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? true }
+            }) {
+                lost.insert(entry.id)
+            }
+        }
+        if !lost.isEmpty {
+            // Erased or undone since, it stays off.
+            let onPage = Set(canvas.drawing.strokes.map(InkStrokeID.init))
+            watch.strokes.removeAll { !onPage.contains($0.id) }
+            lost.formIntersection(onPage)
+        }
+        if lost != watch.covered {
+            watch.covered = lost
+            let cover = landingCover ?? makeLandingCover()
+            if lost.isEmpty {
+                cover.isHidden = true
+            } else {
+                // The cover draws every stroke watched; it shows only where those lost are.
+                let reach = watch.strokes.filter { lost.contains($0.id) }.map { $0.stroke.renderBounds.insetBy(dx: -2, dy: -2) }
+                mask(cover, to: reach)
+                cover.isHidden = false
+            }
+        }
+        landingGuard = watch
+        // Done once PencilKit has reported the page drawn and every stroke on a drawn tile shows there.
+        let unseen = watch.strokes.contains { entry in
+            !watch.seen.contains(entry.id) && entry.points.contains { point in tiles.contains { $0.frame.contains(point) } }
+        }
+        if watch.strokes.isEmpty || watch.reported && lost.isEmpty && !unseen { endLandingGuard() }
+    }
+
+    private func makeLandingCover() -> PKCanvasView {
+        let cover = makeLivePenView()
+        cover.isHidden = true
+        landingCover = cover
+        return cover
+    }
+
+    private func endLandingGuard() {
+        landingGuard = nil
+        guard let cover = landingCover, !cover.isHidden || !cover.drawing.strokes.isEmpty else { return }
+        cover.isHidden = true
+        cover.layer.mask = nil
+        cover.drawing = PKDrawing()
     }
 
     // MARK: Ink a scribble erases (EP108)
@@ -668,7 +1005,7 @@ final class PageInkView: UIView {
         let generation: Int
         /// Once this scribble's erase has landed: the tiles' seeds before it did, whether the page was idle then, and
         /// when it landed or the page's drawing last changed.
-        var landed: (seeds: [ObjectIdentifier: UInt32], idle: Bool, since: CFTimeInterval)?
+        var landed: (seeds: [ObjectIdentifier: UInt64], idle: Bool, since: CFTimeInterval)?
     }
 
     private var scribbleCuts: [ScribbleCut] = []
@@ -765,6 +1102,8 @@ final class PageInkView: UIView {
     func pageDidFinishRendering() {
         // A lift dropped while the page was still drawing an earlier change is drawn by the page now (EP126).
         for lift in lifts where lift.dropped != nil && lift.dropped?.seeds == nil { finishDrop(lift) }
+        landingGuard?.reported = true
+        landingReported = true
         guard scribbleCutLanded else { return }
         releaseScribbleCuts()
     }
@@ -937,25 +1276,165 @@ final class PageInkView: UIView {
         CATransaction.commit()
     }
 
-    private func tileSeeds() -> [ObjectIdentifier: UInt32] {
+    /// Lets `view` show only within `rects`, in page points.
+    private func mask(_ view: UIView, to rects: [CGRect]) {
+        let bounds = view.layer.bounds
+        let path = CGMutablePath()
+        for rect in rects {
+            path.addRect(layer.convert(rect, to: view.layer).offsetBy(dx: -bounds.minX, dy: -bounds.minY))
+        }
+        let mask = view.layer.mask as? CAShapeLayer ?? CAShapeLayer()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mask.fillRule = .nonZero
+        mask.frame = bounds
+        mask.path = path
+        view.layer.mask = mask
+        CATransaction.commit()
+    }
+
+    private func tileSeeds() -> [ObjectIdentifier: UInt64] {
         Dictionary(tileLayers().map { (ObjectIdentifier($0.layer), $0.seed) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    /// One of the page canvas's tiles: its layer, its frame in page points, and the IOSurface it shows, with its seed.
+    /// EP113: `seed` is the surface's ID with its seed. PencilKit can swap a tile to another of its surfaces whose seed
+    /// is the same number, and the tile has been redrawn all the same.
+    private typealias Tile = (layer: CALayer, frame: CGRect, seed: UInt64, surface: IOSurface)
+
+    private static func stamp(of surface: IOSurface) -> UInt64 {
+        UInt64(IOSurfaceGetID(surface)) << 32 | UInt64(surface.seed)
     }
 
     /// The page canvas's tiles, with their frames in page points and their IOSurfaces' seeds. Live pen and set-aside
     /// layers are canvases of their own, and are left out.
-    private func tileLayers() -> [(layer: CALayer, frame: CGRect, seed: UInt32)] {
-        var tiles: [(layer: CALayer, frame: CGRect, seed: UInt32)] = []
+    private func tileLayers() -> [Tile] {
+        var tiles: [Tile] = []
         func walk(_ layer: CALayer) {
             for sublayer in layer.sublayers ?? [] {
                 if let view = sublayer.delegate as? PKCanvasView, view !== canvas { continue }
                 if let contents = sublayer.contents, let surface = contents as AnyObject as? IOSurface {
-                    tiles.append((layer: sublayer, frame: sublayer.convert(sublayer.bounds, to: self.layer), seed: surface.seed))
+                    tiles.append((layer: sublayer, frame: sublayer.convert(sublayer.bounds, to: self.layer),
+                                  seed: Self.stamp(of: surface), surface: surface))
                 }
                 walk(sublayer)
             }
         }
         walk(canvas.layer)
         return tiles
+    }
+
+    // MARK: Whether the page shows a stroke (EP113)
+
+    /// Points along the path this far apart, in page points, are checked for a live stroke's ink.
+    static let inkCheckSpacing: CGFloat = 4
+    /// At most this many points of a stroke are checked, spread along it.
+    static let mostInkCheckPoints = 24
+    /// A pixel this opaque or less is no ink (the stress test's frame sampler reads ink the same way).
+    static let inkAlphaThreshold: UInt8 = 24
+
+    /// Whether the page's own tiles show `layer`'s stroke: every point checked along it lies on a tile that shows ink
+    /// there. A point on no tile (one PencilKit has not drawn yet) is not shown. `unreadable` decides for a tile whose
+    /// pixels cannot be read.
+    private func showsInk(of layer: LivePenLayer, tiles: [Tile], unreadable: (Tile) -> Bool) -> Bool {
+        showsInk(at: checkPoints(of: layer), tiles: tiles, unreadable: unreadable)
+    }
+
+    private func showsInk(at points: [CGPoint], tiles: [Tile], unreadable: (Tile) -> Bool) -> Bool {
+        guard !points.isEmpty else { return false }
+        return points.allSatisfy { point in
+            tiles.contains { tile in tile.frame.contains(point) && (showsInk(at: point, in: tile) ?? unreadable(tile)) }
+        }
+    }
+
+    /// The points along `layer`'s stroke that are checked for its ink, in page points: along its path, leaving out
+    /// its two ends, where the pen's tips thin out to nothing; the middle point for a dot.
+    private func checkPoints(of layer: LivePenLayer) -> [CGPoint] {
+        if let points = layer.checkPoints { return points }
+        let points = Self.checkPoints(of: layer.latest.map { [$0] } ?? [])
+        layer.checkPoints = points
+        return points
+    }
+
+    private static func checkPoints(of strokes: [PKStroke]) -> [CGPoint] {
+        var points: [CGPoint] = []
+        for stroke in strokes {
+            let path = stroke.path.interpolatedPoints(by: .distance(Self.inkCheckSpacing))
+                .map { $0.location.applying(stroke.transform) }
+            if path.count > 4 {
+                points += path.dropFirst(2).dropLast(2)
+            } else if !path.isEmpty {
+                points.append(path[path.count / 2])
+            }
+        }
+        if points.count > Self.mostInkCheckPoints {
+            let step = Double(points.count - 1) / Double(Self.mostInkCheckPoints - 1)
+            points = (0..<Self.mostInkCheckPoints).map { points[Int((Double($0) * step).rounded())] }
+        }
+        return points
+    }
+
+    /// Alphas read from the tiles' IOSurfaces, by surface, for the seed they were read at: a tile's pixels change only
+    /// with its seed, so a point is read again only once the tile has been redrawn. Keyed by the surface's global ID,
+    /// not the object's address, which a later surface can take over with the same small seed (as for `stamp(of:)`).
+    private var inkReads: [IOSurfaceID: (seed: UInt32, alphas: [Int: UInt8])] = [:]
+    /// When each surface, at its seed, first refused a read that does not wait for the GPU (EP113).
+    private var inkReadsRefused: [IOSurfaceID: (seed: UInt32, since: CFTimeInterval)] = [:]
+    /// A tile that has refused such a read for this long, at the same seed, is read waiting for the GPU.
+    static let inkReadWaitsAfter: TimeInterval = 0.1
+
+    /// Whether `tile`'s pixels can never be read here: not 4 bytes each. A tile the GPU is still drawing is read again
+    /// later (waiting for the GPU once it has refused for `inkReadWaitsAfter`), so it is never taken to show a stroke a
+    /// layer could leave for: on a slow GPU (the CI runner's, or this Mac's under GPU load) a landed stroke's layer went
+    /// on such a tile while the page was still drawing a drawing without the stroke, and the stroke was off the screen
+    /// (EP113).
+    private static func cannotBeRead(_ tile: Tile) -> Bool { tile.surface.bytesPerElement != 4 }
+
+    /// Whether `tile` shows ink at page point `point`: the most opaque of the 5 by 5 pixels there (about 2 points
+    /// across at the usual ink scale, so the pen's thinnest strokes still read as ink). Nil when its pixels cannot be
+    /// read: not 4 bytes each, or locked by the GPU.
+    private func showsInk(at point: CGPoint, in tile: Tile) -> Bool? {
+        let surface = tile.surface
+        guard surface.bytesPerElement == 4, tile.frame.width > 0, tile.frame.height > 0 else { return nil }
+        let width = surface.width, height = surface.height
+        let x = Int((point.x - tile.frame.minX) / tile.frame.width * CGFloat(width))
+        let y = Int((point.y - tile.frame.minY) / tile.frame.height * CGFloat(height))
+        guard x >= 0, y >= 0, x < width, y < height else { return nil }
+        let id = IOSurfaceGetID(surface), seed = surface.seed, key = y * width + x
+        if let read = inkReads[id], read.seed == seed, let alpha = read.alphas[key] { return alpha > Self.inkAlphaThreshold }
+        // Never waits for the GPU while it may still be drawing the tile: such a tile is read again once it has.
+        // On the simulator a tile can refuse that read long after its drawing is done, until something waits on it
+        // once, and its layer then stayed up for good (EP113); one refused this long at the same seed is read waiting
+        // for the GPU, which by then has nothing left to draw there.
+        var options: IOSurfaceLockOptions = [.readOnly, .avoidSync]
+        if let busy = inkReadsRefused[id], busy.seed == seed, CACurrentMediaTime() - busy.since >= Self.inkReadWaitsAfter {
+            options = [.readOnly]
+        }
+        guard surface.lock(options: options, seed: nil) == KERN_SUCCESS else {
+            if inkReadsRefused[id]?.seed != seed {
+                if inkReadsRefused.count > 64 { inkReadsRefused = [:] }
+                inkReadsRefused[id] = (seed, CACurrentMediaTime())
+            }
+            return nil
+        }
+        inkReadsRefused[id] = nil
+        defer { surface.unlock(options: options, seed: nil) }
+        let row = surface.bytesPerRow
+        let bytes = surface.baseAddress.assumingMemoryBound(to: UInt8.self)
+        var best: UInt8 = 0
+        for line in max(0, y - 2)...min(height - 1, y + 2) {
+            let start = line * row + 3
+            for column in max(0, x - 2)...min(width - 1, x + 2) where bytes[start + column * 4] > best {
+                best = bytes[start + column * 4]
+            }
+        }
+        if inkReads[id]?.seed != seed {
+            // Only the surfaces read since the last redraw are kept, so the reads never pile up.
+            if inkReads.count > 64 { inkReads = [:] }
+            inkReads[id] = (seed, [:])
+        }
+        inkReads[id]?.alphas[key] = best
+        return best > Self.inkAlphaThreshold
     }
 
     /// A set-aside layer lives inside the canvas, whose coordinates are already `inkScale` times the page.
@@ -1010,17 +1489,17 @@ private final class HandoverWatch: NSObject {
         // Before Core Animation's own commit observer (order 2,000,000).
         let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, 1_999_000) {
             [weak self] _, _ in
-            MainActor.assumeIsolated { self?.check() }
+            MainActor.assumeIsolated { self?.check(betweenFrames: true) }
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
         self.observer = observer
     }
 
-    @objc private func tick(_ link: CADisplayLink) { check() }
+    @objc private func tick(_ link: CADisplayLink) { check(betweenFrames: false) }
 
-    private func check() {
+    private func check(betweenFrames: Bool) {
         guard let view else { return stop() }
-        view.checkHandovers()
+        view.checkHandovers(betweenFrames: betweenFrames)
     }
 
     func stop() {

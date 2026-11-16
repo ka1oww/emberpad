@@ -148,6 +148,47 @@ final class WholeStrokeEraseTests: XCTestCase {
         XCTAssertEqual(canvas.undoManager?.undoActionName, "Erase")
     }
 
+    /// EP113: PencilKit draws every drawing it is given in turn, so an erase made while the page was still drawing ink
+    /// that had just landed was drawn after the landed page, and a stroke it erased showed again for a frame. The
+    /// erase waits until the page has drawn the landing, then takes what the sweep touched.
+    func testTheEraseWaitsWhileThePageDrawsALanding() throws {
+        let tools = makeTools()
+        let session = try makeSession()
+        let controller = try host(session, tools: tools)
+        let canvas = try XCTUnwrap(controller.canvases[0])
+        let window = try XCTUnwrap(canvas.window)
+        let pageView = try XCTUnwrap(canvas.superview as? PageInkView)
+        let lines = [200, 400].map { Self.line(from: CGPoint(x: $0, y: 100), to: CGPoint(x: $0, y: 300), width: 1) }
+        canvas.drawing = PKDrawing(strokes: lines)
+        controller.canvasViewDrawingDidChange(canvas)
+        PencilStroke.turn(0.5)
+        tools.select(.eraser)
+
+        canvas.drawing = PKDrawing(strokes: lines + [Self.line(from: CGPoint(x: 300, y: 100), to: CGPoint(x: 300, y: 300), width: 1)])
+        controller.canvasViewDrawingDidChange(canvas)
+        PencilStroke.turn(0.5)
+        // Ink lands, and the page has not redrawn a tile since: as PencilKit leaves it for the first frames after.
+        let tiles = pageView.pageTiles()
+        pageView.pageDrawingDidChange()
+        pageView.handOver([], since: tiles)
+        XCTAssertTrue(pageView.isDrawingLanding)
+
+        let space = canvas.pageSpace
+        var stroke = PencilStroke(window: window, view: canvas, recognizers: [controller.eraserTouch])
+        stroke.down(at: space.convert(CGPoint(x: 200, y: 120), to: nil))
+        stroke.move(to: space.convert(CGPoint(x: 200, y: 280), to: nil), steps: 2)
+        XCTAssertTrue(pageView.isDrawingLanding, "a few frames on, the page has still not drawn the landing")
+        XCTAssertEqual(canvas.drawing.strokes.count, 3, "nothing changes while the page draws the landing")
+        stroke.lift()
+
+        let deadline = Date().addingTimeInterval(2)
+        while controller.wholeStrokeErase != nil, Date() < deadline { PencilStroke.turn(0.02) }
+        XCTAssertNil(controller.wholeStrokeErase)
+        XCTAssertFalse(pageView.isDrawingLanding)
+        XCTAssertEqual(canvas.drawing.strokes.count, 2, "the swept line went once the page had drawn the landing")
+        XCTAssertEqual(canvas.undoManager?.undoActionName, "Erase")
+    }
+
     /// "Erase highlighter only" with the sized whole-stroke eraser: the highlight under the circle goes, the pen ink
     /// under it stays, and the canvas holds the whole page.
     func testHighlighterOnlyKeepsThePenInk() throws {
