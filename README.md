@@ -30,10 +30,10 @@ UDID=$(xcrun simctl list devices available --json | python3 -c 'import json,sys;
 xcodebuild -project EmberPad.xcodeproj -scheme EmberPad \
   -configuration Debug -destination "id=$UDID" \
   -derivedDataPath /tmp/emberpad-test CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES test
-xcodebuild -project EmberPad.xcodeproj -scheme 'Ember Companion' \
+xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' \
   -configuration Debug -destination 'generic/platform=macOS' \
   -derivedDataPath /tmp/emberpad-mac CODE_SIGNING_ALLOWED=NO build
-xcodebuild -project EmberPad.xcodeproj -scheme 'Ember Companion' \
+xcodebuild -project EmberPad.xcodeproj -scheme 'EmberPad Companion' \
   -configuration Debug -destination 'platform=macOS' \
   -derivedDataPath /tmp/emberpad-mac CODE_SIGNING_ALLOWED=NO test
 zsh -n resign/renew.zsh
