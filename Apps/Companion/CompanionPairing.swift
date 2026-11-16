@@ -113,8 +113,8 @@ final class PairingCodeWindowController {
         window.contentViewController = NSHostingController(rootView: view)
         window.center()
         self.window = window
-        NSApplication.shared.activate()
-        window.makeKeyAndOrderFront(nil)
+        CompanionWindowFocus.activate()
+        CompanionWindowFocus.makeKeyAndOrderFront(window)
         closeTask = Task { [weak self] in
             try? await Task.sleep(for: Self.visibleFor)
             guard !Task.isCancelled else { return }

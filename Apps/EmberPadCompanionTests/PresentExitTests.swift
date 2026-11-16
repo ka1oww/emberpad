@@ -94,7 +94,7 @@ final class PresentExitTests: XCTestCase {
         XCTAssertTrue(panel.canBecomeKey)
         XCTAssertFalse(panel.hidesOnDeactivate)
         XCTAssertFalse(panel.becomesKeyOnlyIfNeeded)
-        XCTAssertTrue(panel.isKeyWindow)
+        XCTAssertTrue(CompanionWindowFocus.isKey(panel))
         XCTAssertTrue(panel.firstResponder === controller.canvas)
         XCTAssertTrue(controller.isShown)
         XCTAssertTrue(toggles.windows.isEmpty)
@@ -226,6 +226,8 @@ final class PresentExitTests: XCTestCase {
     func testTheExitControlAppearsWhenThePointerMovesAndFadesWhenItRests() throws {
         let (controller, hides) = try controller(cover: true)
         let content = controller.content
+        // The fade reads the real pointer: keep whoever is using this Mac from resting it on the Exit control (EP136).
+        try XCTUnwrap(controller.window).setFrameOrigin(CGPoint(x: NSEvent.mouseLocation.x + 600, y: NSEvent.mouseLocation.y + 600))
         XCTAssertFalse(content.isExitControlShown)
         XCTAssertTrue(content.exitButton.isHidden)
         XCTAssertTrue(content.trackingAreas.contains { $0.options.contains([.mouseMoved, .activeAlways]) },
