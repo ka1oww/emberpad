@@ -27,12 +27,19 @@ jobs:
           zsh -n resign/config.example.zsh
           plutil -lint resign/dev.emberpad.renew.plist Apps/EmberPad/Info.plist Apps/Companion/Info.plist
           python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("resign/support.py").read_text())'
+      - name: Check the scripts and the iPad test shards
+        run: |
+          python3 -I scripts/test_stress_summary.py
+          python3 -I scripts/test_check_test_shards.py
+          python3 -I scripts/check_test_shards.py
 
-  # The iPad test target is split into three parallel shards, balanced by the
-  # per-class runtimes in CI. Shards 1 and 2 list their classes explicitly;
-  # shard 3 skips exactly those classes, so it runs everything else, including
-  # any test class added later. Every test therefore runs in exactly one shard,
+  # The iPad tests (the EmberPadTests unit target and the EmberPadUITests real-touch target) are split into
+  # four parallel shards, balanced by the per-class runtimes in CI at about ten minutes of tests each, so
+  # that with the build and the Simulator's boot each stays well inside the job's 30 minutes. Shards 1, 2
+  # and 4 list their classes explicitly; shard 3 skips exactly those classes, so it runs everything else in
+  # both targets, including any test class added later. Every test therefore runs in exactly one shard,
   # except DeviceDrawingStressTests, which runs only from scripts/device-stress-test.sh.
+  # scripts/check_test_shards.py holds the lists to that, and runs in the unsigned-builds job.
   ipad-tests:
     name: ipad-tests (shard ${{ matrix.shard }})
     runs-on: macos-26
@@ -49,6 +56,10 @@ jobs:
               -only-testing:EmberPadTests/WorksheetHeaderScreenshotTests
               -only-testing:EmberPadTests/CircleLassoTests
               -only-testing:EmberPadTests/InkKeepsEveryStrokeTests
+              -only-testing:EmberPadTests/ToolbarDockScreenshotTests
+              -only-testing:EmberPadTests/ScribbleOutlineSteadyTests
+              -only-testing:EmberPadTests/TeacherCopyCardTests
+              -only-testing:EmberPadTests/InkStaysDrawnTests
           - shard: 2
             selection: >-
               -only-testing:EmberPadTests/LibraryScreenshotTests
@@ -57,6 +68,11 @@ jobs:
               -only-testing:EmberPadTests/LibraryFolderBrowserTests
               -only-testing:EmberPadTests/LiveInkTests
               -only-testing:EmberPadTests/LaserPointerScreenshotTests
+              -only-testing:EmberPadTests/ScribblePreviewTests
+              -only-testing:EmberPadTests/DocumentTransitionTests
+              -only-testing:EmberPadTests/LibraryFolderTransitionTests
+              -only-testing:EmberPadTests/LassoSelectsTheSameInkTests
+              -only-testing:EmberPadTests/HoldToShapeTests
           - shard: 3
             selection: >-
               -skip-testing:EmberPadTests/PageToolsScreenshotTests
@@ -65,13 +81,34 @@ jobs:
               -skip-testing:EmberPadTests/WorksheetHeaderScreenshotTests
               -skip-testing:EmberPadTests/CircleLassoTests
               -skip-testing:EmberPadTests/InkKeepsEveryStrokeTests
+              -skip-testing:EmberPadTests/ToolbarDockScreenshotTests
+              -skip-testing:EmberPadTests/ScribbleOutlineSteadyTests
+              -skip-testing:EmberPadTests/TeacherCopyCardTests
+              -skip-testing:EmberPadTests/InkStaysDrawnTests
               -skip-testing:EmberPadTests/LibraryScreenshotTests
               -skip-testing:EmberPadTests/EraserPreviewScreenshotTests
               -skip-testing:EmberPadTests/PageNavigationTests
               -skip-testing:EmberPadTests/LibraryFolderBrowserTests
               -skip-testing:EmberPadTests/LiveInkTests
               -skip-testing:EmberPadTests/LaserPointerScreenshotTests
+              -skip-testing:EmberPadTests/ScribblePreviewTests
+              -skip-testing:EmberPadTests/DocumentTransitionTests
+              -skip-testing:EmberPadTests/LibraryFolderTransitionTests
+              -skip-testing:EmberPadTests/LassoSelectsTheSameInkTests
+              -skip-testing:EmberPadTests/HoldToShapeTests
+              -skip-testing:EmberPadUITests/PresentTeacherCopyUITests
+              -skip-testing:EmberPadUITests/ReadingPositionUITests
+              -skip-testing:EmberPadUITests/ToolbarDragTrackingUITests
+              -skip-testing:EmberPadUITests/ToolbarFingerDragUITests
+              -skip-testing:EmberPadUITests/ToolbarFreeDragUITests
               -skip-testing:EmberPadTests/DeviceDrawingStressTests
+          - shard: 4
+            selection: >-
+              -only-testing:EmberPadUITests/PresentTeacherCopyUITests
+              -only-testing:EmberPadUITests/ReadingPositionUITests
+              -only-testing:EmberPadUITests/ToolbarDragTrackingUITests
+              -only-testing:EmberPadUITests/ToolbarFingerDragUITests
+              -only-testing:EmberPadUITests/ToolbarFreeDragUITests
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
