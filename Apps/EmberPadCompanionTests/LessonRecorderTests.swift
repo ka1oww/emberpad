@@ -414,7 +414,41 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertEqual(record.files, [])
         XCTAssertEqual(record.audioWarnings.map(\.kind), [.notRecording])
         XCTAssertTrue(record.audioWarnings.allSatisfy { $0.to != nil })
-        XCTAssertEqual(try videoFiles(in: folder).map(\.name), [], "no empty file is left")
+        try await waitForNoVideoFiles(in: folder, "no empty file is left")
+    }
+
+    /// End lesson pressed just as a retry opens its file (CI hit this on 16 Nov, leaving an empty unlisted lesson.mp4):
+    /// the encoder refuses that file too, and End closes the lesson "failed" with no file listed and no empty file left
+    /// in the folder. Ended from the Mac at once and a few milliseconds into the retry, before and after the refusal
+    /// lands. A writer that creates its file late (as on CI's virtual Macs) is stood in for by an empty file landing
+    /// after End: the second sweep deletes it and leaves lesson.json.
+    func testEndingAsARetryOpensItsFileLeavesNoEmptyFile() async throws {
+        for delay in [0, 2, 5, 10, 20, 40] {
+            var options = options()
+            options.settings.fixedAudioBitRate = 384_000
+            options.safeAudioBitRate = nil
+            options.root = root.appendingPathComponent("end-\(delay)ms", isDirectory: true)
+            let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+            microphones.channels = 2
+            let lesson = CompanionLessonModel(options: options, microphones: microphones)
+            lesson.start()
+            try await waitUntil { lesson.status.state == .recording }
+            let folder = try XCTUnwrap(lesson.folder)
+            let deadline = Date().addingTimeInterval(6)
+            while lesson.fileAttempts < 2, Date() < deadline { try await Task.sleep(for: .milliseconds(1)) }
+            XCTAssertEqual(lesson.fileAttempts, 2, "\(delay) ms: the retry opened its file")
+            if delay > 0 { try await Task.sleep(for: .milliseconds(delay)) }
+            lesson.end()
+            try await waitUntil { lesson.status.state == .failed }
+            let record = try LessonRecord.read(from: folder)
+            XCTAssertEqual(record.status, .failed, "\(delay) ms")
+            XCTAssertEqual(record.files, [], "\(delay) ms")
+            if delay == 0 {
+                FileManager.default.createFile(atPath: folder.appendingPathComponent("lesson.mp4").path, contents: nil)
+            }
+            try await waitForNoVideoFiles(in: folder, "\(delay) ms: no empty file is left")
+            XCTAssertEqual(try LessonRecord.read(from: folder).status, .failed, "\(delay) ms: lesson.json stays")
+        }
     }
 
     /// The same refusal with the safe rate on, as in the app: the warning shows, the next file uses 128 kbit/s, which
@@ -600,6 +634,15 @@ final class LessonRecorderTests: XCTestCase {
             guard Date() < deadline else { return XCTFail("timed out") }
             try await Task.sleep(for: .milliseconds(20))
         }
+    }
+
+    /// No video file is in `folder` within End's second sweep (`lateEmptyFileSweep`), and none comes back after it.
+    private func waitForNoVideoFiles(in folder: URL, _ message: String) async throws {
+        let deadline = Date().addingTimeInterval(CompanionLessonModel.lateEmptyFileSweep + 2)
+        while try !videoFiles(in: folder).isEmpty, Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), [], message)
+        try await pause(0.5)
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), [], "\(message), and none comes back")
     }
 
     /// The video files in `folder`, by name, with their size on disk.

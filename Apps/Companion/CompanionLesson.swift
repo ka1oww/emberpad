@@ -935,7 +935,8 @@ final class CompanionLessonModel: ObservableObject {
 
     // MARK: Ending
 
-    /// Ends the lesson: the file is finished, files with nothing in them are deleted and taken off the list, and
+    /// Ends the lesson: the file is finished, video files with nothing in them are deleted (again `lateEmptyFileSweep`
+    /// later) and taken off the list, and
     /// `lesson.json` is closed, as "complete" when a playable video was saved and "failed" when none was. A failed
     /// lesson also says so on the Mac and the iPad. Waits until all is on disk; nothing here holds the main thread.
     func finish() async {
@@ -959,12 +960,18 @@ final class CompanionLessonModel: ObservableObject {
         }
         let end = date(now, in: recording)
         recording.log.endFile(at: end)
-        for file in recording.log.record.files {
-            let url = recording.folder.appendingPathComponent(file.name)
-            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-            guard size == 0 else { continue }
-            try? FileManager.default.removeItem(at: url)
+        // Every video file with nothing in it goes, listed or not, and the list keeps only files on disk.
+        Self.removeEmptyVideos(in: recording.folder)
+        for file in recording.log.record.files
+        where !FileManager.default.fileExists(atPath: recording.folder.appendingPathComponent(file.name).path) {
             recording.log.dropFile(file.name)
+        }
+        // A writer can create its file a moment after it starts (seen on CI's virtual Macs), so a file opened just
+        // before End may land empty after the sweep above: the folder is swept once more a little later.
+        let folder = recording.folder
+        Task.detached {
+            try? await Task.sleep(for: .seconds(Self.lateEmptyFileSweep))
+            Self.removeEmptyVideos(in: folder)
         }
         let saved = await Self.playable(recording.log.record.files.map { recording.folder.appendingPathComponent($0.name) })
         recording.log.setWarnings(recording.episodes)
@@ -979,6 +986,21 @@ final class CompanionLessonModel: ObservableObject {
                 setStatus(PresentLessonStatus(state: .failed, message:
                     "The last lesson was not recorded: no video could be saved. Its folder on the Mac says what went wrong."))
             }
+        }
+    }
+
+    /// How long after End the lesson's folder is swept again for empty video files.
+    nonisolated static let lateEmptyFileSweep: TimeInterval = 2
+
+    /// Deletes the lesson's video files (`lesson.mp4`, `lesson-N.mp4`) in `folder` that hold no bytes.
+    nonisolated static func removeEmptyVideos(in folder: URL) {
+        let files = FileManager.default
+        for name in (try? files.contentsOfDirectory(atPath: folder.path)) ?? []
+        where name.hasPrefix("lesson") && name.hasSuffix(".mp4") {
+            let url = folder.appendingPathComponent(name)
+            guard (try? files.attributesOfItem(atPath: url.path)[.size] as? Int) == 0 else { continue }
+            try? files.removeItem(at: url)
+            lessonLog.notice("\(name, privacy: .public) was empty and is deleted")
         }
     }
 
