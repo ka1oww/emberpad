@@ -162,9 +162,9 @@ final class PageInkView: UIView {
     /// its samples, so the longer the stroke the longer that takes: on the iPad Air ten seconds into a scribble to
     /// erase, 6 ms in a Debug build (as Ember Slate is built), 1.5 ms optimised. Shaped on every Pencil move, as it
     /// was, the main thread's work for each move grew with the stroke until it outlasted the 4 ms between two moves;
-    /// then the run loop never slept, Core Animation never committed, and the screen froze until the Pencil lifted. A move now only keeps the
-    /// stroke as it is, and its shape is worked out off the main thread, where its drawing is made, and only for the
-    /// moves that are drawn (at most `livePenInterval` apart).
+    /// then the run loop never slept, Core Animation never committed, and the screen froze until the Pencil lifted.
+    /// A move now only keeps the stroke as it is, and its shape is worked out off the main thread, where its drawing
+    /// is made, and only for the moves that are drawn (at most `livePenInterval` apart).
     final class LivePenShape: @unchecked Sendable {
         private let lock = NSLock()
         private var make: (() -> PKStroke?)?
