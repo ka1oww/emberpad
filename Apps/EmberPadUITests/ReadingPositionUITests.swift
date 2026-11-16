@@ -9,6 +9,8 @@ final class ReadingPositionUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        // The Simulator keeps the orientation an earlier test class left it in; this one counts on portrait.
+        XCUIDevice.shared.orientation = .portrait
         app = XCUIApplication()
         app.launchArguments = ["-EmberPadUITestWorksheet", "-EmberPadUITestNotebooks"]
         app.launch()
@@ -95,7 +97,7 @@ final class ReadingPositionUITests: XCTestCase {
         if hide.waitForExistence(timeout: 5) { hide.tap() }
         scrollWorksheet(swipes: 4)
         let left = try worksheetPage(of: "Toolbar Drag")
-        XCTAssertGreaterThan(left, 2, "the worksheet scrolled a few pages down")
+        XCTAssertGreaterThan(left, 2, "the worksheet scrolled a few pages down (the window is \(window.frame.size))")
         back()
 
         open("Second Notebook")

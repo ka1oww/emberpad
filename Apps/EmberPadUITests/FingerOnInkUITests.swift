@@ -10,6 +10,8 @@ final class FingerOnInkUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        // The Simulator keeps the orientation an earlier test class left it in; this one counts on portrait.
+        XCUIDevice.shared.orientation = .portrait
         app = XCUIApplication()
         app.launchArguments = ["-EmberPadUITestWorksheet", "-EmberPadUITestInk"]
         app.launch()
