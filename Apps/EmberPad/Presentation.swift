@@ -106,14 +106,16 @@ struct StudentPageSnapshot {
 struct StudentLiveInk: Equatable {
     private(set) var document: StudentSafeDocument
     private(set) var sessionID: UUID
-    fileprivate(set) var strokes = LiveInkStrokes()
+    fileprivate(set) var strokes: LiveInkStrokes
     var documentID: UUID { document.id }
 
+    /// `lastStrokeID` is the id of the last stroke its model began, so stroke ids are never reused (EP142).
     @MainActor
-    init(session: DocumentSession) throws {
+    init(session: DocumentSession, after lastStrokeID: UInt64 = 0) throws {
         guard let document = StudentSafeDocument(session.record) else { throw StudentViewError.teacherCopyIsPrivate }
         self.document = document
         sessionID = session.instanceID
+        strokes = LiveInkStrokes(after: lastStrokeID)
     }
 
     /// Live ink is drawn only over the committed page snapshot of the same open document.
@@ -249,6 +251,9 @@ final class StudentDisplayModel: ObservableObject {
     /// Strokes in progress over the published page. Published beside `content`, so the update that brings a stroke's
     /// committed drawing also removes its provisional copy, and the student view never shows both or neither.
     @Published private(set) var liveInk: StudentLiveInk?
+    /// The id of the last live stroke begun. Each new `StudentLiveInk` counts on from it, so Present can tell a
+    /// stroke it has sent from a later one by id (EP142).
+    private var lastLiveStrokeID: UInt64 = 0
     /// The laser pointer's dot (P6), while the Pencil points. Never part of any drawing, and gated like live ink.
     @Published private(set) var laser: StudentLaserPointer?
     /// The laser's fading trail in Trail mode, gated like the dot. It keeps fading after lift until it is empty.
@@ -410,10 +415,11 @@ final class StudentDisplayModel: ObservableObject {
               snapshot.documentID == session.record.id else { return setLiveInk(nil) }
         var live: StudentLiveInk
         if let current = liveInk, current.belongs(to: snapshot) { live = current }
-        else if let made = try? StudentLiveInk(session: session) { live = made }
+        else if let made = try? StudentLiveInk(session: session, after: lastLiveStrokeID) { live = made }
         else { return setLiveInk(nil) }
         live.strokes.begin(pageIndex: pageIndex, style: style, baseRevision: session.inkRevision(on: pageIndex),
                            points: points, now: now())
+        lastLiveStrokeID = live.strokes.lastID
         setLiveInk(live)
     }
 
