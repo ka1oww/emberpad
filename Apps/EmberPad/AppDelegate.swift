@@ -155,7 +155,8 @@ final class StudentSceneDelegate: UIResponder, UIWindowSceneDelegate {
         let window = UIWindow(windowScene: scene)
         if case .success(let environment) = AppEnvironment.shared {
             window.rootViewController = Self.rootViewController(environment: environment)
-            environment.presentation.externalSceneCount += 1
+            let pixels = scene.screen.nativeBounds.size
+            environment.presentation.externalSceneConnected(longestPixelSide: max(pixels.width, pixels.height))
             registered = true
         } else { window.rootViewController = UIHostingController(rootView: Text("Paused")) }
         self.window = window
@@ -168,7 +169,7 @@ final class StudentSceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
     func sceneDidDisconnect(_ scene: UIScene) {
         if registered, case .success(let environment) = AppEnvironment.shared {
-            environment.presentation.externalSceneCount = max(0, environment.presentation.externalSceneCount - 1)
+            environment.presentation.externalSceneDisconnected()
         }
         registered = false
 #if DEBUG
