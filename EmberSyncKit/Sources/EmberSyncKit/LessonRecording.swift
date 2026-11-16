@@ -59,15 +59,18 @@ public struct LessonPicture: Sendable {
 // MARK: - Audio health
 
 /// Watches the recorded microphone: when it is digitally silent, or disconnected, for `warnAfter` seconds, a warning
-/// starts; it ends when sound comes back. Times are seconds on one monotonic clock (the Companion uses seconds since
-/// the lesson started). Every warning is kept, for `lesson.json`.
+/// starts; it ends when sound comes back. A microphone that has sent nothing at all since `start` warns sooner, after
+/// `startupLimit` (EP134): the lesson has no sound from its first second, and the teacher is told at once. Times are
+/// seconds on one monotonic clock (the Companion uses seconds since the lesson started). Every warning is kept, for
+/// `lesson.json`.
 public struct LessonAudioHealth: Equatable, Sendable {
     public enum Problem: String, Codable, Sendable {
         /// Buffers arrive, but every sample is below `silenceThreshold`: a dead transmitter, a muted or failed input.
         case silent
         /// The microphone is unplugged, or no audio has arrived for `stallLimit`.
         case disconnected
-        /// The video file cannot be written (a full disk, say): the picture and sound are not being kept.
+        /// The video is not being saved: a file could not be started, the encoder refused it, or it stopped taking
+        /// picture or sound. The picture and sound of that stretch are not kept.
         case notRecording
     }
 
@@ -89,6 +92,9 @@ public struct LessonAudioHealth: Equatable, Sendable {
     }
 
     public static let warnAfter: TimeInterval = 60
+    /// A microphone that has sent no audio at all since recording started is warned about after this, not `warnAfter`.
+    /// The BOYA takes about 3 s to start.
+    public static let startupLimit: TimeInterval = 6
     /// A buffer whose loudest sample is below this (-80 dBFS) carries no sound. A live microphone in a quiet room
     /// stays well above it; a dead one reads zero.
     public static let silenceThreshold: Float = 0.0001
@@ -96,15 +102,19 @@ public struct LessonAudioHealth: Equatable, Sendable {
     public static let stallLimit: TimeInterval = 2
 
     public let warnAfter: TimeInterval
+    public let startupLimit: TimeInterval
     public private(set) var episodes: [Episode] = []
     private var lastSound: TimeInterval
     private var lastBuffer: TimeInterval
     private var disconnectedAt: TimeInterval?
+    /// A buffer has arrived since `start`.
+    private var heardAny = false
     /// The warning as the last `tick` reported it.
     private var reported: Episode?
 
-    public init(start: TimeInterval, warnAfter: TimeInterval = Self.warnAfter) {
+    public init(start: TimeInterval, warnAfter: TimeInterval = Self.warnAfter, startupLimit: TimeInterval = Self.startupLimit) {
         self.warnAfter = warnAfter
+        self.startupLimit = startupLimit
         lastSound = start
         lastBuffer = start
     }
@@ -114,6 +124,7 @@ public struct LessonAudioHealth: Equatable, Sendable {
 
     /// One audio buffer arrived at `time` whose loudest sample has magnitude `peak` (1 is full scale).
     public mutating func heard(peak: Float, at time: TimeInterval) {
+        heardAny = true
         lastBuffer = time
         disconnectedAt = nil
         if peak >= Self.silenceThreshold {
@@ -133,7 +144,8 @@ public struct LessonAudioHealth: Equatable, Sendable {
         let before = reported
         defer { reported = warning }
         let problem = currentProblem(at: time)
-        if let problem, time - problem.since >= warnAfter {
+        let limit = heardAny ? warnAfter : min(warnAfter, startupLimit)
+        if let problem, time - problem.since >= limit {
             if let index = episodes.indices.last, episodes[index].to == nil {
                 if episodes[index].problem != problem.kind {
                     episodes[index].to = time
@@ -158,9 +170,13 @@ public struct LessonAudioHealth: Equatable, Sendable {
         let minutes = Int(max(0, time - episode.from) / 60)
         let length = minutes < 1 ? "a minute" : minutes == 1 ? "1 minute" : "\(minutes) minutes"
         switch episode.problem {
-        case .silent: return "Microphone silent for \(length)"
-        case .disconnected: return "Microphone disconnected for \(length)"
-        case .notRecording: return "Recording stopped: the video file cannot be written (\(length))"
+        case .silent: return minutes < 1 ? "Microphone silent" : "Microphone silent for \(length)"
+        case .disconnected:
+            // Within the first minute (a microphone that never started is warned about after `startupLimit`).
+            return minutes < 1 ? "Microphone disconnected: no sound is coming in" : "Microphone disconnected for \(length)"
+        case .notRecording:
+            let stopped = minutes < 1 ? "Recording stopped" : "Recording stopped for \(length)"
+            return "\(stopped): the video is not being saved. Trying again."
         }
     }
 }
@@ -261,6 +277,8 @@ public struct LessonRecord: Codable, Equatable, Sendable {
 
     public enum Status: String, Codable, Sendable {
         case recording, complete, interrupted
+        /// Ended, with no playable video saved (EP134): every file failed. Never "complete".
+        case failed
     }
 
     public enum Origin: String, Codable, Sendable {
@@ -486,6 +504,11 @@ public struct LessonLog: Sendable {
         }
     }
 
+    /// The video file `name` is taken off the list: it ended with nothing in it, and is gone from the folder.
+    public mutating func dropFile(_ name: String) {
+        record.files.removeAll { $0.name == name }
+    }
+
     /// A video file began at `time`; the one before it, if still open, ended then.
     public mutating func startFile(_ name: String, at time: Date) {
         endFile(at: time)
@@ -508,12 +531,19 @@ public struct LessonLog: Sendable {
         }
     }
 
+    /// The audio is encoded at `bitRate` from the next file on: the encoder refused the lesson's rate before any file
+    /// saved sound, so every file kept uses this one.
+    public mutating func useAudioBitRate(_ bitRate: Int) {
+        record.audio.bitRate = bitRate
+    }
+
     public mutating func touch(at time: Date) {
         record.updatedAt = time
     }
 
-    public mutating func finish(at time: Date) {
-        record.close(at: time, status: .complete)
+    /// Ends the lesson at `time`: "complete" when it saved playable video, "failed" when it saved none.
+    public mutating func finish(at time: Date, saved: Bool = true) {
+        record.close(at: time, status: saved ? .complete : .failed)
     }
 }
 
