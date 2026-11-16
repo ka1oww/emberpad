@@ -1020,10 +1020,12 @@ final class RememberingPDFView: PDFView {
     }
     private var restoreScheduled = false
 
-    /// Names the page in view, as the worksheet's page pill does.
+    /// Names the page in the upper part of the view. PDFKit's `currentPage` picks whichever page fills more of a tall
+    /// panel, which flips between two pages that show about equally depending on a few points of layout.
     override var accessibilityValue: String? {
         get {
-            guard let document, let page = currentPage else { return nil }
+            let top = page(for: CGPoint(x: bounds.midX, y: bounds.minY + bounds.height / 4), nearest: true)
+            guard let document, let page = top ?? currentPage else { return nil }
             return "Page \(document.index(for: page) + 1) of \(document.pageCount)"
         }
         set { super.accessibilityValue = newValue }
