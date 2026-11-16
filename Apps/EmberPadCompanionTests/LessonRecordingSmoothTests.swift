@@ -50,6 +50,10 @@ final class LessonRecordingSmoothTests: XCTestCase {
         let folder = try XCTUnwrap(lesson.folder)
         try await iPad.idle(for: 1)
 
+        // A new paper arrives mid-lesson: drawing it and the GPU's first take of it are not charged to a recorded frame.
+        iPad.openNextPaper()
+        try await iPad.idle(for: 0.8)
+
         // Scrolls 340 points in 3 s, captured at 30 Hz and delivered in bunches every 30 to 130 ms.
         try await iPad.scroll(to: ScrollingIPad.endTop, over: 3)
         try await iPad.idle(for: 0.6)
@@ -98,6 +102,12 @@ final class LessonRecordingSmoothTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(writeRate, 24, "the recording dropped frames while the teacher wrote")
         XCTAssertLessThanOrEqual(writeGap, 0.1, "the recording stalled while the teacher wrote")
         XCTAssertGreaterThan(try XCTUnwrap(frames.last).ink, 1_500, "the written stroke is in the last frame")
+
+        // The projector draws on the same thread: the recording must leave it free to.
+        // The old CPU path took ~184 ms for each frame. Measured inside the recorder's own frame work, so a loaded
+        // machine's scheduler is not charged to the app.
+        print(String(format: "EP141 recorder's longest frame work on the main thread: %.0f ms", lesson.longestFrameWork * 1_000))
+        XCTAssertLessThan(lesson.longestFrameWork, 0.1, "the recording held the main thread, and the projector with it")
 
         // The sound runs the length of the picture.
         let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
@@ -214,10 +224,25 @@ private final class ScrollingIPad: PresentReplying, @unchecked Sendable {
     private let session = UUID()
     private let document = PresentLessonDocument(id: UUID(), title: "Synthetic Smooth Worksheet", subject: "H2 Chemistry",
                                                  classTag: "MI PU3", role: .student)
-    private let paper = PresentAsset(kind: .pdf, bytes: CompanionPresentFake.worksheetPDF(size: ScrollingIPad.letter))
+    private let firstPaper = PresentAsset(kind: .pdf, bytes: CompanionPresentFake.worksheetPDF(size: ScrollingIPad.letter))
+    /// Another worksheet, as when the teacher opens the next one: new bitmaps for the Mac to draw and the GPU to take in.
+    private let nextPaper = PresentAsset(kind: .pdf, bytes: CompanionPresentFake.worksheetPDF(size: CGSize(width: 610, height: 790)))
+    private var paper: PresentAsset
     private var random = SeededRandom(seed: 141)
 
-    init(host: PresentHost) { self.host = host }
+    init(host: PresentHost) {
+        self.host = host
+        paper = firstPaper
+    }
+
+    /// The next worksheet arrives while the lesson records, with the pages of the old one gone.
+    func openNextPaper() {
+        paper = nextPaper
+        var update = frame()
+        update.time = clock
+        update.assets = [paper]
+        send(update)
+    }
 
     nonisolated func reply(_ payload: Data) {}
     nonisolated func close() {}

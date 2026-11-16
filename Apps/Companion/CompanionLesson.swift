@@ -400,6 +400,8 @@ final class CompanionLessonModel: ObservableObject {
         /// Draws the canvas on the GPU (EP141); without one, the canvas draws itself on the CPU, far slower.
         let renderer: PresentFrameRenderer?
         var dirty = true
+        /// The papers the canvas was last prepared with (see `prepare`).
+        var preparedPapers: [String] = []
         /// The last frame drawn is still moving to where the iPad's picture is (EP141): the next is drawn afresh.
         var moving = false
         var lastFrame: CVPixelBuffer?
@@ -467,6 +469,10 @@ final class CompanionLessonModel: ObservableObject {
     }
 
     var isRecording: Bool { recording != nil }
+
+    /// The longest the recorder's own work for one frame (drawing it and saving it) has held the main thread. The tests
+    /// read it; unlike the gaps on the run loop, it does not count time the machine gave other programs.
+    private(set) var longestFrameWork: TimeInterval = 0
 
     /// The presentation window was shown or closed on the Mac. macOS draws its microphone dialog under it.
     func presentationShown(_ shown: Bool) {
@@ -618,6 +624,7 @@ final class CompanionLessonModel: ObservableObject {
         }
         self.recording = recording
         self.folder = folder
+        prepare(recording)
         recording.document = .some(presenting == .off ? nil : scene?.document)
         recording.log.show(presenting == .off ? nil : scene?.document, at: dateStart)
         if withSound { startSource(recording) } else { recording.noAccess = LessonMicrophoneAccess.askingWarning }
@@ -830,12 +837,24 @@ final class CompanionLessonModel: ObservableObject {
         presenting = status
         guard let recording else { return }
         recording.dirty = true
+        prepare(recording)
         let document = status == .off ? nil : Self.shownDocument(scene)
         if recording.document != .some(document) {
             recording.document = .some(document)
             recording.log.show(document, at: Date())
             checkpoint(recording)
         }
+    }
+
+    /// When the scene shows papers the canvas has not drawn yet, draws them now and untimed by `frame()`: turning a page
+    /// into a bitmap and the GPU's first take of it take far longer than a frame, and are not to land in one.
+    private func prepare(_ recording: Recording) {
+        guard presenting != .off, let scene, let renderer = recording.renderer else { return }
+        let papers = scene.frame?.pages.map(\.asset) ?? []
+        guard papers != recording.preparedPapers else { return }
+        recording.preparedPapers = papers
+        recording.canvas.render(scene, status: .off, at: CMClockGetTime(hostClock).seconds)
+        renderer.prepare()
     }
 
     /// The document the class sees, for `lesson.json`: the one the iPad named, or, while the teacher has swapped the
@@ -864,6 +883,8 @@ final class CompanionLessonModel: ObservableObject {
     private func frame() {
         guard let recording, !recording.sleeping, let writer = recording.writer else { return }
         let now = CMClockGetTime(hostClock)
+        let began = CACurrentMediaTime()
+        defer { longestFrameWork = max(longestFrameWork, CACurrentMediaTime() - began) }
         var buffer = recording.lastFrame
         if recording.dirty || recording.moving || buffer == nil {
             recording.dirty = false

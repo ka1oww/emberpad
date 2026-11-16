@@ -42,6 +42,10 @@ final class PresentFrameRenderer {
         _ = render()
     }
 
+    /// Draws the layers as they are now and keeps nothing: the GPU takes in the page bitmaps they hold (about 2448x3168
+    /// pixels each), so the first frame to show a new page does not pay for it.
+    func prepare() { _ = render() }
+
     /// Draws the layers as they are now into `buffer`, a 32-bit BGRA buffer of the renderer's size.
     func draw(into buffer: CVPixelBuffer) -> Bool {
         guard CVPixelBufferGetWidth(buffer) == width, CVPixelBufferGetHeight(buffer) == height,
