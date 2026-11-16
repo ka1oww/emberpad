@@ -695,6 +695,10 @@ final class StressFrameSampler {
         /// ink: their pen-to-ink times include that wait (EP132).
         var dueOffScreen: Set<Int> = []
         var cameBackAt: CFTimeInterval?
+        /// The points the frame before took for drawn only because their page tile was new that frame (EP144), and
+        /// when that frame was. A point read bare on the next frame has been gone since then.
+        var newTilePoints: Set<Int> = []
+        var newTileAt: CFTimeInterval?
         var run: (start: CFTimeInterval, frames: Int, worst: Double, model: String, evidence: String?, screen: [Double]?)?
 
         init(id: Int, label: String, page: Int, points: [CGPoint], drawnAt: [CFTimeInterval?]) {
@@ -871,6 +875,9 @@ final class StressFrameSampler {
         var model: [ModelStroke]
         /// The part of the page the screen shows, in page points.
         var visible: CGRect
+        /// The page's own tiles whose surfaces the frame before did not have (EP144): PencilKit made them since, and
+        /// has not drawn them yet if they read bare. Empty unless Metal draws the page and the frame before read it.
+        var newSurfaces: Set<ObjectIdentifier> = []
         /// The tiles over each 64 pt square of the page, so a point is read against only those over it.
         var grid: [Int: [Int]] = [:]
         /// Whether each live layer's mask leaves a point showing, once per layer and frame.
@@ -928,6 +935,10 @@ final class StressFrameSampler {
     private var alphaCache: [ObjectIdentifier: (seed: UInt32, values: [Int: UInt8])] = [:]
     private var dumps = 0
     private var lastSurfaces: [ObjectIdentifier: UInt32] = [:]
+    /// The frame `lastSurfaces` was read on, and the pages read then.
+    private var lastRead: (frame: Int, pages: Set<Int>) = (-1, [])
+    /// Set when a point was taken for drawn because its page tile was new this frame.
+    private var readNewTile = false
     private var pictures = 0
     private var lastPictureFrame = -1
 
@@ -945,6 +956,7 @@ final class StressFrameSampler {
             var surfaces: [ObjectIdentifier: UInt32] = [:]
             for frame in pages.values { for tile in frame.tiles { surfaces[ObjectIdentifier(tile.surface)] = tile.surface.seed } }
             lastSurfaces = surfaces
+            lastRead = (frames, Set(pages.keys))
         }
         for mark in active {
             let shown: PageFrame
@@ -971,23 +983,36 @@ final class StressFrameSampler {
         if case .gone = mark.expect { goneExpected = true } else { goneExpected = false }
         var inked: [Int: Bool] = [:]
         var due = 0
+        // Landed ink on a page tile PencilKit made this very frame, while Metal draws the page, is taken from the
+        // canvas's drawing for this one frame, as it is where there is no tile yet (EP144): the tile is not drawn yet.
+        // The next frame reads its pixels, and ink bare there has been gone since this frame, not since the next.
+        var newTile: Set<Int> = [], unread: Set<Int> = []
         for index in mark.points.indices where lifted || mark.drawnAt[index] != nil {
             due += 1
             guard tiles.visible.contains(mark.points[index]) else {
                 if mark.firstSeen[index] == nil { mark.dueOffScreen.insert(index) }
                 continue
             }
-            var hit = isInked(mark.points[index], tiles: tiles, sync: false, pageOnly: false)
+            readNewTile = false
+            var hit = isInked(mark.points[index], tiles: tiles, sync: false, pageOnly: false,
+                              newTileIsUndrawn: mark.landedAt != nil && !goneExpected && !mark.newTilePoints.contains(index))
+            if hit, readNewTile { newTile.insert(index) }
             // A point of landed ink read as bare is read again once the GPU has finished writing to its tile, so a
             // tile caught mid-draw is not taken for ink gone. (Ink not yet seen, or meant to go, is judged on the fast
             // read: waiting for the GPU there would slow the app the sampler is timing.)
             if !hit, !goneExpected, mark.landedAt != nil, mark.firstSeen[index] != nil {
                 unconfirmed = false
                 hit = isInked(mark.points[index], tiles: tiles, sync: true, pageOnly: false)
-                if !hit, unconfirmed { unconfirmed = false; continue }
+                if !hit, unconfirmed { unconfirmed = false; unread.insert(index); continue }
             }
             inked[index] = hit
         }
+        // Bare now, and drawn on the frame before only by its new tile's leave: gone since that frame.
+        let goneSince = mark.newTilePoints.contains(where: { inked[$0] == false }) ? mark.newTileAt : nil
+        // A point that could not be read this frame keeps waiting for its read.
+        let waiting = mark.newTilePoints.intersection(unread)
+        mark.newTilePoints = newTile.union(waiting)
+        mark.newTileAt = mark.newTilePoints.isEmpty ? nil : (waiting.isEmpty ? now : mark.newTileAt ?? now)
         guard due > 0 else { return }
         offScreenSamples += due - inked.count
         for (index, hit) in inked where hit && mark.firstSeen[index] == nil { mark.firstSeen[index] = now }
@@ -1033,7 +1058,8 @@ final class StressFrameSampler {
                         ? capture(mark: mark, hidden: hiddenPoints, tiles: tiles.tiles, at: now) : nil
                     if picture != nil { pictures += 1; lastPictureFrame = frames }
                     let screen = screenBox(hiddenPoints, page: mark.page)
-                    mark.run = (now, 1, hidden, model(page: mark.page, in: page) + (tiles.metal ? " Page drawn by Metal." : "")
+                    mark.run = (goneSince ?? now, goneSince == nil ? 1 : 2, hidden,
+                                model(page: mark.page, in: page) + (tiles.metal ? " Page drawn by Metal." : "")
                                 + tileState(hiddenPoints.first, in: tiles), picture, screen)
                     // The layers as they were, for the first two times in a scenario.
                     if dumps < 2, let canvas = page.canvas(mark.page) {
@@ -1099,6 +1125,10 @@ final class StressFrameSampler {
         let metal = canvas.subviews.contains { NSStringFromClass(type(of: $0)).contains("TiledCanvasView") && !$0.isHidden && $0.alpha > 0.01 }
         let tiles = self.tiles(page: index, in: page, metal: metal)
         var frame = PageFrame(tiles: tiles, metal: metal, model: metal ? model(of: canvas, page: index) : [], visible: visible)
+        if metal, lastRead.frame == frames - 1, lastRead.pages.contains(index) {
+            frame.newSurfaces = Set(tiles.filter { $0.live == nil }.map { ObjectIdentifier($0.surface) }
+                .filter { lastSurfaces[$0] == nil })
+        }
         frame.index()
         return frame
     }
@@ -1170,21 +1200,31 @@ final class StressFrameSampler {
         return pdfFrame.insetBy(dx: 4, dy: 4).contains(inWindow) && window.bounds.contains(inWindow)
     }
 
-    private func isInked(_ point: CGPoint, tiles shown: PageFrame, sync: Bool, pageOnly: Bool) -> Bool {
+    /// `newTileIsUndrawn` lets a page tile PencilKit made this very frame count as not yet drawn (EP144), which sets
+    /// `readNewTile`: the caller must read the point from its pixels on the next frame.
+    private func isInked(_ point: CGPoint, tiles shown: PageFrame, sync: Bool, pageOnly: Bool,
+                         newTileIsUndrawn: Bool = false) -> Bool {
+        var pageTiles = 0, newTiles = 0
         for n in shown.candidates(point) {
             let tile = shown.tiles[n]
             guard tile.frame.insetBy(dx: -0.5, dy: -0.5).contains(point) else { continue }
             if let live = tile.live {
                 if pageOnly || shown.isMasked(point, on: live) { continue }
+            } else {
+                pageTiles += 1
+                if shown.newSurfaces.contains(ObjectIdentifier(tile.surface)) { newTiles += 1 }
             }
             if alpha(at: point, in: tile, sync: sync) > 24 { return true }
         }
-        // A page tile not yet drawn while Metal draws the page: Metal draws the canvas's strokes there itself.
-        guard shown.metal, !shown.candidates(point).contains(where: {
-            shown.tiles[$0].live == nil && shown.tiles[$0].frame.insetBy(dx: -0.5, dy: -0.5).contains(point)
-        }) else { return false }
+        // A page tile not yet drawn while Metal draws the page: Metal draws the canvas's strokes there itself. That is
+        // a point with no page tile at all, or one whose every page tile is new this frame and reads bare: PencilKit
+        // has made the tile and not drawn it yet. A new tile is given that one frame only (see `judge`).
+        guard shown.metal, pageTiles == 0 || (newTileIsUndrawn && newTiles == pageTiles) else { return false }
         for stroke in shown.model where stroke.bounds.contains(point) {
-            if stroke.points.contains(where: { hypot($0.x - point.x, $0.y - point.y) <= stroke.reach }) { return true }
+            if stroke.points.contains(where: { hypot($0.x - point.x, $0.y - point.y) <= stroke.reach }) {
+                if pageTiles > 0 { readNewTile = true }
+                return true
+            }
         }
         return false
     }
