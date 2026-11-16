@@ -20,7 +20,9 @@ import UniformTypeIdentifiers
 final class CompanionPresentModel: ObservableObject {
     static let displayKey = "EmberPadCompanion.presentDisplayName"
 
-    @Published private(set) var status: PresentHost.Status = .off
+    @Published private(set) var status: PresentHost.Status = .off {
+        didSet { lesson.presentationShown(isShowing) }
+    }
     /// The display chosen in the menu, by name; empty means automatic.
     @Published var displayChoice: String {
         didSet {
@@ -30,7 +32,9 @@ final class CompanionPresentModel: ObservableObject {
     }
     @Published private(set) var screenNames: [String] = []
     /// The teacher left the presentation on the Mac; the next Present, or **Show presentation**, shows it again.
-    @Published private(set) var hidden = false
+    @Published private(set) var hidden = false {
+        didSet { lesson.presentationShown(isShowing) }
+    }
     /// A projector backdrop is in place and was read (EP131).
     @Published private(set) var hasBackdrop = false
     /// Why a chosen backdrop was refused, or that the one in place cannot be read.

@@ -52,8 +52,10 @@ protocol LessonMicrophoneSystem: AnyObject {
     func candidates() async -> [LessonMicrophone.Candidate]
     /// The channels the microphone delivers, 1 or 2; the lesson keeps them as they are.
     func channels(of candidate: LessonMicrophone.Candidate) async -> Int
-    /// Asks for microphone access if it was never asked; false when it is off.
-    func authorize() async -> Bool
+    /// macOS's microphone permission (EP137).
+    var permission: LessonMicrophoneAccess.Permission { get }
+    /// Shows macOS's dialog if it was never answered; false when access is off.
+    func requestAccess() async -> Bool
     /// A source for `candidate`. It touches no device until it starts.
     func makeSource(_ candidate: LessonMicrophone.Candidate) throws -> LessonAudioSource
     /// Called on the main thread when a microphone is plugged in or out.
@@ -116,11 +118,19 @@ final class CaptureMicrophones: LessonMicrophoneSystem {
         }
     }
 
-    func authorize() async -> Bool {
+    var permission: LessonMicrophoneAccess.Permission {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: return true
-        case .notDetermined: return await AVCaptureDevice.requestAccess(for: .audio)
-        default: return false
+        case .authorized: .authorized
+        case .notDetermined: .notDetermined
+        default: .denied
+        }
+    }
+
+    func requestAccess() async -> Bool {
+        switch permission {
+        case .authorized: true
+        case .denied: false
+        case .notDetermined: await AVCaptureDevice.requestAccess(for: .audio)
         }
     }
 
@@ -311,6 +321,8 @@ final class CompanionLessonModel: ObservableObject {
         var timeZone = TimeZone.current
         /// Close lessons a crash left open, at launch; never in a test run, which must not touch the real folder.
         var recoverAtLaunch = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+        /// Ask for microphone access at launch if macOS never asked (EP137); never in a test run.
+        var asksAtLaunch = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
         var watchSleep = true
     }
 
@@ -331,6 +343,8 @@ final class CompanionLessonModel: ObservableObject {
 
     let options: Options
     private var microphones: LessonMicrophoneSystem
+    /// When to show macOS's microphone dialog: at launch, and never first under a presentation (EP137).
+    private let access: LessonMicrophoneGate
     private let hostClock = CMClockGetHostTimeClock()
     private var recording: Recording?
     private var starting = false
@@ -392,6 +406,8 @@ final class CompanionLessonModel: ObservableObject {
         var healthTimer: Timer?
         var powerAssertion: IOPMAssertionID?
         var sleeping = false
+        /// The warning while the microphone is not allowed: the lesson records its picture and silence (EP137).
+        var noAccess: String?
 
         init(folder: URL, hostStart: CMTime, dateStart: Date, candidate: LessonMicrophone.Candidate, channels: Int,
              settings: LessonSegmentWriter.Settings, log: LessonLog, health: LessonAudioHealth) {
@@ -417,7 +433,13 @@ final class CompanionLessonModel: ObservableObject {
     init(options: Options = Options(), microphones: LessonMicrophoneSystem? = nil) {
         self.options = options
         self.microphones = microphones ?? Self.defaultMicrophones()
+        access = LessonMicrophoneGate(authorizer: MicrophonePermission(self.microphones))
         self.microphones.onChange = { [weak self] in self?.microphonesChanged() }
+        access.onLateAnswer = { [weak self] in self?.accessAnswered($0) }
+        if options.asksAtLaunch {
+            let access = access
+            Task { await access.launched() }
+        }
         if options.recoverAtLaunch { recovered = LessonRecovery.recover(in: options.root) }
         if options.watchSleep {
             let center = NSWorkspace.shared.notificationCenter
@@ -438,6 +460,11 @@ final class CompanionLessonModel: ObservableObject {
     }
 
     var isRecording: Bool { recording != nil }
+
+    /// The presentation window was shown or closed on the Mac. macOS draws its microphone dialog under it.
+    func presentationShown(_ shown: Bool) {
+        access.setPresenting(shown)
+    }
 
     // MARK: Commands
 
@@ -506,18 +533,22 @@ final class CompanionLessonModel: ObservableObject {
             case .preferred(let preferred): (candidate, fallback) = (preferred, false)
             case .builtIn(let builtIn): (candidate, fallback) = (builtIn, true)
             }
-            let authorized = await microphones.authorize()
-            if cancelledByEnd() { return }
-            guard authorized else {
-                return setStatus(PresentLessonStatus(state: .failed, message:
-                    "Microphone access is off for Ember Companion. Turn it on in System Settings, Privacy & Security, Microphone."))
+            // EP137: never a first dialog under the presentation; without an answer yet the picture records alone.
+            let decision = await access.start()
+            if cancelledByEnd() { return access.lessonEnded() }
+            guard decision != .refuse else {
+                return setStatus(PresentLessonStatus(state: .failed, message: LessonMicrophoneAccess.offMessage))
             }
             let channels = await answer(within: options.microphoneTimeout) { await microphones.channels(of: candidate) }
-            if cancelledByEnd() { return }
-            guard let channels else { return setStatus(notAnswering) }
+            if cancelledByEnd() { return access.lessonEnded() }
+            guard let channels else {
+                access.lessonEnded()
+                return setStatus(notAnswering)
+            }
             do {
-                try start(candidate, channels: channels, fallback: fallback, origin: origin)
+                try start(candidate, channels: channels, fallback: fallback, origin: origin, withSound: decision == .record)
             } catch {
+                access.lessonEnded()
                 lessonLog.error("Start lesson failed: \(error.localizedDescription, privacy: .public)")
                 setStatus(PresentLessonStatus(state: .failed, message: "Could not start recording: \(error.localizedDescription)"))
             }
@@ -552,7 +583,10 @@ final class CompanionLessonModel: ObservableObject {
         }
     }
 
-    private func start(_ candidate: LessonMicrophone.Candidate, channels: Int, fallback: Bool, origin: LessonRecord.Origin) throws {
+    /// Starts recording. Without sound (EP137), the picture records with silence and a warning until the teacher
+    /// allows the microphone, asked once the presentation closes.
+    private func start(_ candidate: LessonMicrophone.Candidate, channels: Int, fallback: Bool, origin: LessonRecord.Origin,
+                       withSound: Bool) throws {
         var settings = options.settings
         settings.channels = channels
         let dateStart = Date()
@@ -579,13 +613,14 @@ final class CompanionLessonModel: ObservableObject {
         self.folder = folder
         recording.document = .some(presenting == .off ? nil : scene?.document)
         recording.log.show(presenting == .off ? nil : scene?.document, at: dateStart)
-        startSource(recording)
+        if withSound { startSource(recording) } else { recording.noAccess = LessonMicrophoneAccess.askingWarning }
         holdPower(recording)
         recording.frameTimer = repeating(1 / Double(max(1, options.maxFrameRate))) { [weak self] in self?.frame() }
         recording.healthTimer = repeating(1) { [weak self] in self?.check() }
         frame()
         checkpoint(recording)
-        setStatus(PresentLessonStatus(state: .recording, startedAt: dateStart, micName: candidate.name, micIsFallback: fallback))
+        setStatus(PresentLessonStatus(state: .recording, startedAt: dateStart, micName: candidate.name, micIsFallback: fallback,
+                                      warning: recording.noAccess))
         lessonLog.info("Lesson started in \(folder.lastPathComponent, privacy: .public) from the \(origin.rawValue, privacy: .public): \(candidate.name, privacy: .public), \(settings.channels) ch \(Int(settings.sampleRate)) Hz, AAC \(settings.audioBitRate) bit/s")
     }
 
@@ -728,6 +763,7 @@ final class CompanionLessonModel: ObservableObject {
     }
 
     private func startSource(_ recording: Recording) {
+        guard recording.noAccess == nil else { return }
         recording.source?.stop()
         recording.source = nil
         recording.sourceDisconnected = false
@@ -755,6 +791,14 @@ final class CompanionLessonModel: ObservableObject {
         switch event {
         case .disconnected: sourceGone(recording)
         }
+    }
+
+    /// The teacher answered macOS's dialog, shown once the presentation closed, for a lesson recording without sound.
+    private func accessAnswered(_ on: Bool) {
+        guard let recording, recording.noAccess != nil else { return }
+        recording.noAccess = on ? nil : LessonMicrophoneAccess.offWarning
+        if on, !recording.sleeping { startSource(recording) }
+        check()
     }
 
     /// A microphone was plugged in or out: when the lesson's microphone is back, record from it again. The list is
@@ -866,7 +910,8 @@ final class CompanionLessonModel: ObservableObject {
             resumeSegment(recording, at: now)
         }
         let failure = recording.writeFailures.last.flatMap { $0.to == nil ? $0 : nil }
-        let warning = (failure ?? recording.health.warning).map { LessonAudioHealth.text(for: $0, at: seconds(now, in: recording)) }
+        let text = { LessonAudioHealth.text(for: $0, at: self.seconds(now, in: recording)) }
+        let warning = failure.map(text) ?? recording.noAccess ?? recording.health.warning.map(text)
         if warning != status.warning {
             var next = status
             next.warning = warning
@@ -942,6 +987,7 @@ final class CompanionLessonModel: ObservableObject {
     func finish() async {
         guard let recording else { return }
         self.recording = nil
+        access.lessonEnded()
         let now = CMClockGetTime(hostClock)
         recording.frameTimer?.invalidate()
         recording.healthTimer?.invalidate()
@@ -1022,6 +1068,17 @@ final class CompanionLessonModel: ObservableObject {
         try? FileManager.default.createDirectory(at: options.root, withIntermediateDirectories: true)
         if lastLesson != nil { NSWorkspace.shared.activateFileViewerSelecting([target]) } else { NSWorkspace.shared.open(target) }
     }
+}
+
+/// macOS's microphone permission, through the lesson's microphones, for `LessonMicrophoneGate`.
+@MainActor
+private final class MicrophonePermission: LessonMicrophoneAuthorizer {
+    private let microphones: LessonMicrophoneSystem
+
+    init(_ microphones: LessonMicrophoneSystem) { self.microphones = microphones }
+
+    var permission: LessonMicrophoneAccess.Permission { microphones.permission }
+    func requestAccess() async -> Bool { await microphones.requestAccess() }
 }
 
 // MARK: - Menu
@@ -1109,9 +1166,18 @@ final class FakeMicrophones: LessonMicrophoneSystem {
     var onChange: (() -> Void)?
     var available: [LessonMicrophone.Candidate]
     var silenceAfter: TimeInterval?
-    var authorized = true
-    /// How long `authorize` takes, as when the first-run permission prompt waits for the teacher.
-    var authorizeDelay: TimeInterval = 0
+    /// macOS's answer so far. `authorized` and `authorizeDelay` set it too.
+    var permission = LessonMicrophoneAccess.Permission.authorized
+    /// The teacher's answer to the dialog; false is access off.
+    var authorized = true {
+        didSet { if permission != .notDetermined { permission = authorized ? .authorized : .denied } }
+    }
+    /// How long the dialog waits for the teacher; more than 0 makes the permission not yet asked.
+    var authorizeDelay: TimeInterval = 0 {
+        didSet { if authorizeDelay > 0 { permission = .notDetermined } }
+    }
+    /// Dialogs shown.
+    private(set) var requests = 0
     /// The microphone's channels (the BOYA mini 2 is stereo).
     var channels = 1
     /// How long listing the microphones takes, as when Core Audio stalls.
@@ -1136,9 +1202,12 @@ final class FakeMicrophones: LessonMicrophoneSystem {
         return available
     }
     func channels(of candidate: LessonMicrophone.Candidate) async -> Int { channels }
-    func authorize() async -> Bool {
+    func requestAccess() async -> Bool {
+        guard permission == .notDetermined else { return permission == .authorized }
+        requests += 1
         if authorizeDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(authorizeDelay * 1_000_000_000)) }
-        return authorized
+        if permission == .notDetermined { permission = authorized ? .authorized : .denied }
+        return permission == .authorized
     }
 
     func makeSource(_ candidate: LessonMicrophone.Candidate) throws -> LessonAudioSource {
