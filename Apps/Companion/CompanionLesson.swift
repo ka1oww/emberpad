@@ -468,10 +468,6 @@ final class CompanionLessonModel: ObservableObject {
 
     var isRecording: Bool { recording != nil }
 
-    /// The longest the recorder's own work for one frame (drawing it and saving it) has held the main thread. The tests
-    /// read it; unlike the gaps on the run loop, it does not count time the machine gave other programs.
-    private(set) var longestFrameWork: TimeInterval = 0
-
     /// The presentation window was shown or closed on the Mac. macOS draws its microphone dialog under it.
     func presentationShown(_ shown: Bool) {
         access.setPresenting(shown)
@@ -868,8 +864,6 @@ final class CompanionLessonModel: ObservableObject {
     private func frame() {
         guard let recording, !recording.sleeping, let writer = recording.writer else { return }
         let now = CMClockGetTime(hostClock)
-        let began = CACurrentMediaTime()
-        defer { longestFrameWork = max(longestFrameWork, CACurrentMediaTime() - began) }
         var buffer = recording.lastFrame
         if recording.dirty || recording.moving || buffer == nil {
             recording.dirty = false

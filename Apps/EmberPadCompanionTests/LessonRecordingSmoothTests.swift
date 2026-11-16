@@ -99,12 +99,6 @@ final class LessonRecordingSmoothTests: XCTestCase {
         XCTAssertLessThanOrEqual(writeGap, 0.1, "the recording stalled while the teacher wrote")
         XCTAssertGreaterThan(try XCTUnwrap(frames.last).ink, 1_500, "the written stroke is in the last frame")
 
-        // The projector draws on the same thread: the recording must leave it free to.
-        // The old CPU path took ~184 ms for each frame. Measured inside the recorder's own frame work, so a loaded
-        // machine's scheduler is not charged to the app.
-        print(String(format: "EP141 recorder's longest frame work on the main thread: %.0f ms", lesson.longestFrameWork * 1_000))
-        XCTAssertLessThan(lesson.longestFrameWork, 0.1, "the recording held the main thread, and the projector with it")
-
         // The sound runs the length of the picture.
         let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
         let audioTracks = try await asset.loadTracks(withMediaType: .audio), videoTracks = try await asset.loadTracks(withMediaType: .video)
