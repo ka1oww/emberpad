@@ -447,6 +447,29 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertEqual(try videoFiles(in: folder).map(\.name), ["lesson.mp4"])
     }
 
+    /// The same refusal when the microphone sends nothing, so the first sound the encoder sees is silence fill: the
+    /// fallback does not depend on sound having been taken, and the lesson still records at the safe rate.
+    func testAnEncoderRefusalRecoversWithTheSafeRateWhenTheMicrophoneSendsNothing() async throws {
+        var options = options()
+        options.settings.fixedAudioBitRate = 384_000
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.channels = 2
+        microphones.deliversAudio = false
+        let lesson = CompanionLessonModel(options: options, microphones: microphones)
+        lesson.start()
+        try await waitUntil { lesson.status.state == .recording }
+        let folder = try XCTUnwrap(lesson.folder)
+        try await waitUntil(timeout: 8) { lesson.status.warning?.hasPrefix("Recording stopped") == true }
+        try await waitUntil(timeout: 10) { lesson.status.warning == nil || lesson.status.warning?.hasPrefix("Recording stopped") == false }
+        try await pause(2)
+        await lesson.finish()
+        let record = try LessonRecord.read(from: folder)
+        XCTAssertEqual(record.status, .complete)
+        XCTAssertEqual(record.audio.bitRate, LessonAudioBitRate.safe)
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), ["lesson.mp4"])
+        XCTAssertGreaterThan(try videoFiles(in: folder).first?.size ?? 0, 0)
+    }
+
     /// A microphone that opens but never sends a buffer (on 16 Nov the BOYA's capture never started): the Mac and the
     /// iPad say no sound is coming in after `startupLimit` (6 s), not the minute a silent microphone is given. The
     /// picture still records, with silence, and the lesson is complete.

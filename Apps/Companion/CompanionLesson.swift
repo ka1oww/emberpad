@@ -696,7 +696,6 @@ final class CompanionLessonModel: ObservableObject {
         let name = writer.url.lastPathComponent
         let dead = writer.failure != nil
         let bytes = max(recording.segmentBytes, writer.bytesOnDisk)
-        let tookSound = writer.written.audio != nil
         lessonLog.error("\(name, privacy: .public) stopped saving after \(bytes) bytes: \(problem, privacy: .public)")
         recording.writer = nil
         recording.sink.use(nil)
@@ -710,8 +709,8 @@ final class CompanionLessonModel: ObservableObject {
         }
         Task { _ = await writer.finish() }
         notRecording(recording, from: bytes == 0 ? recording.segmentStart : recording.segmentGrewAt, at: now)
-        // The encoder refused the lesson's first file before taking any sound: try the next with a rate it always takes.
-        if !recording.anyProven, dead, !tookSound, let safe = options.safeAudioBitRate, recording.settings.audioBitRate != safe {
+        // The encoder failed on an empty file before any file of the lesson saved media: try the next with a rate it always takes.
+        if !recording.anyProven, dead, bytes == 0, let safe = options.safeAudioBitRate, recording.settings.audioBitRate != safe {
             lessonLog.notice("Trying AAC \(safe) bit/s instead of \(recording.settings.audioBitRate)")
             recording.settings.fixedAudioBitRate = safe
             recording.log.useAudioBitRate(safe)
