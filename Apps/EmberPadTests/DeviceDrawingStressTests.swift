@@ -541,7 +541,11 @@ final class DeviceDrawingStressTests: XCTestCase {
         let total = scenario.bystanderCount + heavy.count
         scenario.note("\(heavy.count) strokes of writing, highlights and boxes on the page")
         scenario.tools.select(.lasso)
-        StressPage.pump(0.3)
+        // The test's own work for the outline comes first, before the pause (EP143): reading the page's ink for the
+        // marks and working out the loop's samples keep the main thread for tens of milliseconds on the iPad. Between
+        // the pause and the pen-down that work fell in the frame gap the pen-down ended, the first one the outline is
+        // timed by, and it, not anything the lasso did, was the stall reported while the outline was drawn.
+        let setUpBegan = CACurrentMediaTime()
         let centre = scenario.visibleCentre(page: 0)
         let radius: CGFloat = 90
         // Ink well clear of the lasso and of where the selection goes, which must stay on the screen throughout.
@@ -550,14 +554,19 @@ final class DeviceDrawingStressTests: XCTestCase {
         }
         let step = max(1, far.count / 8)
         scenario.markStrokes(Array(stride(from: 0, to: far.count, by: step).prefix(8).map { far[$0] }), label: "ink far from the lasso")
-        // The outline, then the lift that selects.
         var pencil = StressPencil(page: scenario.page, pageIndex: 0)
         let loop = StressInk.samples(StressInk.circle(center: centre, radius: radius), speed: 900, seed: 5)
+        scenario.metrics["lasso.outline.testSetUpMs"] = (CACurrentMediaTime() - setUpBegan) * 1000
+        StressPage.pump(0.3)
+        // The outline, then the lift that selects. Nothing of the test's own comes between the pause and the pen-down.
         let outline = scenario.frameGaps {
             pencil.down(at: loop[0])
             for point in loop.dropFirst() { pencil.move(to: point) }
             StressPage.pump(0.05)
         }
+        scenario.metrics["lasso.outline.penDownMs"] = pencil.downTook * 1000
+        scenario.note(String(format: "the test's own work for the outline took %.1f ms on the main thread, before the pause; the Pencil going down took %.1f ms",
+                             scenario.metrics["lasso.outline.testSetUpMs"] ?? 0, pencil.downTook * 1000))
         let select = scenario.frameGaps {
             pencil.lift()
             StressPage.pump(0.3)
@@ -641,9 +650,11 @@ final class DeviceDrawingStressTests: XCTestCase {
             let worst = part.gaps.worst
             scenario.metrics["lasso.\(part.key).longestFrameGapMs"] = worst * 1000
             scenario.metrics["lasso.\(part.key).frames"] = Double(part.gaps.gaps.count)
+            scenario.metrics["lasso.\(part.key).leadMs"] = part.gaps.lead * 1000
             scenario.check("no stall while \(part.name)", !part.gaps.gaps.isEmpty && worst <= part.bound,
-                           String(format: "longest frame gap %.0f ms at %.2f s over %d frames (bound %.0f ms)", worst * 1000,
-                                  part.gaps.worstEnd - scenario.sampler.scenarioStart, part.gaps.gaps.count, part.bound * 1000))
+                           String(format: "longest frame gap %.0f ms at %.2f s over %d frames (bound %.0f ms); its first gap began %.0f ms before it did",
+                                  worst * 1000, part.gaps.worstEnd - scenario.sampler.scenarioStart, part.gaps.gaps.count,
+                                  part.bound * 1000, part.gaps.lead * 1000))
         }
         scenario.finish(expectedStrokes: [0: total])
     }
@@ -1309,12 +1320,9 @@ final class StressScenario {
 
     func lasso(_ samples: [CGPoint]) { drive(samples) }
 
-    /// The app's own frame gaps while `body` runs (EP126): each gap a frame ends inside it, and when it ended.
-    func frameGaps(_ body: () -> Void) -> StressPhase {
-        let start = sampler.appFrameGaps.count
-        body()
-        return StressPhase(gaps: Array(sampler.appFrameGaps.dropFirst(start)), ends: Array(sampler.appFrameTimes.dropFirst(start)))
-    }
+    /// The app's own frame gaps while `body` runs (EP126): each gap a frame ends inside it, and when it ended. The
+    /// test's own work must come before the pause ahead of it (see `StressFrameSampler.gaps`).
+    func frameGaps(_ body: () -> Void) -> StressPhase { sampler.gaps(during: body) }
 
     /// A finger drag on the selection from `start` (page points) by `delta`, in `steps` even moves 120 a second as the
     /// selection's pan delivers them on a ProMotion iPad, timed as `timedSelectionDrag(from:through:)` times it.
@@ -1799,6 +1807,9 @@ struct StressDragProbes {
 struct StressPhase {
     var gaps: [Double] = []
     var ends: [CFTimeInterval] = []
+    /// How long before the part began the display frame before it was drawn (EP143): its first gap holds that much of
+    /// what the main thread did before the part.
+    var lead: CFTimeInterval = 0
     var worst: Double { gaps.max() ?? 0 }
     var worstEnd: CFTimeInterval { gaps.indices.max { gaps[$0] < gaps[$1] }.map { ends[$0] } ?? 0 }
 }
