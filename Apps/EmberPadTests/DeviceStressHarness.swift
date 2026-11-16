@@ -509,6 +509,10 @@ struct StressPencil {
     private var recognizers: [UIGestureRecognizer] = []
     private var next: CFTimeInterval = 0
     private var samples = 0
+    /// How long the last pen-down took on the main thread (EP143): focusing the page, finding the recognisers the
+    /// touch reaches (their delegates are asked, as UIKit asks them) and their `touchesBegan`. All of it is charged to
+    /// the app in the frame gap it falls in; this only says how much of such a gap the pen-down was.
+    private(set) var downTook: CFTimeInterval = 0
 
     init(page: StressPage, pageIndex: Int) { self.page = page; self.pageIndex = pageIndex }
 
@@ -516,6 +520,7 @@ struct StressPencil {
 
     mutating func down(at point: CGPoint) {
         guard let canvas, let window = canvas.window else { return }
+        let began = CACurrentMediaTime()
         // A touch on a page focuses that page first, as `PageHitTestPDFView.hitTest` does for a real touch.
         let pdfView = page.controller.pdfView
         pdfView.focusCanvas(at: canvas.pageSpace.convert(point, to: pdfView))
@@ -524,6 +529,7 @@ struct StressPencil {
         recognizers = page.recognizers(for: touch, on: canvas)
         recognizers.forEach { $0.touchesBegan([touch], with: PencilEventStub(touch)) }
         next = CACurrentMediaTime()
+        downTook = next - began
         samples = 0
         pace()
     }
@@ -583,6 +589,10 @@ struct StressPencil {
 
 enum StressInk {
     /// The Pencil's samples along `points`, at `speed` page points a second, as a moving hand draws them.
+    ///
+    /// Working them out keeps the main thread for a while (EP143: tens of milliseconds for a lasso's loop on the
+    /// iPad), and no frame is drawn meanwhile. Before a part of a scenario that is timed by its frame gaps, work them
+    /// out ahead of the pause that comes before it, not between that pause and the part.
     static func samples(_ points: [CGPoint], speed: CGFloat, seed: UInt64) -> [CGPoint] {
         ScribbleFixtures.pencil(points, speed: speed, rounding: 1, tremor: 0.25, seed: seed)
     }
@@ -744,6 +754,20 @@ final class StressFrameSampler {
     /// Starts timing frames afresh (each scenario's own stalls).
     func resetTiming() {
         frameGaps = []; appFrameGaps = []; appFrameTimes = []; costs = []; lastFrame = nil; metalFrames = 0
+    }
+
+    /// The app's own frame gaps while `body` runs (EP126): each gap a frame ends inside it, and when it ended.
+    ///
+    /// A gap is counted where it ends, so the first gap of a part began before the part did and holds whatever the
+    /// main thread did since that frame (EP143). The test's own work on the main thread (reading the page's ink,
+    /// working out a Pencil's samples) must therefore come before the pause that precedes a timed part, never between
+    /// that pause and the part: there it is taken for the app stalling. `StressPhase.lead` says how long before the
+    /// part its first gap began, so a stall reported in a part's first gap can be told from one the part caused.
+    func gaps(during body: () -> Void) -> StressPhase {
+        let start = appFrameGaps.count
+        let lead = lastFrame.map { CACurrentMediaTime() - $0 } ?? 0
+        body()
+        return StressPhase(gaps: Array(appFrameGaps.dropFirst(start)), ends: Array(appFrameTimes.dropFirst(start)), lead: lead)
     }
 
     @discardableResult
