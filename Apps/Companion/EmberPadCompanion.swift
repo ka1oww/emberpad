@@ -12,7 +12,9 @@ private func isCompanionSourceDirectory(_ url: URL) -> Bool {
 @main
 enum CompanionMain {
     static func main() {
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+        if CompanionTestHostMode.isActive {
+            // No Dock icon and never the active app, before AppKit finishes launching (EP136).
+            NSApplication.shared.setActivationPolicy(.accessory)
             CompanionTestHost.main()
         } else {
             EmberPadCompanion.main()
@@ -21,9 +23,24 @@ enum CompanionMain {
 }
 
 struct CompanionTestHost: App {
+    @NSApplicationDelegateAdaptor(CompanionTestHostDelegate.self) private var appDelegate
+
     var body: some Scene {
         Settings { EmptyView() }
     }
+}
+
+/// Keeps the test host an accessory app with no windows of its own once AppKit has launched it, and hands the
+/// keyboard straight back if the launch made it active anyway.
+final class CompanionTestHostDelegate: NSObject, NSApplicationDelegate {
+    @MainActor
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        if NSApp.isActive { NSApp.deactivate() }
+    }
+
+    @MainActor
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { false }
 }
 
 /// Finishes a lesson recording before the Companion quits, so its file is whole and `lesson.json` says complete.

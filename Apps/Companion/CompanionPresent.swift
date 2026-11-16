@@ -376,12 +376,12 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
             switch style {
             case .coverPanel:
                 window.setFrame(screen.frame, display: true)
-                if wasShown { window.orderFrontRegardless() } else { takeKeyboard(window) }
+                if wasShown { CompanionWindowFocus.orderFrontRegardless(window) } else { takeKeyboard(window) }
             case .fullScreen:
                 // Already up in its Space: leave it there, even while the teacher is on another Space.
                 if !(wasShown && inFullScreen) { takeKeyboard(window) }
             case .window:
-                if wasShown { window.orderFrontRegardless() } else { takeKeyboard(window) }
+                if wasShown { CompanionWindowFocus.orderFrontRegardless(window) } else { takeKeyboard(window) }
             }
             return
         }
@@ -437,11 +437,11 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
     private func takeKeyboard(_ window: NSWindow) {
         ordered = true
         if style == .coverPanel {
-            window.orderFrontRegardless()
-            window.makeKey()
+            CompanionWindowFocus.orderFrontRegardless(window)
+            CompanionWindowFocus.makeKey(window)
         } else {
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
+            CompanionWindowFocus.activate(ignoringOtherApps: true)
+            CompanionWindowFocus.makeKeyAndOrderFront(window)
         }
         window.makeFirstResponder(canvas)
         if style == .fullScreen, !inFullScreen {
