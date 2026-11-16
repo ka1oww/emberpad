@@ -1317,9 +1317,9 @@ struct CompanionPresentSection: View {
                         .help("Shows the Ember star alone again.")
                 }
             }
-            Text("Shown behind the Ember star on the projector when no worksheet is presented and while the iPad is paused. "
-                 + "It stays on this Mac.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            // A tooltip rather than a caption, to keep the menu-bar window short (EP139).
+            .help("Shown behind the Ember star on the projector when no worksheet is presented and while the iPad is paused. "
+                  + "It stays on this Mac.")
             if let message = model.backdropMessage {
                 Text(message).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }

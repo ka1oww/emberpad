@@ -1043,7 +1043,8 @@ struct CompanionLessonLabel: View {
 }
 
 /// The Companion window's Lesson recording section: Start and End lesson, the time and microphone while it records,
-/// any warning, the choice when the BOYA is missing, and the recordings folder.
+/// the choice when the BOYA is missing, and the recordings folder. Its warnings and failures are in the window's
+/// warning row (`CompanionMenuWarning`, EP139).
 struct CompanionLessonSection: View {
     @ObservedObject var model: CompanionLessonModel
 
@@ -1065,9 +1066,7 @@ struct CompanionLessonSection: View {
                     Text(model.status.micIsFallback ? "\(mic) (not the \(LessonMicrophone.preferredName))" : mic)
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if let warning = model.status.warning {
-                    Label(warning, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.orange)
-                }
+                // Its warning (not saving sound) is in the warning row at the top of the window (EP139).
                 Button("End lesson") { model.end() }
             case .needsMicChoice:
                 Label(model.status.message ?? "The BOYA microphone is not connected.", systemImage: "mic.slash")
@@ -1079,9 +1078,7 @@ struct CompanionLessonSection: View {
                     Button("Cancel") { model.end() }
                 }
             case .idle, .failed:
-                if model.status.state == .failed, let message = model.status.message {
-                    Text(message).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
-                }
+                // Why it failed is in the warning row at the top of the window (EP139).
                 Text("Records the presentation and the \(LessonMicrophone.preferredName) microphone. Teacher copies are never recorded.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Button("Start lesson") { model.start() }

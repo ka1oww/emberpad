@@ -63,10 +63,15 @@ struct EmberPadCompanion: App {
     @StateObject private var model: CompanionModel
     @StateObject private var pairing: CompanionPairingModel
     @StateObject private var sync: CompanionSyncModel
-    @StateObject private var loginItem = CompanionLoginItemModel()
+    @StateObject private var loginItem: CompanionLoginItemModel
     @StateObject private var present: CompanionPresentModel
+    /// The Settings window, made the first time Settings… is clicked.
+    private let settings: CompanionSettingsWindowController
 #if DEBUG
-    @ObservedObject private var peerHello = CompanionPeerHelloModel.shared
+    /// Only for the peer-to-peer check, launched with `-EmberPeerHelloPanel YES` or `-EmberPeerHelloAutostart YES`.
+    private let showsPeerHello = CompanionPeerHelloModel.isPanelRequested
+#else
+    private let showsPeerHello = false
 #endif
 
     init() {
@@ -104,6 +109,11 @@ struct EmberPadCompanion: App {
         _pairing = StateObject(wrappedValue: pairing)
         _sync = StateObject(wrappedValue: sync)
         _present = StateObject(wrappedValue: present)
+        let loginItem = CompanionLoginItemModel()
+        _loginItem = StateObject(wrappedValue: loginItem)
+        settings = CompanionSettingsWindowController {
+            CompanionSettingsView(model: model, pairing: pairing, sync: sync, loginItem: loginItem)
+        }
 #if DEBUG
         if CompanionPresentFake.isEnabled {
             let fake = CompanionPresentFake(host: present.host)
@@ -121,48 +131,10 @@ struct EmberPadCompanion: App {
     }
 
     var body: some Scene {
+        // EP139: status and warnings, the two things used in class, then Settings… and Quit. Setup is in Settings.
         MenuBarExtra {
-            CompanionPresentBanner(model: present).frame(width: 340)
-            CompanionLibraryContent(
-                folder: model.folder,
-                isSourceAvailable: model.isSourceAvailable,
-                isPreparing: model.isPreparing,
-                snapshot: model.snapshot,
-                scannedAt: model.scannedAt,
-                message: model.message,
-                autoStatus: model.autoStatus,
-                onChooseFolder: { model.chooseFolder() },
-                onPrepare: { model.prepare() },
-                pairing: pairing.status,
-                pairingMessage: pairing.message,
-                onPair: { pairing.pairIPad() },
-                onForgetPairing: { pairing.forget() },
-                syncLine: sync.statusLine,
-                lastSyncedAt: sync.status?.lastSyncedAt,
-                backupFolder: sync.backupFolder,
-                lastBackupAt: sync.status?.lastBackupAt,
-                backupMessage: sync.backupMessage,
-                onChooseBackupFolder: { sync.chooseBackupFolder() },
-                onShowBackupFolder: { sync.showBackupFolder() },
-                loginItem: loginItem.state,
-                loginItemMessage: loginItem.message,
-                onSetOpenAtLogin: { loginItem.setEnabled($0) },
-                onOpenLoginItems: { loginItem.openLoginItemsSettings() }
-            )
-            .onAppear { loginItem.reload() }
-            .frame(width: 340)
-            Divider()
-            CompanionPresentSection(model: present).frame(width: 340, alignment: .leading)
-            Divider()
-            CompanionLessonSection(model: present.lesson).frame(width: 340, alignment: .leading)
-#if DEBUG
-            Divider()
-            CompanionPeerHelloSection(model: peerHello).frame(width: 340)
-#endif
-            Divider()
-            Button("Quit Ember Companion") { NSApplication.shared.terminate(nil) }
-                .keyboardShortcut("q")
-                .padding([.horizontal, .bottom], 14)
+            CompanionMenuContent(model: model, pairing: pairing, sync: sync, present: present,
+                                 showsPeerHello: showsPeerHello, onSettings: { settings.show() })
         } label: {
             CompanionLessonLabel(model: present.lesson)
         }.menuBarExtraStyle(.window)

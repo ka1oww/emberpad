@@ -10,12 +10,15 @@ import SwiftUI
 /// screen can find this Mac with neither joined to a network, echo, and time a 50 MB
 /// synthetic transfer. No pairing, keys, files or library data (EP-22 onwards). It
 /// starts only from the Start button, or at launch with the
-/// `-EmberPeerHelloAutostart YES` argument for the Mac loopback run. Compiled out of
-/// Release builds.
+/// `-EmberPeerHelloAutostart YES` argument for the Mac loopback run. Its menu section shows
+/// only with that argument or `-EmberPeerHelloPanel YES` (EP139), so the teacher's Debug
+/// build never shows it. Compiled out of Release builds.
 @MainActor
 final class CompanionPeerHelloModel: ObservableObject {
     static let serviceName = "EmberPad Companion (debug)"
-    static let autostartKey = "EmberPeerHelloAutostart"
+    nonisolated static let autostartKey = "EmberPeerHelloAutostart"
+    /// Shows the menu section without starting the listener.
+    nonisolated static let panelKey = "EmberPeerHelloPanel"
     /// Optional fixed port for the loopback run; 0 or absent picks any free port.
     static let portKey = "EmberPeerHelloPort"
 
@@ -35,6 +38,15 @@ final class CompanionPeerHelloModel: ObservableObject {
     static let shared = CompanionPeerHelloModel()
 
     private init() {}
+
+    /// Whether the menu-bar window shows the section: only when a launch argument asks for it.
+    nonisolated static var isPanelRequested: Bool {
+        isPanelRequested(UserDefaults.standard)
+    }
+
+    nonisolated static func isPanelRequested(_ defaults: UserDefaults) -> Bool {
+        defaults.bool(forKey: panelKey) || defaults.bool(forKey: autostartKey)
+    }
 
     func startIfRequested() {
         if UserDefaults.standard.bool(forKey: Self.autostartKey) { start() }
@@ -105,7 +117,7 @@ final class CompanionPeerHelloModel: ObservableObject {
     }
 }
 
-/// The Debug section of the menu-bar window.
+/// The Debug section of the menu-bar window, shown only when `isPanelRequested`.
 struct CompanionPeerHelloSection: View {
     @ObservedObject var model: CompanionPeerHelloModel
 
