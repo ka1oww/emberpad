@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>CFBundleDisplayName</key><string>EmberPad Companion</string>
+    <key>CFBundleDisplayName</key><string>Ember Companion</string>
     <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
@@ -12,7 +12,7 @@
     <key>LSUIElement</key><true/>
     <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSLocalNetworkUsageDescription</key><string>EmberPad Companion sends your prepared library to your paired iPad over the local network or a direct Wi-Fi link.</string>
-    <key>NSMicrophoneUsageDescription</key><string>EmberPad Companion records your lessons from the BOYA microphone, with the presentation, into the EmberRecordings folder on this Mac. The recording stays on this Mac.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>Ember Companion sends your prepared library to your paired iPad over the local network or a direct Wi-Fi link.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Ember Companion records your lessons from the BOYA microphone, with the presentation, into the EmberRecordings folder on this Mac. The recording stays on this Mac.</string>
     <key>NSBonjourServices</key><array><string>_embersync._tcp</string><string>_emberws._tcp</string></array>
 </dict></plist>

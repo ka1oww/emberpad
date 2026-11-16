@@ -314,7 +314,7 @@ final class SyncClient: ObservableObject {
     /// What to tell the teacher about a backup that did not finish; nil when every changed worksheet reached the Mac.
     static func notice(for report: InkBackupReport, unrendered: Int) -> String? {
         switch report.skipped {
-        case .macTooOld?: return "Ink is not backed up: update EmberPad Companion on the Mac."
+        case .macTooOld?: return "Ink is not backed up: update Ember Companion on the Mac."
         case .connectionClosed?: return "Ink was not backed up this time; it will be on the next sync."
         case nil: break
         }

@@ -140,7 +140,7 @@ extension PairingError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .notAPairingCode: "This is not an EmberPad pairing code."
-        case .unsupportedVersion: "This pairing code comes from a different version of EmberPad Companion."
+        case .unsupportedVersion: "This pairing code comes from a different version of Ember Companion."
         case .invalidServiceID, .invalidSecret: "This pairing code is damaged. Show a new code on the Mac."
         case .randomUnavailable: "A secure pairing code could not be created."
         case .corruptRecord: "The saved pairing could not be read. Forget it and pair again."

@@ -10,7 +10,7 @@ public enum LibrarySyncConnectError: Error, Equatable, Sendable, LocalizedError 
 
     public var errorDescription: String? {
         switch self {
-        case .macNotFound: "Your Mac was not found nearby. Open EmberPad Companion on the Mac, then try Sync now."
+        case .macNotFound: "Your Mac was not found nearby. Open Ember Companion on the Mac, then try Sync now."
         case .browseFailed: "EmberPad could not look for your Mac. Check that Local Network access is on for EmberPad in Settings."
         }
     }

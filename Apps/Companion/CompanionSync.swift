@@ -170,7 +170,7 @@ final class CompanionLoginItemModel: ObservableObject {
         }
         reload()
         if state == .needsApproval {
-            message = "Allow EmberPad Companion in System Settings › General › Login Items."
+            message = "Allow Ember Companion in System Settings › General › Login Items."
         }
     }
 
