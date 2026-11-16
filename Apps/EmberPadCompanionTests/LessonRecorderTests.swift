@@ -192,7 +192,75 @@ final class LessonRecorderTests: XCTestCase {
         lesson.start()
         try await waitUntil { lesson.status.state == .failed }
         XCTAssertTrue(lesson.status.message?.contains("Microphone access is off") == true)
+        XCTAssertTrue(lesson.status.message?.contains("System Settings > Privacy & Security > Microphone > Ember Companion") == true,
+                      "the message names the setting that turns access on")
+        XCTAssertEqual(microphones.requests, 0, "access already off is not asked again")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    /// EP137: macOS never asked, and the teacher starts the lesson from the iPad while the Mac presents full screen.
+    /// No dialog is shown under the presentation: the picture records at once, the Mac and the iPad say there is no
+    /// sound yet and how to fix it, and the dialog comes when the teacher leaves the presentation. Once allowed, the
+    /// microphone records.
+    func testAStartDuringAPresentationRecordsThePictureAndAsksWhenItCloses() async throws {
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.permission = .notDetermined
+        let (model, iPad, window) = presenting(microphones)
+        let lesson = model.lesson
+        iPad.present(.student)
+        try await waitUntil { model.isShowing }
+        iPad.send(command: PresentLessonCommand(action: .start))
+        try await waitUntil { lesson.status.state == .recording }
+        XCTAssertEqual(microphones.requests, 0, "no dialog while the presentation is on screen")
+        XCTAssertTrue(microphones.sources.isEmpty, "the microphone is not opened without access")
+        XCTAssertEqual(lesson.status.warning, LessonMicrophoneAccess.askingWarning)
+        XCTAssertEqual(iPad.statuses.last?.warning, LessonMicrophoneAccess.askingWarning, "the iPad is warned too")
+        try await pause(1.5)
+        XCTAssertEqual(lesson.status.warning, LessonMicrophoneAccess.askingWarning, "the health check keeps the warning")
+
+        window.onHide?()
+        try await waitUntil { microphones.sources.count == 1 }
+        XCTAssertEqual(microphones.requests, 1)
+        try await waitUntil { lesson.status.warning == nil }
+        XCTAssertTrue(lesson.isRecording)
+        let folder = try XCTUnwrap(lesson.folder)
+        await lesson.finish()
+        let record = try LessonRecord.read(from: folder)
+        XCTAssertEqual(record.status, .complete)
+    }
+
+    /// EP137: the teacher says no once the presentation closes: the lesson goes on recording its picture and both
+    /// devices say how to turn the microphone on.
+    func testARefusalAfterThePresentationClosesKeepsAVisibleWarning() async throws {
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.permission = .notDetermined
+        microphones.authorized = false
+        let (model, iPad, window) = presenting(microphones)
+        let lesson = model.lesson
+        iPad.present(.student)
+        try await waitUntil { model.isShowing }
+        iPad.send(command: PresentLessonCommand(action: .start))
+        try await waitUntil { lesson.status.state == .recording }
+        window.onHide?()
+        try await waitUntil { lesson.status.warning == LessonMicrophoneAccess.offWarning }
+        XCTAssertEqual(iPad.statuses.last?.warning, LessonMicrophoneAccess.offWarning)
+        XCTAssertEqual(microphones.requests, 1)
+        XCTAssertTrue(microphones.sources.isEmpty)
+        XCTAssertTrue(lesson.isRecording)
+        await lesson.finish()
+    }
+
+    /// EP137: macOS never asked and nothing is presented: the dialog is shown at Start lesson, then the lesson records.
+    func testAStartWithNothingPresentedAsksThenRecords() async throws {
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.permission = .notDetermined
+        let lesson = CompanionLessonModel(options: options(), microphones: microphones)
+        lesson.start()
+        try await waitUntil { lesson.status.state == .recording }
+        XCTAssertEqual(microphones.requests, 1)
+        XCTAssertEqual(microphones.sources.count, 1)
+        XCTAssertNil(lesson.status.warning)
+        await lesson.finish()
     }
 
     /// An End lesson that arrives while the microphone permission is still pending cancels the start: nothing records,
@@ -203,6 +271,9 @@ final class LessonRecorderTests: XCTestCase {
         let (model, iPad, _) = presenting(microphones)
         let lesson = model.lesson
         iPad.present(.student)
+        // The teacher left the presentation on the Mac, so the dialog is shown at Start lesson (EP137).
+        try await waitUntil { model.isShowing }
+        model.hide()
         iPad.send(command: PresentLessonCommand(action: .start))
         let end = PresentLessonCommand(action: .end)
         iPad.send(command: end)

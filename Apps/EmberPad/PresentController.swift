@@ -279,7 +279,11 @@ final class PresentController: ObservableObject {
         guard isOn else { return }
         macRecords = true
         lesson = status
-        if let pending = pendingLesson, status.handledCommand == pending.id { pendingLesson = nil }
+        if let pending = pendingLesson, status.handledCommand == pending.id {
+            pendingLesson = nil
+            // A Start the Mac could not carry out (microphone access off, say) is said at once, not only in the menu.
+            if pending.action != .end, status.state == .failed, let message = status.message { lessonProblem = message }
+        }
     }
 
     static func input(from student: StudentDisplayModel, paper: PresentPaperCache, ink: PresentInkCache) -> PresentInput {
