@@ -5,6 +5,7 @@ import PDFKit
 import PencilKit
 import QuartzCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Present on Mac, the Mac side (EP93). The sync server hands every PRESENT frame to `host`; this model shows what
 /// it holds in a presentation window: full screen on the projector (the first display that is not the Mac's own,
@@ -30,6 +31,10 @@ final class CompanionPresentModel: ObservableObject {
     @Published private(set) var screenNames: [String] = []
     /// The teacher left the presentation on the Mac; the next Present, or **Show presentation**, shows it again.
     @Published private(set) var hidden = false
+    /// A projector backdrop is in place and was read (EP131).
+    @Published private(set) var hasBackdrop = false
+    /// Why a chosen backdrop was refused, or that the one in place cannot be read.
+    @Published private(set) var backdropMessage: String?
 
     let host: PresentHost
     private let mailbox: PresentMailbox
@@ -40,9 +45,16 @@ final class CompanionPresentModel: ObservableObject {
     private var ticker: Timer?
     private var screenObserver: NSObjectProtocol?
     private var sleepAssertion: IOPMAssertionID?
+    let backdrop: PresentBackdropStore
+    /// Bumped on every load, so a slow load never replaces a newer choice.
+    private var backdropGeneration = 0
+    /// The last backdrop load has finished.
+    private(set) var backdropLoaded = false
 
-    init(window: PresentWindowController? = nil, lesson: CompanionLessonModel? = nil) {
+    init(window: PresentWindowController? = nil, lesson: CompanionLessonModel? = nil,
+         backdrop: PresentBackdropStore = PresentBackdropStore()) {
         self.window = window ?? PresentWindowController()
+        self.backdrop = backdrop
         let mailbox = PresentMailbox()
         let box = WeakPresentModel()
         host = PresentHost(onChange: { scene, status in
@@ -69,6 +81,7 @@ final class CompanionPresentModel: ObservableObject {
                 if let self, self.status != .off, !self.hidden { self.showWindow() }
             }
         }
+        reloadBackdrop()
     }
 
     var statusText: String {
@@ -142,6 +155,74 @@ final class CompanionPresentModel: ObservableObject {
         return NSScreen.screens.first { !$0.isBuiltIn } ?? NSScreen.main
     }
 
+    // MARK: Backdrop (EP131)
+
+    /// **Choose picture…**: any picture on this Mac becomes the projector backdrop.
+    func chooseBackdrop() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Use as backdrop"
+        panel.message = "Shown behind the Ember star on the projector when nothing is presented and while the iPad is paused. "
+            + "It stays on this Mac."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        useBackdrop(from: url)
+    }
+
+    /// Copies the picture at `url` in as the backdrop and shows it. Returns false, with `backdropMessage` saying
+    /// why, when it is refused; the backdrop is then unchanged.
+    @discardableResult
+    func useBackdrop(from url: URL) -> Bool {
+        do {
+            try backdrop.install(from: url)
+        } catch {
+            backdropMessage = error.localizedDescription
+            return false
+        }
+        backdropMessage = nil
+        reloadBackdrop()
+        return true
+    }
+
+    /// **Use Ember star only**: removes the backdrop, so the presentation shows the star alone and plain Paused.
+    func clearBackdrop() {
+        do {
+            try backdrop.clear()
+            backdropMessage = nil
+        } catch {
+            backdropMessage = error.localizedDescription
+        }
+        reloadBackdrop()
+    }
+
+    /// Reads the backdrop off the main thread, then hands it to the canvas, which keeps it until the next load, so
+    /// presenting never waits on the file.
+    func reloadBackdrop() {
+        backdropGeneration += 1
+        let generation = backdropGeneration
+        let store = backdrop
+        let size = max(PresentBackdropStore.minimumDecodeSize,
+                       NSScreen.screens.map { Int(max($0.frame.width, $0.frame.height) * $0.backingScaleFactor) }.max() ?? 0)
+        backdropLoaded = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let present = store.exists
+            let box = BackdropImage(present ? store.load(maxPixelSize: size) : nil)
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, generation == self.backdropGeneration else { return }
+                    self.window.canvas.backdrop = box.image
+                    self.hasBackdrop = box.image != nil
+                    if present, box.image == nil {
+                        self.backdropMessage = "The backdrop picture cannot be read, so the projector shows the Ember star alone."
+                    }
+                    self.backdropLoaded = true
+                }
+            }
+        }
+    }
+
     private func holdSleep() {
         guard sleepAssertion == nil else { return }
         var id = IOPMAssertionID(0)
@@ -156,6 +237,12 @@ final class CompanionPresentModel: ObservableObject {
         IOPMAssertionRelease(id)
         sleepAssertion = nil
     }
+}
+
+/// A decoded backdrop crossing from the loading queue to the main thread; `CGImage` is immutable.
+private final class BackdropImage: @unchecked Sendable {
+    let image: CGImage?
+    init(_ image: CGImage?) { self.image = image }
 }
 
 private final class WeakPresentModel: @unchecked Sendable {
@@ -512,12 +599,26 @@ final class PresentExitButton: NSButton {
 /// on black, each page's paper as a cached bitmap, its ink multiplied over it, then strokes in progress as vector
 /// paths, the laser trail and the dot. A Pencil move changes only paths; ink appended to a page renders only the new
 /// strokes; a scroll moves layers without rasterising anything.
+///
+/// With a projector backdrop (EP131, `PresentBackdropStore`), the idle screen is the picture alone, full-bleed, and the
+/// Paused screen is the picture with a small, quiet "Paused" in the bottom-left corner, on a dark rounded badge so it
+/// reads on any picture. Without one they are the star alone on black and the large "Paused", as before.
 final class PresentCanvasView: NSView {
     var onEscape: (() -> Void)?
     /// The corner light; the lesson recording's copy of the canvas (EP129) has none.
     var showsStatusDot = true
     /// Pixels per point when the canvas is not in a window, as for the lesson recording.
     var scaleOverride: CGFloat?
+    /// The projector backdrop, decoded off the main thread by `CompanionPresentModel`; nil shows the plain screens. Only
+    /// the projector window's canvas is given one: the lesson recording's canvas (EP129) never is, so the picture never
+    /// reaches a recording.
+    var backdrop: CGImage? {
+        didSet {
+            guard backdrop !== oldValue else { return }
+            backdropLayer.contents = backdrop
+            redraw()
+        }
+    }
 
     private let root = CALayer()
     private let viewport = CALayer()
@@ -526,8 +627,10 @@ final class PresentCanvasView: NSView {
     private var trailCores: [CAShapeLayer] = []
     private var trailGlows: [CAShapeLayer] = []
     private let laserLayer = CALayer()
-    private let message = CATextLayer()
-    private let star = CAShapeLayer()
+    let message = CATextLayer()
+    let star = CAShapeLayer()
+    let backdropLayer = CALayer()
+    let badge = CALayer()
     private let statusDot = CALayer()
     private var pages: [Int: PresentPageLayers] = [:]
     private var paperImages = PresentPaperImages()
@@ -540,6 +643,13 @@ final class PresentCanvasView: NSView {
         root.isGeometryFlipped = true
         layer = root
         wantsLayer = true
+        backdropLayer.contentsGravity = .resizeAspectFill
+        backdropLayer.masksToBounds = true
+        backdropLayer.isHidden = true
+        root.addSublayer(backdropLayer)
+        badge.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        badge.isHidden = true
+        root.addSublayer(badge)
         viewport.masksToBounds = true
         // The gaps between straddled pages match the worksheet canvas, as on the iPad's student view.
         viewport.backgroundColor = CGColor(srgbRed: 0.906, green: 0.886, blue: 0.851, alpha: 1)
@@ -614,9 +724,11 @@ final class PresentCanvasView: NSView {
         viewport.isHidden = true
         message.isHidden = true
         star.isHidden = true
+        backdropLayer.isHidden = true
+        badge.isHidden = true
         switch screen {
-        case .idle: showStar()
-        case .paused: show(message: "Paused")
+        case .idle: if backdrop != nil { showBackdrop() } else { showStar() }
+        case .paused: if backdrop != nil { showBackdrop(badge: "Paused") } else { show(message: "Paused") }
         case .teacherCopyPrivate: show(message: "Teacher copy · private")
         case .page(let page): layout(page)
         }
@@ -627,6 +739,7 @@ final class PresentCanvasView: NSView {
     private func show(message text: String) {
         let size = max(28, min(bounds.width, bounds.height) * 0.06)
         message.string = text
+        message.foregroundColor = NSColor.white.cgColor
         message.font = NSFont.systemFont(ofSize: size, weight: .semibold)
         message.fontSize = size
         message.contentsScale = screenScale
@@ -640,6 +753,32 @@ final class PresentCanvasView: NSView {
         star.path = PresentStar.path(in: CGRect(x: bounds.midX - height * PresentStar.aspectRatio / 2, y: bounds.midY - height / 2,
                                                 width: height * PresentStar.aspectRatio, height: height))
         star.isHidden = false
+    }
+
+    /// The backdrop full-bleed (aspect-fill) and, on Paused, a small label on a dark badge in the bottom-left corner,
+    /// away from the Exit control (top left) and the status light (bottom right). Sized by the 16:9 height that fits.
+    private func showBackdrop(badge text: String? = nil) {
+        backdropLayer.frame = bounds
+        backdropLayer.contentsScale = screenScale
+        backdropLayer.isHidden = false
+        guard let text else { return }
+        let unit = min(bounds.height, bounds.width * 9 / 16)
+        let textSize = max(13, unit * 0.022)
+        let font = NSFont.systemFont(ofSize: textSize, weight: .medium)
+        let textWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        let lineHeight = ceil(textSize * 1.3)
+        let padX = textSize * 0.9, padY = textSize * 0.4, inset = max(12, unit * 0.03)
+        let frame = CGRect(x: inset, y: bounds.maxY - inset - lineHeight - 2 * padY, width: textWidth + 2 * padX, height: lineHeight + 2 * padY)
+        badge.frame = frame
+        badge.cornerRadius = frame.height / 2
+        badge.isHidden = false
+        message.string = text
+        message.foregroundColor = NSColor.white.withAlphaComponent(0.85).cgColor
+        message.font = font
+        message.fontSize = textSize
+        message.contentsScale = screenScale
+        message.frame = CGRect(x: frame.minX, y: frame.minY + padY, width: frame.width, height: lineHeight)
+        message.isHidden = false
     }
 
     private func layoutStatusDot() {
@@ -1040,6 +1179,22 @@ struct CompanionPresentSection: View {
             // While the presentation is up, **Exit presentation** is in the banner at the top of the window.
             if model.status != .off, model.hidden {
                 Button("Show presentation") { model.show() }
+            }
+            HStack(spacing: 8) {
+                Text("Backdrop").font(.callout)
+                Text(model.hasBackdrop ? "Your picture" : "Ember star only").font(.callout).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Button(model.hasBackdrop ? "Change…" : "Choose picture…") { model.chooseBackdrop() }
+                if model.hasBackdrop {
+                    Button("Remove") { model.clearBackdrop() }
+                        .help("Shows the Ember star alone again.")
+                }
+            }
+            Text("Shown behind the Ember star on the projector when no worksheet is presented and while the iPad is paused. "
+                 + "It stays on this Mac.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let message = model.backdropMessage {
+                Text(message).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)

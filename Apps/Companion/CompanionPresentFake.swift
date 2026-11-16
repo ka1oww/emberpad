@@ -8,7 +8,8 @@ import Foundation
 /// PRESENT frames, with a heartbeat each second, as a paired iPad does; the app then uses a pairing Keychain service
 /// of its own (`pairingService`), so it never reads the real pairing or starts the sync server.
 /// `-EmberPresentFakeStopAfter N` sends the iPad's stop after N seconds and presents again two seconds later, to check
-/// that the next Present shows a hidden window again. Compiled out of Release builds.
+/// that the next Present shows a hidden window again. `-EmberPresentFakeScreen idle` or `paused` presents the idle or
+/// Paused screen instead, to see the projector backdrop (EP131). Compiled out of Release builds.
 @MainActor
 final class CompanionPresentFake {
     static let enabledKey = "EmberPresentFake"
@@ -51,7 +52,7 @@ final class CompanionPresentFake {
         open.open = true
         send(open)
         seq = 0
-        send(Self.snapshot(seq: next()))
+        send(Self.launchSnapshot(seq: next()))
         heartbeat?.invalidate()
         heartbeat = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -78,6 +79,23 @@ final class CompanionPresentFake {
     private func send(_ update: PresentUpdate) {
         guard let payload = try? PresentCodec.encode(update) else { return }
         host.received(payload, on: link)
+    }
+
+    /// `-EmberPresentFakeScreen idle` or `paused` presents that screen instead of the worksheet (EP131).
+    nonisolated static let screenKey = "EmberPresentFakeScreen"
+
+    /// The snapshot to present: the worksheet, or the screen `-EmberPresentFakeScreen` names.
+    nonisolated static func launchSnapshot(seq: UInt64) -> PresentUpdate {
+        let screen: PresentedView.Screen? = switch UserDefaults.standard.string(forKey: screenKey) {
+        case "idle": .idle
+        case "paused": .paused
+        default: nil
+        }
+        guard let screen else { return snapshot(seq: seq) }
+        var update = PresentUpdate(seq: seq)
+        update.reset = true
+        update.frame = PresentFrame(view: PresentedView(screen: screen), session: UUID(), pages: [])
+        return update
     }
 
     /// A synthetic US Letter worksheet page with a heading and ruled lines.
