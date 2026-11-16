@@ -138,7 +138,9 @@ final class PresentExitTests: XCTestCase {
     func testLeavingHidesOnlyTheMacAndTheNextPresentShowsItAgain() throws {
         let window = PresentWindowController()
         controllers.append(window)
-        let model = CompanionPresentModel(window: window)
+        let backdrop = PresentBackdropStore(url: FileManager.default.temporaryDirectory
+            .appendingPathComponent("PresentExitTests-\(UUID().uuidString)/\(PresentBackdropStore.fileName)"))
+        let model = CompanionPresentModel(window: window, backdrop: backdrop)
         let iPad = PresentingIPad(host: model.host)
 
         iPad.present()

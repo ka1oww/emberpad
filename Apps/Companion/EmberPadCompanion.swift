@@ -64,7 +64,15 @@ struct EmberPadCompanion: App {
             lessonOptions.root = URL(fileURLWithPath: (root as NSString).expandingTildeInPath, isDirectory: true)
         }
 #endif
-        let present = CompanionPresentModel(lesson: CompanionLessonModel(options: lessonOptions))
+#if DEBUG
+        // `-EmberPresentBackdrop <path>` uses that file as the projector backdrop instead of the one in Application
+        // Support, so a check never touches the teacher's own (EP131).
+        let backdrop = UserDefaults.standard.string(forKey: "EmberPresentBackdrop")
+            .map { PresentBackdropStore(url: URL(fileURLWithPath: $0)) } ?? PresentBackdropStore()
+#else
+        let backdrop = PresentBackdropStore()
+#endif
+        let present = CompanionPresentModel(lesson: CompanionLessonModel(options: lessonOptions), backdrop: backdrop)
         CompanionAppDelegate.lesson = present.lesson
 #if DEBUG
         let pairing = CompanionPresentFake.isEnabled
