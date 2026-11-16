@@ -465,6 +465,114 @@ final class InkStaysDrawnTests: XCTestCase {
         XCTAssertTrue(inkView.landingCoverStrokes.isEmpty, "nor once the page shows it")
     }
 
+    /// EP144: while PencilKit has a stroke down it leaves the page's tiles exactly as they are. A landing pops the
+    /// highlight it sets again, and PencilKit draws the page without it first: when the next stroke began just then
+    /// (the highlighter, then the pen 150 ms later), the tiles stayed without the highlight for the whole of that
+    /// stroke, and the guard, which looked only 400 ms after the landing, left it off the screen that long (the iPad's
+    /// stress test: gone 400 ms; the simulator's: over 500 ms). With a stroke down the guard looks at once, and covers
+    /// the highlight only over the tiles drawn without it, so ink the page still shows is never drawn twice.
+    func testAHighlightThePageDrewWithoutIsCoveredAtOnceWhileAStrokeIsDown() throws {
+        let page = try page(baseStrokes: 0)
+        let inkView = try XCTUnwrap(page.canvas.superview as? PageInkView)
+        // PencilKit's report would end the guard once the page shows the highlight; it never comes during a stroke.
+        let probe = PageProbe(forward: page.canvas.delegate)
+        probe.holdsReports = true
+        page.canvas.delegate = probe
+        let strokeIsDown = inkView.pageStrokeIsDown
+        defer {
+            page.canvas.delegate = probe.forward
+            inkView.pageStrokeIsDown = strokeIsDown
+        }
+        var highlight = WholeStrokeEraseTests.line(from: CGPoint(x: 60, y: 400), to: CGPoint(x: 760, y: 400), width: 12)
+        highlight.ink = PKInk(.marker, color: UIColor.yellow.withAlphaComponent(0.5))
+        page.canvas.drawing = PKDrawing(strokes: [highlight])
+        let ends = [CGPoint(x: 70, y: 400), CGPoint(x: 750, y: 400)]
+        Self.wait(until: { ends.allSatisfy { Self.inkAlpha(of: inkView, at: $0) > 24 } }, timeout: 4)
+        XCTAssertTrue(ends.allSatisfy { Self.inkAlpha(of: inkView, at: $0) > 24 }, "the page draws the highlight")
+        let emptied = Self.tileLayers(of: inkView, under: ends[0])
+        XCTAssertFalse(emptied.isEmpty, "a tile of the page draws the highlight's start")
+        let kept = Self.tileLayers(of: inkView, under: ends[1]).filter { tile in !emptied.contains { $0 === tile } }
+        XCTAssertFalse(kept.isEmpty, "and another draws its end")
+        let frames = emptied.map { $0.convert($0.bounds, to: inkView.layer) }
+
+        var down = true
+        inkView.pageStrokeIsDown = { down }
+        inkView.guardLanding(page.canvas.drawing.strokes)
+        HoldPage.turn(0.05)
+        XCTAssertTrue(inkView.landingCoverStrokes.isEmpty, "nothing is covered while the tiles show the highlight")
+
+        // PencilKit drew the page without the highlight on these tiles, and the stroke began before it drew them again.
+        let contents = emptied.map(\.contents)
+        let blank = try contents.map { try XCTUnwrap(Self.blankSurface(like: $0)) }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        zip(emptied, blank).forEach { $0.contents = $1 }
+        CATransaction.commit()
+        let began = CACurrentMediaTime()
+        Self.wait(until: { !inkView.landingCoverStrokes.isEmpty }, timeout: PageInkView.landingDrawPatience)
+        XCTAssertEqual(inkView.landingCoverStrokes.count, 1, "the cover draws the highlight at once, not after the landing's patience")
+        XCTAssertLessThan(CACurrentMediaTime() - began, 0.1, "within a few frames")
+        let reach = inkView.landingCoverReach
+        XCTAssertFalse(reach.isEmpty, "the cover shows somewhere")
+        let bounds = highlight.renderBounds.insetBy(dx: -2, dy: -2)
+        for part in reach {
+            XCTAssertTrue(bounds.contains(part), "only over the highlight: \(part)")
+            XCTAssertTrue(frames.contains { $0.insetBy(dx: -0.5, dy: -0.5).contains(part) },
+                          "and only over the tiles drawn without it, so the rest of it is not drawn twice: \(part) in \(frames)")
+        }
+        XCTAssertTrue(reach.contains { $0.contains(ends[0]) }, "its start is covered")
+        XCTAssertFalse(reach.contains { $0.contains(ends[1]) }, "its end, which the page still draws, is not")
+
+        // The Pencil lifts; the tiles are still without it, and the highlight stays covered though the landing is
+        // not yet `landingDrawPatience` old.
+        down = false
+        HoldPage.turn(0.05)
+        XCTAssertEqual(inkView.landingCoverStrokes.count, 1, "covered until the page shows it")
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        zip(emptied, contents).forEach { $0.contents = $1 }
+        CATransaction.commit()
+        HoldPage.turn(0.05)
+        XCTAssertTrue(inkView.landingCoverStrokes.isEmpty, "and the cover leaves once the page shows it again")
+    }
+
+    /// The page tells its ink view that PencilKit has a stroke of ink down from PencilKit's report that one began
+    /// until its report that it ended, so the landing guard knows the tiles are being left as they are (EP144). An
+    /// eraser's stroke is not one: the page is redrawn as it erases, and a cover then would draw erased ink again.
+    func testThePageKnowsAStrokeOfInkIsDownFromPencilKitsBeginToItsEnd() throws {
+        let page = try page(baseStrokes: 0)
+        let inkView = try XCTUnwrap(page.canvas.superview as? PageInkView)
+        let isDown = try XCTUnwrap(inkView.pageStrokeIsDown, "the page says whether a stroke is down")
+        let tool = page.canvas.tool
+        defer { page.canvas.tool = tool }
+        for ink in [PKInkingTool(.pen, color: .black, width: 3), PKInkingTool(.marker, color: .yellow, width: 12)] {
+            page.canvas.tool = ink
+            XCTAssertFalse(isDown(), "no stroke yet")
+            page.controller.canvasViewDidBeginUsingTool(page.canvas)
+            XCTAssertTrue(isDown(), "down once PencilKit began a stroke of \(ink.inkType.rawValue)")
+            page.controller.canvasViewDidEndUsingTool(page.canvas)
+            XCTAssertFalse(isDown(), "up once it ended")
+        }
+        for eraser in [PKEraserTool(.vector), PKEraserTool(.fixedWidthBitmap, width: 12)] {
+            page.canvas.tool = eraser
+            page.controller.canvasViewDidBeginUsingTool(page.canvas)
+            XCTAssertFalse(isDown(), "an eraser's stroke is not ink down")
+            page.controller.canvasViewDidEndUsingTool(page.canvas)
+            XCTAssertFalse(isDown(), "nor after it")
+        }
+        HoldPage.turn(0.1)
+    }
+
+    /// An empty surface the size of tile contents `contents`: what a tile shows where PencilKit drew no ink.
+    static func blankSurface(like contents: Any?) -> IOSurface? {
+        guard let contents, let surface = contents as AnyObject as? IOSurface else { return nil }
+        return IOSurface(properties: [
+            .width: surface.width, .height: surface.height, .bytesPerElement: 4,
+            .bytesPerRow: surface.bytesPerRow, .pixelFormat: surface.pixelFormat,
+        ])
+    }
+
     /// The pen ink "Erase highlighter only" set aside goes back on the page at the lift, and its layer stays until the
     /// page's own tiles show that ink. Removed at once, the pen ink vanished for a few frames until PencilKit had
     /// redrawn the page with it.
