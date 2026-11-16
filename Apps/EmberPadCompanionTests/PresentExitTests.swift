@@ -155,6 +155,20 @@ final class PresentExitTests: XCTestCase {
         XCTAssertFalse(window.isVisible)
     }
 
+    func testLeavingFullScreenBySystemRouteEndsThePresentation() throws {
+        let (controller, toggles) = quietController()
+        var hides = 0
+        controller.onHide = { hides += 1; controller.close() }
+        let screen = try XCTUnwrap(NSScreen.main)
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        let window = try XCTUnwrap(controller.window)
+        controller.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+        controller.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        XCTAssertEqual(hides, 1)
+        XCTAssertFalse(controller.isShown)
+        XCTAssertEqual(toggles.windows.count, 1, "it does not go back into full screen")
+    }
+
     func testShowingAgainWhileLeavingGoesBackIntoFullScreen() throws {
         let (controller, toggles) = quietController()
         let screen = try XCTUnwrap(NSScreen.main)

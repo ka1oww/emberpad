@@ -512,6 +512,7 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
         guard closingFromFullScreen else {
             // Shown again while it was leaving to hide: back into its Space on the projector.
             if wasLeaving, style == .fullScreen, ordered, let window { takeKeyboard(window) }
+            if !wasLeaving, style == .fullScreen, ordered { onHide?() }
             return
         }
         closingFromFullScreen = false
