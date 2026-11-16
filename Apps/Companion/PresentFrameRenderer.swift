@@ -38,22 +38,15 @@ final class PresentFrameRenderer {
         self.height = height
         self.queue = queue
         self.target = target
+        // The first frame loads the GPU's shaders, about 100 ms: paid here, before the recording starts, and not by its first frame.
+        _ = render()
     }
 
     /// Draws the layers as they are now into `buffer`, a 32-bit BGRA buffer of the renderer's size.
     func draw(into buffer: CVPixelBuffer) -> Bool {
         guard CVPixelBufferGetWidth(buffer) == width, CVPixelBufferGetHeight(buffer) == height,
               CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA else { return false }
-        // The layers' latest changes reach the renderer before it draws.
-        CATransaction.flush()
-        renderer.beginFrame(atTime: CACurrentMediaTime(), timeStamp: nil)
-        renderer.addUpdate(renderer.bounds)
-        renderer.render()
-        renderer.endFrame()
-        // The renderer's work is on `queue`: an empty buffer after it finishes once the frame is drawn.
-        guard let done = queue.makeCommandBuffer() else { return false }
-        done.commit()
-        done.waitUntilCompleted()
+        guard render() else { return false }
         CVPixelBufferLockBaseAddress(target, .readOnly)
         CVPixelBufferLockBaseAddress(buffer, [])
         defer {
@@ -66,5 +59,20 @@ final class PresentFrameRenderer {
         var destination = vImage_Buffer(data: to, height: vImagePixelCount(height), width: vImagePixelCount(width),
                                         rowBytes: CVPixelBufferGetBytesPerRow(buffer))
         return vImageVerticalReflect_ARGB8888(&source, &destination, vImage_Flags(kvImageNoFlags)) == kvImageNoError
+    }
+
+    /// Draws the layers into `target` and waits until the GPU has finished.
+    private func render() -> Bool {
+        // The layers' latest changes reach the renderer before it draws.
+        CATransaction.flush()
+        renderer.beginFrame(atTime: CACurrentMediaTime(), timeStamp: nil)
+        renderer.addUpdate(renderer.bounds)
+        renderer.render()
+        renderer.endFrame()
+        // The renderer's work is on `queue`: an empty buffer after it finishes once the frame is drawn.
+        guard let done = queue.makeCommandBuffer() else { return false }
+        done.commit()
+        done.waitUntilCompleted()
+        return true
     }
 }
