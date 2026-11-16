@@ -624,17 +624,18 @@ final class CompanionLessonModel: ObservableObject {
         }
         self.recording = recording
         self.folder = folder
-        prepare(recording)
         recording.document = .some(presenting == .off ? nil : scene?.document)
         recording.log.show(presenting == .off ? nil : scene?.document, at: dateStart)
         if withSound { startSource(recording) } else { recording.noAccess = LessonMicrophoneAccess.askingWarning }
         holdPower(recording)
         recording.frameTimer = repeating(1 / Double(max(1, options.maxFrameRate))) { [weak self] in self?.frame() }
         recording.healthTimer = repeating(1) { [weak self] in self?.check() }
-        frame()
-        checkpoint(recording)
         setStatus(PresentLessonStatus(state: .recording, startedAt: dateStart, micName: candidate.name, micIsFallback: fallback,
                                       warning: recording.noAccess))
+        // After the microphone is open and the status says recording: the first frame's preparation can take a second.
+        prepare(recording)
+        frame()
+        checkpoint(recording)
         lessonLog.info("Lesson started in \(folder.lastPathComponent, privacy: .public) from the \(origin.rawValue, privacy: .public): \(candidate.name, privacy: .public), \(settings.channels) ch \(Int(settings.sampleRate)) Hz, AAC \(settings.audioBitRate) bit/s")
     }
 
@@ -853,7 +854,7 @@ final class CompanionLessonModel: ObservableObject {
         let papers = scene.frame?.pages.map(\.asset) ?? []
         guard papers != recording.preparedPapers else { return }
         recording.preparedPapers = papers
-        recording.canvas.render(scene, status: .off, at: CMClockGetTime(hostClock).seconds)
+        recording.canvas.layOutLatest(scene, status: .off)
         renderer.prepare()
     }
 

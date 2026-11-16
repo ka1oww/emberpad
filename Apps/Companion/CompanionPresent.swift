@@ -869,6 +869,14 @@ final class PresentCanvasView: NSView {
         redraw(at: time)
     }
 
+    /// Lays out the latest frame, not the played-back one, so the papers of pages that are about to scroll into view are
+    /// drawn (and cached) before the played-back picture reaches them. Leaves the playback untouched.
+    func layOutLatest(_ scene: PresentScene, status: PresentHost.Status) {
+        self.scene = scene
+        self.status = status
+        redraw(latest: true)
+    }
+
     /// Draws the picture as it is at `time`, as a display refresh does; tests call it with a clock of their own.
     func refresh(at time: TimeInterval) {
         redraw(at: time)
@@ -887,18 +895,18 @@ final class PresentCanvasView: NSView {
 
     private var screenScale: CGFloat { scaleOverride ?? window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2 }
 
-    private func redraw(at time: TimeInterval? = nil) {
+    private func redraw(at time: TimeInterval? = nil, latest: Bool = false) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         root.frame = bounds
         // The frame to draw: played back while smoothing (EP141), else the latest.
         var shown = scene?.frame
-        if smoothsMotion, let scene {
+        if smoothsMotion, !latest, let scene {
             let played = playback.shown(for: scene, at: time ?? clock())
             shown = played.frame
             refresh(played.moving)
-        } else if isRefreshing {
+        } else if isRefreshing, !latest {
             refresh(false)
         }
         let screen = scene?.presented(with: shown)?.screen ?? .idle
