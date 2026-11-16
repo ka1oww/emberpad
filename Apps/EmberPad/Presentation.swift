@@ -259,6 +259,10 @@ final class StudentDisplayModel: ObservableObject {
     @Published private(set) var teacherReveal: TeacherCopyReveal? {
         didSet { refreshClassCopy() }
     }
+    /// The projector backdrop (EP145): a picture kept on this iPad, already decoded by `StudentBackdropModel`, drawn on
+    /// the idle and Paused screens in place of the star and the plain Paused. Nil shows those. It is no part of
+    /// `presented`, so it is never sent to the Mac.
+    @Published var backdrop: CGImage?
     /// Which copy the class sees, for the iPad's chrome.
     let classCopy = ClassCopyIndicator()
     var snapshot: StudentPageSnapshot? { content.snapshot }
@@ -462,7 +466,16 @@ final class StudentDisplayModel: ObservableObject {
 
 @MainActor
 final class PresentationState: ObservableObject {
-    let student = StudentDisplayModel()
+    let student: StudentDisplayModel
+    /// The projector backdrop on the iPad's own external display (EP145): reads the local picture for `student`.
+    let backdrop: StudentBackdropModel
+
+    init(backdrop store: StudentBackdropStore = StudentBackdropStore()) {
+        let student = StudentDisplayModel()
+        self.student = student
+        backdrop = StudentBackdropModel(store: store, display: student)
+    }
+
     /// Present on Mac (EP93): streams `student` to the paired Companion while the teacher has it on. Turning it on or
     /// off puts the class back on the Student copy (EP130).
     lazy var present: PresentController = {
@@ -483,6 +496,18 @@ final class PresentationState: ObservableObject {
     }
     @Published var mainSceneActive = false {
         didSet { student.paused = policy.pauseStudentView }
+    }
+
+    /// A projector's student scene connected, on a display `longestPixelSide` pixels across: the backdrop is read for it.
+    func externalSceneConnected(longestPixelSide: CGFloat) {
+        externalSceneCount += 1
+        backdrop.displayConnected(longestPixelSide: longestPixelSide)
+    }
+
+    /// A projector's student scene went. With the last one goes the decoded backdrop.
+    func externalSceneDisconnected() {
+        externalSceneCount = max(0, externalSceneCount - 1)
+        if externalSceneCount == 0 { backdrop.displayDisconnected() }
     }
     /// The open worksheet's paired Teacher copy, set by its editor and cleared when that editor closes. Main scene only.
     @Published private(set) var privateAnswerURL: URL?
@@ -565,14 +590,17 @@ struct StudentDisplayView: View {
     var body: some View {
         ZStack {
             Color.black
-            if model.paused { Text("Paused").font(.largeTitle).foregroundStyle(.white) }
-            else {
+            if model.paused {
+                if let backdrop = model.backdrop { StudentBackdropScreen(image: backdrop, badge: "Paused") }
+                else { Text("Paused").font(.largeTitle).foregroundStyle(.white) }
+            } else {
                 switch model.content {
                 case .page(let snapshot):
                     StudentPageSurface(snapshot: snapshot, framing: model.framing, liveInk: model.liveInk, laser: model.laser,
                                        laserTrail: model.laserTrail, teacher: model.teacherFrame)
                 case .teacherCopyPrivate: Text("Teacher copy · private").font(.largeTitle).foregroundStyle(.white)
-                case .none: StudentIdleMark()
+                case .none:
+                    if let backdrop = model.backdrop { StudentBackdropScreen(image: backdrop) } else { StudentIdleMark() }
                 }
             }
         }.ignoresSafeArea()
@@ -580,7 +608,8 @@ struct StudentDisplayView: View {
 }
 
 /// What the projector shows while no worksheet is open, such as in the library (EP92): the Ember star alone on
-/// black. It draws no text at all, so no worksheet, folder or subject title can reach the class.
+/// black. It draws no text at all, so no worksheet, folder or subject title can reach the class. With a projector
+/// backdrop (EP145) the picture alone stands in for it, and it draws no text either.
 struct StudentIdleMark: View {
     var body: some View {
         GeometryReader { proxy in

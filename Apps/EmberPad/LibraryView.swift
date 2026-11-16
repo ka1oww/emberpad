@@ -25,6 +25,8 @@ struct LibraryView: View {
     @State private var showImport = false
     @State private var showPairing = false
     @State private var confirmForget = false
+    /// EP145: the Photos picker for the projector backdrop.
+    @State private var showBackdropPicker = false
     /// The open worksheet and the column visibility around it, with the document transition (EP87).
     @State private var navigator: WorksheetNavigator
     @State private var checkedLastWorksheet = false
@@ -92,6 +94,7 @@ struct LibraryView: View {
         .modifier(PresentLessonChrome(present: presentation.present))
         .sheet(isPresented: $showImport) { ImportWorksheetView(library: library, isPresented: $showImport) }
         .sheet(isPresented: $showPairing) { PairingScannerSheet(pairing: pairing, presentation: presentation) }
+        .modifier(StudentBackdropPicker(backdrop: presentation.backdrop, isPresented: $showBackdropPicker))
         .confirmationDialog("Forget this Mac?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget Mac", role: .destructive) { pairing.forget() }
         } message: {
@@ -231,6 +234,8 @@ struct LibraryView: View {
                         Button("Pair with a different Mac…", systemImage: "qrcode.viewfinder") { showPairing = true }
                         Button("Forget Mac…", systemImage: "xmark.circle", role: .destructive) { confirmForget = true }
                     }
+                    // EP145: the picture the iPad's own projector shows in the library and while paused.
+                    StudentBackdropRows(backdrop: presentation.backdrop) { showBackdropPicker = true }
                 } label: {
                     Label("File Inbox", systemImage: "tray")
                 } primaryAction: {
