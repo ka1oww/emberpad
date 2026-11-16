@@ -178,6 +178,8 @@ public enum LibraryPrepareTrigger: Equatable, Sendable {
 @MainActor
 public final class LibraryPrepareScheduler {
     public typealias Run = @MainActor (LibraryPrepareTrigger) async -> Void
+    /// Waits until that time, or less when its task is cancelled. With `now`, this is the scheduler's clock.
+    public typealias Sleep = @MainActor (Date) async -> Void
 
     public let quietPeriod: TimeInterval
     /// After this long since the first unprepared change, a file that is still being written no longer holds the
@@ -194,6 +196,7 @@ public final class LibraryPrepareScheduler {
 
     private let run: Run
     private let now: () -> Date
+    private let sleep: Sleep
     private let modificationDate: @Sendable (String) -> Date?
     private var timer: Task<Void, Never>?
     private var deadline: Date?
@@ -206,11 +209,13 @@ public final class LibraryPrepareScheduler {
     private static let maximumTrackedPaths = 256
 
     public init(quietPeriod: TimeInterval = 30, maximumWait: TimeInterval = 600, now: @escaping () -> Date = Date.init,
+                sleep: @escaping Sleep = LibraryPrepareScheduler.sleep(until:),
                 modificationDate: @escaping @Sendable (String) -> Date? = LibraryPrepareScheduler.fileModificationDate,
                 run: @escaping Run) {
         self.quietPeriod = quietPeriod
         self.maximumWait = maximumWait
         self.now = now
+        self.sleep = sleep
         self.modificationDate = modificationDate
         self.run = run
     }
@@ -269,9 +274,8 @@ public final class LibraryPrepareScheduler {
         let wasPending = isPending
         isPending = true
         self.deadline = deadline
-        let delay = max(0, deadline.timeIntervalSince(now()))
-        timer = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        timer = Task { [weak self, sleep] in
+            await sleep(deadline)
             guard !Task.isCancelled else { return }
             self?.fire()
         }
@@ -329,6 +333,11 @@ public final class LibraryPrepareScheduler {
         onStateChange?()
     }
 
+    /// The real wait: until `deadline` by the system's time.
+    public nonisolated static func sleep(until deadline: Date) async {
+        try? await Task.sleep(nanoseconds: UInt64(max(0, deadline.timeIntervalSinceNow) * 1_000_000_000))
+    }
+
     /// The content modification date of the file at `path` (symlinks not followed), or nil when there is none.
     public nonisolated static func fileModificationDate(_ path: String) -> Date? {
         var info = stat()
@@ -347,6 +356,9 @@ public final class LibraryAutoPrepare {
     public private(set) var watchedRoot: URL?
     /// False when FSEvents refused to watch the folder.
     public private(set) var isWatching = false
+    /// Called with each batch of changes in the watched folder, in the order they happened, once the scheduler has
+    /// been fed it. A test waits on this for a change to arrive, instead of on the time.
+    var onChanges: (([LibraryFolderChange]) -> Void)?
     private var watcher: LibraryFolderWatcher?
     private let latency: TimeInterval
     /// Size and whole-second modification date of every PDF the last Prepare read, by canonical path.
@@ -388,6 +400,7 @@ public final class LibraryAutoPrepare {
             Task { @MainActor in
                 guard let self, self.watchedRoot == root else { return }
                 scheduler.note(changes)
+                self.onChanges?(changes)
             }
         }
         isWatching = watcher.start()

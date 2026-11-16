@@ -46,30 +46,54 @@ struct LibraryAutoPrepareTests {
             #expect(try step.2(#require(try fixture.outbox.previousManifest())), "\(step.0) is not in the Outbox")
             // The Prepare's own reads and its APFS clones into the Outbox never count as a change.
             try await pause(Self.quiet * 3)
-            #expect(harness.runs.count == index + 1, "\(step.0) prepared more than once")
+            #expect(harness.runs.count == index + 1, "\(step.0) prepared more than once: \(harness.story)")
             #expect(try fixture.tree.listing() == before, "a Prepare wrote inside EMBER after \(step.0)")
         }
         #expect(harness.errors.isEmpty)
     }
 
+    /// The burst is a burst by the scheduler's own clock, which this test moves: each change arrives over real FSEvents
+    /// and the next follows half a quiet period later, so the burst lasts ten quiet periods and no Prepare may run
+    /// inside it. How long this Mac really takes between two changes no longer matters. EP146: with the system's
+    /// clock, a busy CI runner that stalled for longer than the quiet period inside the burst ended the burst there,
+    /// and the rest of it prepared a second time.
     @Test(.timeLimit(.minutes(1))) func aBurstOfChangesPreparesOnce() async throws {
         let fixture = try await Self.settledFixture()
         defer { fixture.remove() }
-        let harness = Harness(fixture)
+        let clock = TestClock()
+        let harness = Harness(fixture, clock: clock)
         harness.watch()
+        defer { harness.auto.watch(nil) }
         try await settleStream()
 
         for number in 1...20 {
-            try fixture.tree.write("EMBER PHYSICS/Burst/Synthetic Burst \(number).pdf")
-            try await pause(0.05)
+            let name = "EMBER PHYSICS/Burst/Synthetic Burst \(number).pdf"
+            try fixture.tree.write(name)
+            try await waitUntil({ harness.hasSeen(name) }, orTell: { "for change \(number): \(harness.story)" })
+            // A stall longer than the quiet period, as on a busy runner, is still the middle of the burst.
+            if number == 10 { try await pause(Self.quiet * 1.5) }
+            await clock.advance(by: Self.quiet / 2)
+            #expect(harness.runs.isEmpty, "prepared inside the burst, after change \(number): \(harness.story)")
         }
+        // FSEvents can report one write in two parts; the burst is over once the last part has arrived.
+        try await harness.changesSoFarHaveArrived()
+        #expect(harness.scheduler.isPending)
+        #expect(harness.runs.isEmpty, "prepared inside the burst: \(harness.story)")
         let before = try fixture.tree.listing()
-        try await waitUntil { harness.runs.count == 1 && !harness.scheduler.isRunning }
-        try await pause(Self.quiet * 3)
-        #expect(harness.runs.count == 1)
+
+        await clock.advance(by: Self.quiet * 2)
+        try await waitUntil({ harness.runs.count == 1 && !harness.scheduler.isRunning },
+                            orTell: { "for the burst's Prepare: \(harness.story)" })
+        #expect(try fixture.tree.listing() == before)
+        // The Prepare's own clones into the Outbox arrive as changes too. Once they all have, no amount of quiet
+        // prepares again.
+        try await harness.changesSoFarHaveArrived()
+        await clock.advance(by: Self.quiet * 3)
+        try await waitUntil({ !harness.scheduler.isPending && !harness.scheduler.isRunning },
+                            orTell: { "for the scheduler to rest: \(harness.story)" })
+        #expect(harness.runs.count == 1, "the burst prepared more than once: \(harness.story)")
         let manifest = try #require(try fixture.outbox.previousManifest())
         #expect((1...20).allSatisfy { manifest.has("Physics/Burst/Synthetic Burst \($0).pdf") })
-        #expect(try fixture.tree.listing() == before)
     }
 
     @Test(.timeLimit(.minutes(1))) func aChangeDuringAPrepareSchedulesExactlyOneMore() async throws {
@@ -87,12 +111,13 @@ struct LibraryAutoPrepareTests {
             try fixture.tree.write("EMBER CHEMISTRY/Synthetic During \(number).pdf")
             try await pause(0.15)
         }
-        try await pause(0.5)
+        // Every part of the three writes has arrived before the first Prepare ends: none can come as a later change.
+        try await harness.changesSoFarHaveArrived()
         #expect(harness.scheduler.prepareNow() == false, "a second Prepare started while one was running")
         harness.holdFirstRun = false
         try await waitUntil { harness.runs.count == 2 && !harness.scheduler.isRunning }
         try await pause(Self.quiet * 3)
-        #expect(harness.runs.count == 2)
+        #expect(harness.runs.count == 2, "\(harness.story)")
         #expect(harness.maximumConcurrentRuns == 1)
         let manifest = try #require(try fixture.outbox.previousManifest())
         #expect((1...3).allSatisfy { manifest.has("Chemistry/Synthetic During \($0).pdf") })
@@ -101,17 +126,30 @@ struct LibraryAutoPrepareTests {
     @Test(.timeLimit(.minutes(1))) func prepareNowRunsAtOnceAndReplacesThePendingAutomaticPrepare() async throws {
         let fixture = try await Self.settledFixture()
         defer { fixture.remove() }
-        let harness = Harness(fixture)
+        // On the test's clock, so the pending automatic Prepare cannot run while the write's events are waited for.
+        let clock = TestClock()
+        let harness = Harness(fixture, clock: clock)
         harness.watch()
+        defer { harness.auto.watch(nil) }
         try await settleStream()
 
         try fixture.tree.write("EMBER MATH/Synthetic Now.pdf")
-        try await waitUntil { harness.scheduler.isPending }
+        try await waitUntil({ harness.scheduler.isPending }, orTell: { "for the change: \(harness.story)" })
+        // EP146: FSEvents can report one write in two parts, a latency apart. The second part, arriving after
+        // Prepare now, was a change of its own and prepared again; here the whole write has arrived first.
+        try await harness.changesSoFarHaveArrived()
+        #expect(harness.scheduler.isPending)
+        #expect(harness.runs.isEmpty, "\(harness.story)")
         #expect(harness.scheduler.prepareNow())
-        try await waitUntil { harness.runs.count == 1 && !harness.scheduler.isRunning }
+        try await waitUntil({ harness.runs.count == 1 && !harness.scheduler.isRunning },
+                            orTell: { "for Prepare now: \(harness.story)" })
         #expect(harness.runs[0].trigger == .manual)
-        try await pause(Self.quiet * 3)
-        #expect(harness.runs.count == 1)
+        // The pending automatic Prepare is gone: with the Prepare's own clones all in, no amount of quiet runs it.
+        try await harness.changesSoFarHaveArrived()
+        await clock.advance(by: Self.quiet * 3)
+        try await waitUntil({ !harness.scheduler.isPending && !harness.scheduler.isRunning },
+                            orTell: { "for the scheduler to rest: \(harness.story)" })
+        #expect(harness.runs.count == 1, "\(harness.story)")
         #expect(try #require(try fixture.outbox.previousManifest()).has("Math/Synthetic Now.pdf"))
     }
 
@@ -128,8 +166,9 @@ struct LibraryAutoPrepareTests {
 
         try old.tree.write("EMBER MATH/Synthetic Old Folder.pdf")
         try await pause(Self.quiet * 3)
-        #expect(harness.runs.isEmpty)
+        #expect(harness.runs.isEmpty, "\(harness.story)")
         try new.tree.write("EMBER MATH/Synthetic New Folder.pdf")
+        try await harness.changesSoFarHaveArrived()
         try await waitUntil { harness.runs.count == 1 && !harness.scheduler.isRunning }
         #expect(try #require(try new.outbox.previousManifest()).has("Math/Synthetic New Folder.pdf"))
 
@@ -137,7 +176,7 @@ struct LibraryAutoPrepareTests {
         #expect(!harness.auto.isWatching)
         try new.tree.write("EMBER MATH/Synthetic Unwatched.pdf")
         try await pause(Self.quiet * 3)
-        #expect(harness.runs.count == 1)
+        #expect(harness.runs.count == 1, "\(harness.story)")
     }
 
     @Test(.timeLimit(.minutes(1))) func aFolderThatAppearsLaterIsWatchedOnceItExists() async throws {
@@ -167,7 +206,7 @@ struct LibraryAutoPrepareTests {
         try fixture.tree.write("EMBER MATH/.DS_Store")
         try fixture.tree.write("EMBER MATH/Synthetic Notes.docx")
         try await pause(Self.quiet * 3)
-        #expect(harness.runs.isEmpty)
+        #expect(harness.runs.isEmpty, "\(harness.story)")
     }
 
     // MARK: The scheduler alone
@@ -199,17 +238,29 @@ struct LibraryAutoPrepareTests {
     }
 
     @Test(.timeLimit(.minutes(1))) func activityExtendsAPendingWaitButNeverStartsOne() async throws {
+        // On the test's clock. EP146: with the system's clock, a Mac that took longer than the quiet period over the
+        // 0.3 s pause below prepared before the activity was noted at all.
+        let clock = TestClock()
         var starts: [Date] = []
-        let scheduler = LibraryPrepareScheduler(quietPeriod: 0.5, modificationDate: { _ in nil }) { _ in starts.append(Date()) }
+        let scheduler = LibraryPrepareScheduler(quietPeriod: 0.5, now: { MainActor.assumeIsolated { clock.time } },
+                                                sleep: { await clock.sleep(until: $0) }, modificationDate: { _ in nil }) { _ in
+            starts.append(clock.time)
+        }
         scheduler.note([LibraryFolderChange(path: "/EMBER/.Synthetic.tmp", kind: .activity)])
-        try await pause(1)
+        await clock.advance(by: 1)
         #expect(starts.isEmpty)
         #expect(!scheduler.isPending)
 
         scheduler.note([LibraryFolderChange(path: "/EMBER/Synthetic.pdf", kind: .library)])
-        try await pause(0.3)
-        let activityAt = Date()
+        await clock.advance(by: 0.3)
+        let activityAt = clock.time
         scheduler.note([LibraryFolderChange(path: "/EMBER/.Synthetic.tmp", kind: .activity)])
+        // Past the change's own quiet period, and still inside the one the activity began.
+        await clock.advance(by: 0.4)
+        try await pause(0.1)
+        #expect(starts.isEmpty, "the activity did not extend the wait")
+        #expect(scheduler.isPending)
+        await clock.advance(by: 0.2)
         try await waitUntil { starts.count == 1 }
         #expect(starts[0].timeIntervalSince(activityAt) >= 0.45)
     }
@@ -313,13 +364,57 @@ final class Harness {
     private var concurrent = 0
     private(set) var scheduler: LibraryPrepareScheduler!
     private(set) var auto: LibraryAutoPrepare!
+    /// Every change the watcher has delivered, in order, each already fed to the scheduler.
+    private(set) var seen: [LibraryFolderChange] = []
+    /// What happened and when, for a failure's message: the batches of changes and the Prepares.
+    private(set) var story: [String] = []
+    private let clock: TestClock?
+    private let began = Date()
+    private var markers = 0
 
-    init(_ fixture: OutboxFixture) {
+    /// With a `clock`, the scheduler's quiet period passes only as the test moves that clock; without one it is the
+    /// system's time.
+    init(_ fixture: OutboxFixture, clock: TestClock? = nil) {
         self.fixture = fixture
-        scheduler = LibraryPrepareScheduler(quietPeriod: LibraryAutoPrepareTests.quiet) { [unowned self] trigger in
-            await self.run(trigger)
+        self.clock = clock
+        let run: LibraryPrepareScheduler.Run = { [unowned self] trigger in await self.run(trigger) }
+        if let clock {
+            // Files carry the system's time, which the test's clock does not follow, so their dates hold nothing back
+            // here. A file that is still being written has its own tests below.
+            scheduler = LibraryPrepareScheduler(quietPeriod: LibraryAutoPrepareTests.quiet,
+                                                now: { MainActor.assumeIsolated { clock.time } },
+                                                sleep: { await clock.sleep(until: $0) }, modificationDate: { _ in nil }, run: run)
+        } else {
+            scheduler = LibraryPrepareScheduler(quietPeriod: LibraryAutoPrepareTests.quiet, run: run)
         }
         auto = LibraryAutoPrepare(scheduler: scheduler, latency: 0.1)
+        auto.onChanges = { [unowned self] changes in
+            self.seen.append(contentsOf: changes)
+            self.tell("saw " + changes.map {
+                ($0.path as NSString).lastPathComponent + ($0.kind == .activity ? " (activity)" : $0.isClone ? " (clone)" : "")
+            }.joined(separator: ", "))
+        }
+    }
+
+    /// True once a change to the file at `relative`, below the watched folder, has reached the scheduler.
+    func hasSeen(_ relative: String) -> Bool {
+        let path = LibraryFolderWatcher.canonicalPath(fixture.tree.root) + "/" + relative
+        return seen.contains { $0.path == path }
+    }
+
+    /// Returns once every change made in the watched folder so far has reached the scheduler. FSEvents delivers
+    /// changes in the order they happened, so a hidden marker file written now (activity, which never prepares)
+    /// arrives after all of them.
+    func changesSoFarHaveArrived() async throws {
+        markers += 1
+        let marker = ".synthetic-marker-\(markers)"
+        try fixture.tree.write(marker)
+        try await waitUntil({ self.hasSeen(marker) }, orTell: { "for \(marker): \(self.story)" })
+    }
+
+    private func tell(_ what: String) {
+        let time = clock.map { $0.time.timeIntervalSince($0.began) } ?? Date().timeIntervalSince(began)
+        story.append(String(format: "%.2f s (%.2f s real) ", time, Date().timeIntervalSince(began)) + what)
     }
 
     func watch() {
@@ -329,6 +424,7 @@ final class Harness {
 
     private func run(_ trigger: LibraryPrepareTrigger) async {
         runs.append(Run(start: Date(), trigger: trigger))
+        tell("Prepare \(runs.count) (\(trigger))")
         concurrent += 1
         maximumConcurrentRuns = max(maximumConcurrentRuns, concurrent)
         defer { concurrent -= 1 }
@@ -343,11 +439,48 @@ final class Harness {
     }
 }
 
+/// A clock that moves only when a test moves it: the scheduler's `now` and `sleep` in a test that must not depend on
+/// how fast this Mac happens to be.
 @MainActor
-func waitUntil(timeout: TimeInterval = 15, _ condition: () -> Bool) async throws {
+final class TestClock {
+    let began = Date()
+    private(set) var time: Date
+    private var sleepers: [Int: (wake: Date, wakeUp: CheckedContinuation<Void, Never>)] = [:]
+    private var lastSleeper = 0
+
+    init() { time = began }
+
+    /// Returns once the clock has been moved to `wake` or past it, or when its task is cancelled. The time is a
+    /// time and not a length: a sleeper that only starts after the clock was moved still wakes when it should.
+    func sleep(until wake: Date) async {
+        guard wake > time else { return }
+        lastSleeper += 1
+        let id = lastSleeper
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { wakeUp in
+                if Task.isCancelled { wakeUp.resume() } else { sleepers[id] = (wake, wakeUp) }
+            }
+        } onCancel: {
+            Task { @MainActor in self.sleepers.removeValue(forKey: id)?.wakeUp.resume() }
+        }
+    }
+
+    /// Moves the clock on, wakes every sleeper whose time has come, earliest first, and gives them a turn to run.
+    func advance(by seconds: TimeInterval) async {
+        time = time.addingTimeInterval(seconds)
+        for (id, sleeper) in sleepers.sorted(by: { $0.value.wake < $1.value.wake }) where sleeper.wake <= time {
+            sleepers[id] = nil
+            sleeper.wakeUp.resume()
+        }
+        for _ in 0..<4 { await Task.yield() }
+    }
+}
+
+@MainActor
+func waitUntil(timeout: TimeInterval = 15, _ condition: () -> Bool, orTell story: () -> String = { "" }) async throws {
     let deadline = Date().addingTimeInterval(timeout)
     while !condition() {
-        guard Date() < deadline else { Issue.record("timed out waiting"); throw CancellationError() }
+        guard Date() < deadline else { Issue.record("timed out waiting \(story())"); throw CancellationError() }
         try await Task.sleep(nanoseconds: 20_000_000)
     }
 }
