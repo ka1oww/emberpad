@@ -234,6 +234,8 @@ final class PresentController: ObservableObject {
     /// open document and carries a pending Start or End lesson.
     func input() -> PresentInput {
         var input = Self.input(from: student, paper: paper, ink: ink)
+        // When the shown frame was captured, on the clock `tick` runs by (EP141).
+        input.time = student.contentTime
         if sender?.link.supportsLesson == true {
             input.document = student.openDocument
             input.lessonCommand = pendingLesson

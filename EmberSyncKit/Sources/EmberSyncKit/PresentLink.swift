@@ -552,7 +552,7 @@ public final class PresentHost: @unchecked Sendable {
             currentStats.updates += 1
             currentStats.updateBytes += payload.count
             if update.reset { currentStats.snapshots += 1 }
-            let outcome: PresentScene.Outcome = scene.apply(update)
+            let outcome: PresentScene.Outcome = scene.apply(update, arrival: time)
             if outcome == .needsSnapshot {
                 currentStats.snapshotsRequested += 1
                 replies.append(.resnapshot(heldAssets: scene.heldAssets))

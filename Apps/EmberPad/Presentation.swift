@@ -241,8 +241,14 @@ enum StudentDisplayContent {
 @MainActor
 final class StudentDisplayModel: ObservableObject {
     @Published private(set) var content: StudentDisplayContent = .none {
-        didSet { refreshClassCopy() }
+        didSet {
+            contentTime = now()
+            refreshClassCopy()
+        }
     }
+    /// When `content` last changed: for a page, when its viewport was read. Present stamps the frame with it, so the
+    /// Mac can play scrolling back as evenly as it happened here (EP141).
+    private(set) var contentTime: TimeInterval?
     @Published var paused = true
     /// Framing only changes how a published snapshot is drawn; both modes draw from the same role-gated snapshot.
     @Published var framing: StudentFraming = .presenterPage {

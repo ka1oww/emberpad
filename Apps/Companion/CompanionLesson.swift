@@ -397,7 +397,11 @@ final class CompanionLessonModel: ObservableObject {
         var picture = LessonPicture()
         var lastChoice: LessonPicture.Choice?
         let canvas: PresentCanvasView
+        /// Draws the canvas on the GPU (EP141); without one, the canvas draws itself on the CPU, far slower.
+        let renderer: PresentFrameRenderer?
         var dirty = true
+        /// The last frame drawn is still moving to where the iPad's picture is (EP141): the next is drawn afresh.
+        var moving = false
         var lastFrame: CVPixelBuffer?
         var lastFrameTime: CMTime?
         var document: PresentLessonDocument??
@@ -425,6 +429,9 @@ final class CompanionLessonModel: ObservableObject {
             canvas = PresentCanvasView(frame: CGRect(x: 0, y: 0, width: settings.width, height: settings.height))
             canvas.showsStatusDot = false
             canvas.scaleOverride = 1
+            // Scrolling plays back as on the projector, so the recording keeps what the class saw (EP141).
+            canvas.smoothsMotion = true
+            renderer = canvas.layer.flatMap { PresentFrameRenderer(layer: $0, width: settings.width, height: settings.height) }
         }
 
         var episodes: [LessonAudioHealth.Episode] { earlierEpisodes + writeFailures + health.episodes }
@@ -851,14 +858,21 @@ final class CompanionLessonModel: ObservableObject {
         return (shown, changed)
     }
 
+    /// Every `maxFrameRate` tick: a frame when the picture changed or is still moving (scrolling plays back smoothly, as
+    /// on the projector, EP141), else the last frame again once every `keepAlive`. Each frame is drawn as the picture is
+    /// at the time it is saved at, so the sound stays with what the class saw.
     private func frame() {
         guard let recording, !recording.sleeping, let writer = recording.writer else { return }
         let now = CMClockGetTime(hostClock)
         var buffer = recording.lastFrame
-        if recording.dirty || buffer == nil {
+        if recording.dirty || recording.moving || buffer == nil {
             recording.dirty = false
+            recording.moving = false
             let (shown, changed) = recordedScene(recording)
-            if changed || buffer == nil, let fresh = draw(shown, recording: recording, writer: writer) { buffer = fresh }
+            if changed || buffer == nil, let fresh = draw(shown, at: now, recording: recording, writer: writer) {
+                buffer = fresh
+                recording.moving = recording.canvas.isRefreshing
+            }
         } else if let last = recording.lastFrameTime, (now - last).seconds < options.keepAlive {
             return
         }
@@ -867,9 +881,11 @@ final class CompanionLessonModel: ObservableObject {
         recording.lastFrameTime = now
     }
 
-    private func draw(_ scene: PresentScene?, recording: Recording, writer: LessonSegmentWriter) -> CVPixelBuffer? {
-        recording.canvas.render(scene ?? PresentScene(), status: .off)
+    private func draw(_ scene: PresentScene?, at time: CMTime, recording: Recording, writer: LessonSegmentWriter) -> CVPixelBuffer? {
+        // The host clock is the one the link stamps arrivals by (`CACurrentMediaTime`).
+        recording.canvas.render(scene ?? PresentScene(), status: .off, at: time.seconds)
         guard let buffer = writer.makePixelBuffer() else { return nil }
+        if let renderer = recording.renderer, renderer.draw(into: buffer) { return buffer }
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         guard let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: CVPixelBufferGetWidth(buffer),
