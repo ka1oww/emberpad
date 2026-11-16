@@ -546,7 +546,9 @@ extension EditorScreen {
                                                card: teacherCard,
                                                hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil,
                                                answersID: teacherCopyID,
-                                               shownToClass: classCopy == .teacher)
+                                               shownToClass: classCopy == .teacher,
+                                               studentPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage))
+                                                   ?? chrome.currentPage)
                     }
                 }
             }
