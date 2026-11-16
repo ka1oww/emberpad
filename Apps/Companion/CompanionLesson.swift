@@ -402,6 +402,10 @@ final class CompanionLessonModel: ObservableObject {
         var dirty = true
         /// The papers the canvas was last prepared with (see `prepare`).
         var preparedPapers: [String] = []
+        /// The first pixel buffer and copy have been made (see `prepare`).
+        var warmed = false
+        /// A paper arrived since the last timed frame.
+        var paperChanged = false
         /// The last frame drawn is still moving to where the iPad's picture is (EP141): the next is drawn afresh.
         var moving = false
         var lastFrame: CVPixelBuffer?
@@ -473,6 +477,9 @@ final class CompanionLessonModel: ObservableObject {
     /// The longest the recorder's own work for one frame (drawing it and saving it) has held the main thread. The tests
     /// read it; unlike the gaps on the run loop, it does not count time the machine gave other programs.
     private(set) var longestFrameWork: TimeInterval = 0
+    /// Where the longest frame's time went, in ms, and whether it was the first frame or followed a paper change.
+    private(set) var longestFrameBreakdown = ""
+    private var framesTimed = 0
 
     /// The presentation window was shown or closed on the Mac. macOS draws its microphone dialog under it.
     func presentationShown(_ shown: Bool) {
@@ -854,10 +861,17 @@ final class CompanionLessonModel: ObservableObject {
     /// When the scene shows papers the canvas has not drawn yet, draws them now and untimed by `frame()`: turning a page
     /// into a bitmap and the GPU's first take of it take far longer than a frame, and are not to land in one.
     private func prepare(_ recording: Recording) {
-        guard presenting != .off, let scene, let renderer = recording.renderer else { return }
+        guard let renderer = recording.renderer else { return }
+        // The first buffer from the writer's pool and the first copy out of the renderer are one-time costs as well.
+        if !recording.warmed, let writer = recording.writer, let buffer = writer.makePixelBuffer() {
+            recording.warmed = true
+            _ = renderer.draw(into: buffer)
+        }
+        guard presenting != .off, let scene else { return }
         let papers = scene.frame?.pages.map(\.asset) ?? []
         guard papers != recording.preparedPapers else { return }
         recording.preparedPapers = papers
+        recording.paperChanged = true
         recording.canvas.layOutLatest(scene, status: .off)
         renderer.prepare()
     }
@@ -889,29 +903,63 @@ final class CompanionLessonModel: ObservableObject {
         guard let recording, !recording.sleeping, let writer = recording.writer else { return }
         let now = CMClockGetTime(hostClock)
         let began = CACurrentMediaTime()
-        defer { longestFrameWork = max(longestFrameWork, CACurrentMediaTime() - began) }
+        var parts = FrameParts()
+        parts.first = framesTimed == 0
+        parts.afterPaper = recording.paperChanged
+        recording.paperChanged = false
+        framesTimed += 1
+        defer {
+            let work = CACurrentMediaTime() - began
+            if work > longestFrameWork {
+                longestFrameWork = work
+                longestFrameBreakdown = parts.text(total: work)
+            }
+        }
         var buffer = recording.lastFrame
         if recording.dirty || recording.moving || buffer == nil {
             recording.dirty = false
             recording.moving = false
             let (shown, changed) = recordedScene(recording)
-            if changed || buffer == nil, let fresh = draw(shown, at: now, recording: recording, writer: writer) {
+            if changed || buffer == nil, let fresh = draw(shown, at: now, recording: recording, writer: writer, parts: &parts) {
                 buffer = fresh
                 recording.moving = recording.canvas.isRefreshing
             }
         } else if let last = recording.lastFrameTime, (now - last).seconds < options.keepAlive {
             return
         }
-        guard let buffer, writer.appendVideo(buffer, at: now) else { return }
+        let appendStart = CACurrentMediaTime()
+        let appended = buffer.map { writer.appendVideo($0, at: now) } ?? false
+        parts.append = CACurrentMediaTime() - appendStart
+        guard let buffer, appended else { return }
         recording.lastFrame = buffer
         recording.lastFrameTime = now
     }
 
-    private func draw(_ scene: PresentScene?, at time: CMTime, recording: Recording, writer: LessonSegmentWriter) -> CVPixelBuffer? {
+    /// What one recorder frame spent its time on (seconds), for `longestFrameBreakdown`.
+    private struct FrameParts {
+        var canvas = 0.0, buffer = 0.0, gpu = 0.0, append = 0.0
+        var first = false, afterPaper = false
+        func text(total: TimeInterval) -> String {
+            String(format: "total %.0f ms: canvas.render %.0f, pixel buffer %.0f, GPU draw+copy %.0f, appendVideo %.0f; first frame %@, after paper change %@",
+                   total * 1_000, canvas * 1_000, buffer * 1_000, gpu * 1_000, append * 1_000, first ? "yes" : "no", afterPaper ? "yes" : "no")
+        }
+    }
+
+    private func draw(_ scene: PresentScene?, at time: CMTime, recording: Recording, writer: LessonSegmentWriter,
+                      parts: inout FrameParts) -> CVPixelBuffer? {
         // The host clock is the one the link stamps arrivals by (`CACurrentMediaTime`).
+        var mark = CACurrentMediaTime()
+        func lap() -> TimeInterval { defer { mark = CACurrentMediaTime() }; return mark.distance(to: CACurrentMediaTime()) }
         recording.canvas.render(scene ?? PresentScene(), status: .off, at: time.seconds)
-        guard let buffer = writer.makePixelBuffer() else { return nil }
-        if let renderer = recording.renderer, renderer.draw(into: buffer) { return buffer }
+        parts.canvas = lap()
+        let made = writer.makePixelBuffer()
+        parts.buffer = lap()
+        guard let buffer = made else { return nil }
+        if let renderer = recording.renderer {
+            let drawn = renderer.draw(into: buffer)
+            parts.gpu = lap()
+            if drawn { return buffer }
+        }
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         guard let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: CVPixelBufferGetWidth(buffer),

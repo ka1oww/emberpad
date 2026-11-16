@@ -107,6 +107,7 @@ final class LessonRecordingSmoothTests: XCTestCase {
         // The old CPU path took ~184 ms for each frame. Measured inside the recorder's own frame work, so a loaded
         // machine's scheduler is not charged to the app.
         print(String(format: "EP141 recorder's longest frame work on the main thread: %.0f ms", lesson.longestFrameWork * 1_000))
+        print("EP141 longest frame breakdown: \(lesson.longestFrameBreakdown)")
         XCTAssertLessThan(lesson.longestFrameWork, 0.1, "the recording held the main thread, and the projector with it")
 
         // The sound runs the length of the picture.
