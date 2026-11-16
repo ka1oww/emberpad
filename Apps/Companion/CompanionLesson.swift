@@ -632,10 +632,14 @@ final class CompanionLessonModel: ObservableObject {
         recording.healthTimer = repeating(1) { [weak self] in self?.check() }
         setStatus(PresentLessonStatus(state: .recording, startedAt: dateStart, micName: candidate.name, micIsFallback: fallback,
                                       warning: recording.noAccess))
-        // After the microphone is open and the status says recording: the first frame's preparation can take a second.
-        prepare(recording)
-        frame()
-        checkpoint(recording)
+        // Not inside start(): preparing the papers (decoding, the GPU's first take) can take a second, and start() would
+        // hold the main thread, and the projector, for it. The first frame follows its preparation.
+        Task { @MainActor [weak self, weak recording] in
+            guard let self, let recording, recording === self.recording else { return }
+            self.prepare(recording)
+            self.frame()
+            self.checkpoint(recording)
+        }
         lessonLog.info("Lesson started in \(folder.lastPathComponent, privacy: .public) from the \(origin.rawValue, privacy: .public): \(candidate.name, privacy: .public), \(settings.channels) ch \(Int(settings.sampleRate)) Hz, AAC \(settings.audioBitRate) bit/s")
     }
 
