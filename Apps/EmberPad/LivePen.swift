@@ -8,6 +8,10 @@ import UIKit
 /// it, and it leaves here once the page has drawn it, so the ink written does not change. Pure value logic, unit
 /// tested without touches or views. Samples are in the page's ink space.
 struct LivePenStrokes {
+    /// How many times a stroke still being written has been shaped on the main thread, for tests (EP140). Shaping
+    /// takes longer the longer the stroke, so the live pen shapes it off the main thread (`PageInkView.LivePenShape`).
+    nonisolated(unsafe) static var shapedOnMainThread = 0
+
     struct Stroke {
         let id: UInt64
         let page: Int
@@ -56,6 +60,7 @@ struct LivePenStrokes {
 
         /// The stroke in the pen's fountain-pen ink; `lifted` adds the end tip and leaves out predicted touches.
         func stroke(lifted: Bool, creationDate date: Date? = nil) -> PKStroke? {
+            if !lifted, Thread.isMainThread { LivePenStrokes.shapedOnMainThread += 1 }
             let all = lifted ? samples : samples + predicted
             guard let start = all.first?.time else { return nil }
             if let shape, let last = all.last {

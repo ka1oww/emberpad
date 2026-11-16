@@ -118,14 +118,15 @@ final class PageInkView: UIView {
         var id: UInt64?
         /// The revision of the stroke last given to the layer, and its shape.
         var revision = -1
-        var latest: PKStroke?
+        var shape: LivePenShape?
+        var latest: PKStroke? { shape?.stroke }
         /// The drawing PencilKit is drawing now, by revision, until it reports it has drawn it.
         var rendering: (revision: Int, since: CFTimeInterval, generation: Int)?
         /// The generation of the drawing being made off the main thread for this layer (EP124), until it is given.
         var making: Int?
         /// The newest shape, waiting for that render to finish (EP103): PencilKit is given at most one drawing at a
         /// time, so drawings asked for faster than it draws them never queue up behind each other.
-        var waiting: (stroke: PKStroke?, revision: Int)?
+        var waiting: (shape: LivePenShape?, revision: Int)?
         /// Where `latest` draws, in page points: `PKDrawing.bounds` of a drawing of it alone, null for none.
         var latestBounds: CGRect { latest?.renderBounds ?? .null }
         /// The newest revision PencilKit has reported drawing.
@@ -156,6 +157,32 @@ final class PageInkView: UIView {
     /// longer the larger the record) the call waits for the save. Made on the main thread, the live pen froze the page
     /// for that long: 104 to 129 ms on the iPad Air late in the stress test. Here only the live ink waits.
     static let livePenDrawings = DispatchQueue(label: "EmberPad.livePenDrawings", qos: .userInteractive)
+
+    /// A live stroke's shape, worked out once, when it is first wanted (EP140). The live pen shapes a stroke from all
+    /// its samples, so the longer the stroke the longer that takes: on the iPad Air ten seconds into a scribble to
+    /// erase, 6 ms in a Debug build (as Ember Slate is built), 1.5 ms optimised. Shaped on every Pencil move, as it
+    /// was, the main thread's work for each move grew with the stroke until it outlasted the 4 ms between two moves;
+    /// then the run loop never slept, Core Animation never committed, and the screen froze until the Pencil lifted.
+    /// A move now only keeps the stroke as it is, and its shape is worked out off the main thread, where its drawing
+    /// is made, and only for the moves that are drawn (at most `livePenInterval` apart).
+    final class LivePenShape: @unchecked Sendable {
+        private let lock = NSLock()
+        private var make: (() -> PKStroke?)?
+        private var made: PKStroke?
+
+        init(making make: @escaping () -> PKStroke?) { self.make = make }
+        init(_ stroke: PKStroke?) { made = stroke }
+
+        var stroke: PKStroke? {
+            lock.lock()
+            defer { lock.unlock() }
+            if let make {
+                made = make()
+                self.make = nil
+            }
+            return made
+        }
+    }
 
     /// A live drawing on its way from `livePenDrawings` to the main thread and back (EP124), so that it is let go of on
     /// that queue. Only one thread holds it at a time: the queue that made it, then the main thread, then the queue.
@@ -194,6 +221,11 @@ final class PageInkView: UIView {
     /// that record while PencilKit saves it whole, longer the larger it is: one drawing per move grew it to megabytes
     /// in minutes of writing and stalled the page for up to a fifth of a second.
     func showLivePen(_ shown: [LivePenStrokes.Shown], stroke: (UInt64) -> PKStroke?) {
+        showLivePenShapes(shown) { LivePenShape(stroke($0)) }
+    }
+
+    /// As above, with each stroke's shape worked out only when it is drawn, off the main thread (EP140).
+    func showLivePenShapes(_ shown: [LivePenStrokes.Shown], shape: (UInt64) -> LivePenShape?) {
         let ids = Set(shown.map(\.id))
         for id in ids { leaving[id] = nil }
         for layer in livePenLayers where layer.id.map({ !ids.contains($0) && leaving[$0] == nil }) ?? false {
@@ -211,7 +243,7 @@ final class PageInkView: UIView {
             let layer = livePenLayers.first { $0.id == item.id } ?? takeLivePenLayer(id: item.id)
             guard layer.revision != item.revision else { continue }
             layer.revision = item.revision
-            render(stroke(item.id), revision: item.revision, on: layer)
+            render(shape(item.id), revision: item.revision, on: layer)
         }
     }
 
@@ -315,16 +347,16 @@ final class PageInkView: UIView {
     /// queues them all, so a long held line, redrawn on every Pencil move, fell seconds behind the Pencil. Waiting,
     /// only the newest shape is ever next, and its drawing is made only when it goes (EP114), at most once every
     /// `livePenInterval`.
-    private func render(_ stroke: PKStroke?, revision: Int, on layer: LivePenLayer, now: Bool = false) {
-        layer.latest = stroke
+    private func render(_ shape: LivePenShape?, revision: Int, on layer: LivePenLayer, now: Bool = false) {
+        layer.shape = shape
         layer.checkPoints = nil
         let time = CACurrentMediaTime()
         if !now, let rendering = layer.rendering, time - rendering.since < Self.livePenRenderPatience {
-            layer.waiting = (stroke, revision)
+            layer.waiting = (shape, revision)
             return
         }
         if !now, time < layer.lastGiven + Self.livePenInterval {
-            layer.waiting = (stroke, revision)
+            layer.waiting = (shape, revision)
             renderWaiting(on: layer, at: layer.lastGiven + Self.livePenInterval)
             return
         }
@@ -333,11 +365,12 @@ final class PageInkView: UIView {
         livePenGeneration += 1
         let generation = livePenGeneration
         layer.rendering = (revision, time, generation)
-        if let stroke {
+        if let shape {
             // EP124: made off the main thread, given on it, unless a newer drawing or a clear has replaced it meanwhile.
+            // EP140: shaped there too.
             layer.making = generation
             Self.livePenDrawings.async { [weak self, weak layer] in
-                let made = MadeDrawing(PKDrawing(strokes: [stroke]))
+                let made = MadeDrawing(shape.stroke.map { PKDrawing(strokes: [$0]) } ?? PKDrawing())
                 DispatchQueue.main.async {
                     if let self, let layer, layer.making == generation, let drawing = made.drawing {
                         layer.making = nil
@@ -372,7 +405,7 @@ final class PageInkView: UIView {
             guard let self, let layer else { return }
             layer.flushScheduled = false
             guard layer.rendering == nil, let waiting = layer.waiting else { return }
-            self.render(waiting.stroke, revision: waiting.revision, on: layer)
+            self.render(waiting.shape, revision: waiting.revision, on: layer)
         }
     }
 
@@ -385,7 +418,7 @@ final class PageInkView: UIView {
         // Not from inside PencilKit's report: a drawing given there is drawn, but PencilKit often never reports it.
         DispatchQueue.main.async { [weak self, weak layer] in
             guard let self, let layer, layer.rendering == nil, let waiting = layer.waiting else { return }
-            self.render(waiting.stroke, revision: waiting.revision, on: layer)
+            self.render(waiting.shape, revision: waiting.revision, on: layer)
         }
     }
 

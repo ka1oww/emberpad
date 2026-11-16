@@ -18,12 +18,18 @@ extension ScribbleErase {
 
 /// A page's strokes as the scribble test reads them. Each stroke is sampled only once a scribble comes near it, and
 /// then kept, so a scribble growing over a page full of ink is judged against its neighbourhood alone.
-final class ScribbleInk {
+///
+/// EP140: a scribble being drawn is judged off the main thread, while the main thread reads the same strokes for the
+/// outline, so what is read lazily is read under a lock. The strokes' boxes come from PencilKit's `renderBounds`, read
+/// on the main thread (`prepare`) before the first judgement anywhere else.
+final class ScribbleInk: @unchecked Sendable {
     /// The page's drawing revision these strokes are from (`PDFOverlayPageController.scribbleRevisions`).
     let revision: Int
     let strokes: [PKStroke]
-    private lazy var boxes: [CGRect] = strokes.map { ScribbleErase.padded($0.renderBounds) }
+    private var boxes: [CGRect]?
     private var sampled: [Int: [CGPoint]] = [:]
+    private var mainThreadJudgements = 0
+    private let lock = NSLock()
 
     init(_ strokes: [PKStroke], revision: Int = 0) {
         self.strokes = strokes
@@ -32,19 +38,40 @@ final class ScribbleInk {
 
     var count: Int { strokes.count }
     /// How many strokes have been read so far: only those a scribble came near.
-    var sampledCount: Int { sampled.count }
+    var sampledCount: Int { lock.withLock { sampled.count } }
+    /// How many times a scribble has been judged against these strokes on the main thread (EP140): only at the lift,
+    /// or when a commit comes before it, never while the scribble is being drawn.
+    var judgedOnMainThread: Int { lock.withLock { mainThreadJudgements } }
+
+    /// Reads every stroke's box now, so a judgement off the main thread reads no stroke's bounds from PencilKit.
+    func prepare() {
+        _ = paddedBoxes()
+    }
+
+    private func paddedBoxes() -> [CGRect] {
+        lock.withLock {
+            if let boxes { return boxes }
+            let made = strokes.map { ScribbleErase.padded($0.renderBounds) }
+            boxes = made
+            return made
+        }
+    }
 
     /// Points along the stroke at `index`, in page ink space.
     func points(at index: Int) -> [CGPoint] {
-        if let points = sampled[index] { return points }
-        let points = ScribbleErase.points(of: strokes[index])
-        sampled[index] = points
-        return points
+        lock.withLock {
+            if let points = sampled[index] { return points }
+            let points = ScribbleErase.points(of: strokes[index])
+            sampled[index] = points
+            return points
+        }
     }
 
     /// The strokes (by index) a scribble through `scribble` erases: `ScribbleErase.erasedIndices(scribble:near:)`.
     func erased(by scribble: [CGPoint]) -> [Int] {
-        ScribbleErase.erasedIndices(scribble: scribble) { reach in
+        if Thread.isMainThread { lock.withLock { mainThreadJudgements += 1 } }
+        let boxes = paddedBoxes()
+        return ScribbleErase.erasedIndices(scribble: scribble) { reach in
             boxes.indices.compactMap { index in
                 boxes[index].intersects(reach) ? ScribbleErase.Ink(index: index, points: points(at: index)) : nil
             }
@@ -77,16 +104,35 @@ final class ScribblePreview {
         samples += points
     }
 
+    /// What a scribble through `samples` erases from `ink`, and how many points it was judged at. Pure, so it is made
+    /// off the main thread while the scribble is drawn (EP140).
+    struct Judgement {
+        let erased: [Int]
+        let points: Int
+    }
+
+    static func judge(_ samples: [CGPoint], ink: ScribbleInk) -> Judgement {
+        let points = ScribbleErase.resampled(samples)
+        return Judgement(erased: ink.erased(by: points), points: points.count)
+    }
+
     /// Judges the samples so far against `ink`. Returns whether the erased set changed.
     @discardableResult
     func update(ink: ScribbleInk) -> Bool {
         guard !isFinished else { return false }
-        let points = ScribbleErase.resampled(samples)
-        var next = ink.erased(by: points)
+        return apply(Self.judge(samples, ink: ink), ink: ink)
+    }
+
+    /// Takes `judgement`, made of the samples so far or of fewer of them, against `ink`, as `update` would. Returns
+    /// whether the erased set changed.
+    @discardableResult
+    func apply(_ judgement: Judgement, ink: ScribbleInk) -> Bool {
+        guard !isFinished else { return false }
+        var next = judgement.erased
         if !next.isEmpty {
-            erasingSince = points.count
+            erasingSince = judgement.points
         } else if !erased.isEmpty, ink === self.ink, let since = erasingSince,
-                  CGFloat(points.count - since) * ScribbleErase.sampleSpacing <= Self.holdTravel {
+                  CGFloat(judgement.points - since) * ScribbleErase.sampleSpacing <= Self.holdTravel {
             // Judged on the same page as the strokes it outlines, so the set still names the same strokes.
             next = erased
         }
@@ -139,23 +185,50 @@ extension PDFOverlayPageController {
         scribblePreview = ScribblePreview(page: page, samples: samples, liveID: liveID)
     }
 
-    /// More of the stroke: the preview catches up once per turn of the run loop, however many samples came.
+    /// More of the stroke: the preview catches up with it off the main thread (EP140), one judgement at a time, each of
+    /// all the samples that have come by the time it starts.
+    ///
+    /// Judging a scribble reads every point of it, so it takes longer the longer the scribble. Judged on the main
+    /// thread on every turn of the run loop, a scribble of a few seconds kept the main thread busy from one Pencil
+    /// move to the next (on the iPad Air in a Debug build, as Ember Slate is built, 20 ms a judgement six seconds into
+    /// a scribble over a full page), so the run loop never slept, Core Animation never committed, and the whole screen
+    /// froze until the Pencil lifted: for all 2.9 s of a three-second scribble over a few strokes.
     func extendScribblePreview(samples: [CGPoint]) {
         guard let preview = scribblePreview, !preview.isFinished else { return }
         preview.append(samples)
-        guard !scribbleUpdateScheduled else { return }
-        scribbleUpdateScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.scribbleUpdateScheduled = false
-            self.updateScribblePreview()
-        }
+        judgeScribblePreview()
     }
 
-    /// Judges the stroke so far and outlines what it would erase.
+    /// Judges the stroke so far on the main thread and outlines what it would erase. The live preview judges off the
+    /// main thread (`extendScribblePreview`); tests call this to judge at once.
     func updateScribblePreview() {
         guard let preview = scribblePreview, !preview.isFinished, let ink = scribbleInk(page: preview.page) else { return }
         if preview.update(ink: ink) { showScribbleOutline() }
+    }
+
+    /// Where scribbles being drawn are judged (EP140).
+    static let scribbleJudging = DispatchQueue(label: "EmberPad.scribbleJudging", qos: .userInteractive)
+
+    /// Judges the scribble being drawn off the main thread, unless a judgement is already under way: when that one
+    /// comes back, the samples that came meanwhile are judged next. A judgement of a preview that has since finished
+    /// or gone, or of the page's strokes before they changed, is dropped.
+    private func judgeScribblePreview() {
+        guard !scribbleJudgementInFlight, let preview = scribblePreview, !preview.isFinished,
+              let ink = scribbleInk(page: preview.page) else { return }
+        scribbleJudgementInFlight = true
+        let samples = preview.samples
+        Self.scribbleJudging.async { [weak self, weak preview] in
+            let judgement = ScribblePreview.judge(samples, ink: ink)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.scribbleJudgementInFlight = false
+                guard let current = self.scribblePreview, !current.isFinished else { return }
+                // Another scribble, or the page changed meanwhile: the newest samples are judged on the page as it is.
+                guard current === preview, self.scribbleInk(page: current.page) === ink else { return self.judgeScribblePreview() }
+                if current.apply(judgement, ink: ink) { self.showScribbleOutline() }
+                if current.samples.count != samples.count { self.judgeScribblePreview() }
+            }
+        }
     }
 
     /// The Pencil lifted before PencilKit committed the stroke: the set is fixed now, and what the commit will erase
@@ -261,6 +334,7 @@ extension PDFOverlayPageController {
         let revision = scribbleRevisions[page, default: 0]
         if let ink = scribbleInkCache, ink.revision == revision, scribbleInkCachePage == page { return ink }
         let ink = ScribbleInk(canvas.drawing.strokes, revision: revision)
+        ink.prepare()
         scribbleInkCache = ink
         scribbleInkCachePage = page
         return ink
