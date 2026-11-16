@@ -1597,7 +1597,7 @@ final class StressScenario {
         let timed = marks.filter(\.timesInk).flatMap { mark in
             mark.points.indices.compactMap { i -> (wait: Double, label: String, at: CFTimeInterval)? in
                 guard let drawn = mark.drawnAt[i], let seen = mark.firstSeen[i] else { return nil }
-                return (max(0, seen - drawn), mark.label, drawn - sampler.scenarioStart)
+                return (max(0, seen - drawn), "\(mark.label) point \(i + 1) of \(mark.points.count)", drawn - sampler.scenarioStart)
             }
         }
         let latencies = timed.map(\.wait).sorted()
@@ -1615,8 +1615,11 @@ final class StressScenario {
                 sum + mark.dueOffScreen.filter { mark.drawnAt[$0] != nil && mark.firstSeen[$0] != nil }.count
             }
             let offScreen = waited > 0 ? "; \(waited) of them off the screen once written, so read only when it showed them" : ""
-            // The slowest points over the bound, with their stroke and when the Pencil passed them (EP132).
-            let slow = timed.filter { $0.wait > StressBounds.penToInkMax }.sorted { $0.wait > $1.wait }.prefix(3)
+            // The slowest points of a failing scenario, with their stroke and when the Pencil passed them (EP132). Those
+            // over the p95 bound are named as well (EP144): over 20 points or fewer the p95 is the slowest point, so one
+            // point fails the scenario, and which one tells what held it up.
+            let failed = p95 > StressBounds.penToInkP95 || worst > StressBounds.penToInkMax
+            let slow = timed.filter { failed && $0.wait > StressBounds.penToInkP95 }.sorted { $0.wait > $1.wait }.prefix(3)
                 .map { "\($0.label) at " + String(format: "%.2f s, %.0f ms", $0.at, $0.wait * 1000) }
             let slowest = slow.isEmpty ? "" : "; slowest: " + slow.joined(separator: "; ")
             check("pen to ink is quick", p95 <= StressBounds.penToInkP95 && worst <= StressBounds.penToInkMax,

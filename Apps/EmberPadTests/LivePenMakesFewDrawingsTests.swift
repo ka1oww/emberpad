@@ -156,6 +156,49 @@ final class LivePenMakesFewDrawingsTests: XCTestCase {
                        "the live pen lets go of its drawings off the main thread: \(held.mainThreadCalls)")
     }
 
+    /// EP144: choosing the highlighter just after writing landed the pen's waiting strokes there and then, on the main
+    /// thread: drawings are made and the page's drawing is set, and each of those waits while PencilKit saves its
+    /// record. On the iPad Air late in the stress test that froze the page for 112 to 121 ms, just as the next stroke
+    /// began. Each call into the record is held up here as a save holds it: a change between tools that write makes
+    /// none, so the page goes on at once, and the waiting stroke lands in its own time, in the ink it was written in.
+    /// The eraser, which acts on the page as it is, still lands it first.
+    func testChoosingAnotherWritingToolNeverWaitsOnPencilKitsRecord() throws {
+        let page = try page()
+        let controller = page.controller, canvas = page.canvas
+        // A pen stroke as PencilKit commits it; its swap for the pen's own ink waits for a pause in the writing.
+        func write(y: CGFloat, at n: Int) {
+            controller.inkTiming.lastLift = CACurrentMediaTime()
+            canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + [InkKeepsEveryStrokeTests.liveStroke(y: y, at: n)])
+            controller.canvasViewDrawingDidChange(canvas)
+        }
+        write(y: 100, at: 0)
+        XCTAssertTrue(controller.hasPendingInk, "the pen's stroke waits to land")
+
+        let save: TimeInterval = 0.25
+        let held = try ReplicaCheckouts(delay: save)
+        defer { held.remove() }
+        for tool in [WorksheetTool.highlighter, .shape, .pen] {
+            let began = CACurrentMediaTime()
+            controller.tools.select(tool)
+            XCTAssertLessThan(CACurrentMediaTime() - began, save / 5, "choosing the \(tool) never waits on PencilKit's record")
+            XCTAssertEqual(held.mainThreadCalls, [], "choosing the \(tool) makes no call into PencilKit's record")
+            XCTAssertTrue(controller.hasPendingInk, "the pen's stroke still waits after choosing the \(tool)")
+            XCTAssertEqual(canvas.drawing.strokes.last?.ink.inkType, PenFeel.liveInkType)
+        }
+        held.remove()
+        controller.tools.select(.highlighter)
+        Self.wait(until: { !controller.hasPendingInk }, timeout: 6)
+        XCTAssertEqual(canvas.drawing.strokes.map(\.ink.inkType), [.fountainPen],
+                       "the stroke lands in its own time, in the pen it was written with")
+
+        controller.tools.select(.pen)
+        write(y: 160, at: 1)
+        XCTAssertTrue(controller.hasPendingInk)
+        controller.tools.select(.eraser)
+        XCTAssertFalse(controller.hasPendingInk, "the eraser lands the waiting stroke first")
+        XCTAssertEqual(canvas.drawing.strokes.map(\.ink.inkType), [.fountainPen, .fountainPen])
+    }
+
     private static func line(from start: CGPoint, to end: CGPoint) -> PKStroke {
         let points = StrokeSnap.linePoints(from: start, to: end, spacing: StrokeSnap.pointSpacing).enumerated().map { i, p in
             PKStrokePoint(location: p, timeOffset: Double(i) * 0.01, size: CGSize(width: 2, height: 2), opacity: 1, force: 1,
