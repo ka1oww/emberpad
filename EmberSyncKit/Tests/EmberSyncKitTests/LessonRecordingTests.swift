@@ -327,6 +327,44 @@ struct LessonRecordingTests {
         #expect(changed && stalled.warning?.problem == .disconnected && stalled.warning?.from == 1)
     }
 
+    /// EP134: a microphone that has sent nothing at all since recording started (it never opened) is warned about after
+    /// `startupLimit`, not a minute. Quiet speech and office room noise never warn: silence is below -80 dBFS, digital
+    /// zero in practice, and is the only level check.
+    @Test func aMicrophoneThatSendsNothingWarnsWithinSecondsAndQuietSoundNever() {
+        #expect(LessonAudioHealth.startupLimit == 6)
+        #expect(abs(20 * log10(Double(LessonAudioHealth.silenceThreshold)) + 80) < 0.001, "-80 dBFS")
+
+        var dead = LessonAudioHealth(start: 0)
+        var changed = dead.tick(at: 5)
+        #expect(!changed && dead.warning == nil)
+        changed = dead.tick(at: 6)
+        #expect(changed)
+        #expect(dead.warning == .init(problem: .disconnected, from: 0, warnedAt: 6))
+        #expect(LessonAudioHealth.text(for: dead.warning!, at: 6) == "Microphone disconnected: no sound is coming in")
+        // The microphone opens late (the BOYA can take seconds): sound ends the warning.
+        dead.heard(peak: 0.1, at: 8)
+        changed = dead.tick(at: 8)
+        #expect(changed && dead.warning == nil)
+
+        // Soft speech (-60 dBFS peaks) between long stretches of a quiet office (-70 dBFS) for ten minutes: never a warning.
+        var quiet = LessonAudioHealth(start: 0)
+        for t in stride(from: 0.0, through: 600, by: 0.02) {
+            quiet.heard(peak: Int(t) % 30 < 3 ? 0.001 : 0.0003, at: t)
+            if Int(t * 50) % 50 == 0 { quiet.tick(at: t) }
+        }
+        #expect(quiet.episodes.isEmpty)
+
+        // Once sound has come in, a microphone that stops gets the usual minute: a short stall is not warned.
+        var started = LessonAudioHealth(start: 0)
+        started.heard(peak: 0.2, at: 1)
+        changed = started.tick(at: 10)
+        #expect(!changed && started.warning == nil)
+
+        let stopped = LessonAudioHealth.Episode(problem: .notRecording, from: 10, warnedAt: 11)
+        #expect(LessonAudioHealth.text(for: stopped, at: 12) == "Recording stopped: the video is not being saved. Trying again.")
+        #expect(LessonAudioHealth.text(for: stopped, at: 200) == "Recording stopped for 3 minutes: the video is not being saved. Trying again.")
+    }
+
     // MARK: Microphone
 
     @Test func theBoyaIsChosenByNameAndAMissingOneAsksFirst() {
@@ -395,6 +433,28 @@ struct LessonRecordingTests {
         #expect(warnings[0]["warnedAt"] as? String == "2026-11-16T01:47:40.000Z")
         // It reads back the same.
         #expect(try LessonRecord.decode(data) == log.record)
+    }
+
+    /// EP134: a lesson that saved no playable video closes "failed", never "complete"; an empty file is taken off the
+    /// list; and a lesson whose encoder needed the safe rate says which rate its video has.
+    @Test func aLessonThatSavedNoVideoIsFailedNeverComplete() throws {
+        let start = Date(timeIntervalSince1970: 1_794_795_000)
+        var log = Self.log(start: start)
+        log.startFile(LessonFolder.videoName(segment: 1), at: start)
+        log.dropFile(LessonFolder.videoName(segment: 1))
+        log.setWarnings([.init(problem: .notRecording, from: 0, warnedAt: 1)])
+        log.finish(at: start.addingTimeInterval(30), saved: false)
+        #expect(log.record.status == .failed && log.record.files.isEmpty)
+        #expect(log.record.audioWarnings.map(\.kind) == [.notRecording] && log.record.audioWarnings[0].endOffset == 30)
+        let json = try #require(JSONSerialization.jsonObject(with: LessonRecord.encode(log.record)) as? [String: Any])
+        #expect(json["status"] as? String == "failed")
+        #expect((json["audioWarnings"] as? [[String: Any]])?.first?["kind"] as? String == "notRecording")
+
+        var saved = Self.log(start: start)
+        saved.useAudioBitRate(LessonAudioBitRate.safe)
+        saved.startFile(LessonFolder.videoName(segment: 1), at: start)
+        saved.finish(at: start.addingTimeInterval(30))
+        #expect(saved.record.status == .complete && saved.record.audio.bitRate == 128_000)
     }
 
     @Test func aLessonLeftRecordingIsClosedAsInterruptedAtItsLastWrite() throws {

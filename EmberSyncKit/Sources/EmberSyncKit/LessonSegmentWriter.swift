@@ -1,4 +1,5 @@
 #if os(macOS)
+import AudioToolbox
 import AVFoundation
 import CoreMedia
 import CoreVideo
@@ -8,7 +9,8 @@ import Foundation
 /// clock, as a fragmented MP4. A fragment is closed every `fragmentInterval`, so when the Companion stops without
 /// finishing (a crash, a forced quit, power loss) the file still plays up to its last fragment.
 ///
-/// Audio arrives as 48 kHz linear PCM in `sourceAudioFormat`, unprocessed, and is encoded once. A gap in it (the
+/// Audio arrives as linear PCM in `sourceAudioFormat` (48 kHz from the Companion), unprocessed, and is encoded once as
+/// AAC at a bit rate the system encoder accepts for its channels and rate (`LessonAudioBitRate`). A gap in it (the
 /// microphone unplugged, or a stall) is filled with digital silence, so the audio track stays continuous and in step
 /// with the picture; `fillSilence(until:)` fills it while the microphone is gone. Video frames are written when the
 /// picture changes and at least about once a second, so the frame rate varies up to the caller's maximum.
@@ -22,17 +24,31 @@ public final class LessonSegmentWriter: @unchecked Sendable {
         public var keyFrameInterval: Double = 2
         public var sampleRate: Double = 48_000
         public var channels = 1
-        /// 192 kbit/s per channel: transparent for speech, above what Voice Memos keeps.
+        /// 192 kbit/s per channel is the aim: transparent for speech, above what Voice Memos keeps. The file gets the
+        /// highest rate the Mac's AAC encoder takes up to it (`LessonAudioBitRate`): 192 kbit/s mono, 320 kbit/s stereo.
         public var audioBitRatePerChannel = 192_000
+        /// A bit rate used as given, even one the encoder refuses; tests use it to make the encoder fail.
+        public var fixedAudioBitRate: Int?
         public var fragmentInterval: Double = 2
 
         public init() {}
 
-        public var audioBitRate: Int { audioBitRatePerChannel * max(1, min(2, channels)) }
+        /// The AAC bit rate the file is encoded at.
+        public var audioBitRate: Int {
+            if let fixedAudioBitRate { return fixedAudioBitRate }
+            let channels = max(1, min(2, channels))
+            return LessonAudioBitRate.choose(target: audioBitRatePerChannel * channels, sampleRate: sampleRate, channels: channels)
+        }
     }
 
-    public enum Failure: Error, Equatable {
+    public enum Failure: Error, Equatable, LocalizedError {
         case cannotStart(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .cannotStart(let what): "The video file could not be started (\(what))."
+            }
+        }
     }
 
     public let url: URL
@@ -47,6 +63,8 @@ public final class LessonSegmentWriter: @unchecked Sendable {
     private var lastVideo: CMTime?
     /// Where the audio written so far ends.
     private var audioEnd: CMTime?
+    /// Where the audio the encoder has taken ends; nil until it takes some.
+    private var audioWritten: CMTime?
     private var finished = false
     public private(set) var videoFrames = 0
     public private(set) var silenceFilled: Double = 0
@@ -159,6 +177,7 @@ public final class LessonSegmentWriter: @unchecked Sendable {
             if let audioEnd, time - audioEnd > CMTime(value: 20, timescale: 1_000) { appendSilenceLocked(from: audioEnd, to: time) }
             guard audio.isReadyForMoreMediaData, audio.append(sample) else { return false }
             audioEnd = end
+            audioWritten = end
             return true
         }
     }
@@ -181,6 +200,7 @@ public final class LessonSegmentWriter: @unchecked Sendable {
                   audio.append(sample) else { return }
             cursor = cursor + CMTime(value: CMTimeValue(frames), timescale: CMTimeScale(rate))
             audioEnd = cursor
+            audioWritten = cursor
             silenceFilled += Double(frames) / rate
         }
     }
@@ -228,6 +248,81 @@ public final class LessonSegmentWriter: @unchecked Sendable {
     }
 
     public var error: Error? { lock.withLock { writer.error } }
+
+    /// Why the file stopped taking media, once the writer has failed (the encoder refused its settings, the disk is
+    /// full); nil while it writes.
+    public var failure: String? {
+        lock.withLock {
+            switch writer.status {
+            case .failed: writer.error.map(Self.describe) ?? "the writer failed"
+            case .cancelled: "the writer was cancelled"
+            default: nil
+            }
+        }
+    }
+
+    /// How far each track has been taken by the encoder, on the source clock; nil until its first sample.
+    public var written: (audio: CMTime?, video: CMTime?) { lock.withLock { (audioWritten, lastVideo) } }
+
+    /// The bytes on disk so far. A fragmented MP4 has none until its first fragment closes, with both tracks in it.
+    public var bytesOnDisk: Int {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+    }
+
+    /// An error in words, with the code that names it, for the log.
+    static func describe(_ error: Error) -> String {
+        let error = error as NSError
+        var text = "\(error.localizedDescription) (\(error.domain) \(error.code)"
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+            text += ", \(underlying.domain) \(underlying.code)"
+        }
+        return text + ")"
+    }
+}
+
+/// The AAC bit rate for a lesson's audio (EP134). The Mac's AAC encoder takes only some rates for a given channel count
+/// and sample rate: at 44.1 and 48 kHz up to 256 kbit/s mono and 320 kbit/s stereo. A rate it does not take makes the
+/// file fail when its first audio arrives (EP129's 384 kbit/s stereo did), so the rate is one the encoder lists.
+public enum LessonAudioBitRate {
+    /// The most the encoder takes at 44.1 and 48 kHz, for when it cannot be asked.
+    static func fallback(channels: Int) -> Int { channels >= 2 ? 320_000 : 256_000 }
+    /// A rate the encoder takes for mono and stereo at 44.1 and 48 kHz, for a file to try after one was refused.
+    public static let safe = 128_000
+
+    /// `target` when the encoder takes it; otherwise the highest rate it takes below `target`, or its lowest when
+    /// every rate it takes is above.
+    public static func choose(target: Int, sampleRate: Double, channels: Int) -> Int {
+        let ranges = applicable(sampleRate: sampleRate, channels: channels)
+        guard !ranges.isEmpty else { return min(target, fallback(channels: channels)) }
+        let wanted = Double(target)
+        if ranges.contains(where: { $0.lowerBound <= wanted && wanted <= $0.upperBound }) { return target }
+        if let below = ranges.filter({ $0.lowerBound <= wanted }).map({ min($0.upperBound, wanted) }).max() { return Int(below) }
+        return Int(ranges.map(\.lowerBound).min() ?? wanted)
+    }
+
+    /// The rates the system AAC encoder lists for float PCM at `sampleRate` with `channels` channels, in bits per
+    /// second; empty when it cannot be asked.
+    public static func applicable(sampleRate: Double, channels: Int) -> [ClosedRange<Double>] {
+        let count = UInt32(max(1, channels))
+        var input = AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM, mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4 * count, mFramesPerPacket: 1, mBytesPerFrame: 4 * count, mChannelsPerFrame: count,
+            mBitsPerChannel: 32, mReserved: 0)
+        var output = AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatMPEG4AAC, mFormatFlags: 0, mBytesPerPacket: 0,
+            mFramesPerPacket: 1_024, mBytesPerFrame: 0, mChannelsPerFrame: count, mBitsPerChannel: 0, mReserved: 0)
+        var made: AudioConverterRef?
+        guard AudioConverterNew(&input, &output, &made) == noErr, let converter = made else { return [] }
+        defer { AudioConverterDispose(converter) }
+        var size: UInt32 = 0
+        guard AudioConverterGetPropertyInfo(converter, kAudioConverterApplicableEncodeBitRates, &size, nil) == noErr,
+              size >= UInt32(MemoryLayout<AudioValueRange>.stride) else { return [] }
+        var values = [AudioValueRange](repeating: AudioValueRange(), count: Int(size) / MemoryLayout<AudioValueRange>.stride)
+        guard AudioConverterGetProperty(converter, kAudioConverterApplicableEncodeBitRates, &size, &values) == noErr else { return [] }
+        return values.prefix(Int(size) / MemoryLayout<AudioValueRange>.stride)
+            .filter { $0.mMaximum > 0 && $0.mMinimum <= $0.mMaximum }
+            .map { $0.mMinimum...$0.mMaximum }
+    }
 }
 
 /// The loudest sample in a buffer of interleaved 32-bit float PCM, for `LessonAudioHealth`.

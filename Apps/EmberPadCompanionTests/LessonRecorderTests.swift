@@ -40,11 +40,12 @@ final class LessonRecorderTests: XCTestCase {
         return options
     }
 
-    private func presenting(_ microphones: FakeMicrophones, warnAfter: TimeInterval = 60)
+    private func presenting(_ microphones: FakeMicrophones, warnAfter: TimeInterval = 60,
+                            options custom: CompanionLessonModel.Options? = nil)
         -> (CompanionPresentModel, LessonIPad, PresentWindowController) {
         let window = PresentWindowController()
         windows.append(window)
-        let model = CompanionPresentModel(window: window, lesson: CompanionLessonModel(options: options(warnAfter: warnAfter),
+        let model = CompanionPresentModel(window: window, lesson: CompanionLessonModel(options: custom ?? options(warnAfter: warnAfter),
                                                                                          microphones: microphones))
         return (model, LessonIPad(host: model.host), window)
     }
@@ -237,7 +238,8 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertEqual(live.files.count, 1, "a failed attempt adds no file")
 
         try FileManager.default.removeItem(at: blocker)
-        try await waitUntil { lesson.status.warning == nil }
+        // The next try comes after a short wait (EP134), and the warning ends once the new file has media on disk.
+        try await waitUntil(timeout: 10) { lesson.status.warning == nil }
         await lesson.finish()
         let record = try LessonRecord.read(from: folder)
         XCTAssertEqual(record.files.map(\.name), ["lesson.mp4", "lesson-2.mp4"])
@@ -307,6 +309,281 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertTrue(frames.allSatisfy { $0.redShare <= 0.05 }, "a page marked as the Teacher copy's is never recorded")
     }
 
+    // MARK: Reliability (EP134)
+
+    /// The BOYA mini 2 is stereo. A stereo microphone records a lesson with sound and picture at an AAC rate the
+    /// encoder takes, with no warning on the Mac or the iPad, into one file; lesson.json says so. On 16 Nov the same
+    /// lesson wrote 28 empty files and said "complete".
+    func testAStereoMicrophoneRecordsSoundAndPicture() async throws {
+        try await recordsSoundAndPicture(channels: 2, bitRate: 320_000)
+    }
+
+    func testAMonoMicrophoneRecordsSoundAndPicture() async throws {
+        try await recordsSoundAndPicture(channels: 1, bitRate: 192_000)
+    }
+
+    private func recordsSoundAndPicture(channels: Int, bitRate: Int) async throws {
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.channels = channels
+        let (model, iPad, _) = presenting(microphones)
+        let lesson = model.lesson
+        iPad.present(.student)
+        iPad.send(command: PresentLessonCommand(action: .start))
+        try await waitUntil { lesson.status.state == .recording }
+        let folder = try XCTUnwrap(lesson.folder)
+        // Five seconds of lesson: never a warning, and the file grows on disk as it records.
+        let until = Date().addingTimeInterval(5)
+        while Date() < until {
+            XCTAssertNil(lesson.status.warning)
+            try await pause(0.1)
+        }
+        XCTAssertTrue(iPad.statuses.allSatisfy { $0.warning == nil }, "the iPad is never warned")
+        XCTAssertGreaterThan(try videoFiles(in: folder).first { $0.name == "lesson.mp4" }?.size ?? 0, 10_000)
+
+        iPad.send(command: PresentLessonCommand(action: .end))
+        let record = try await waitForRecord(in: folder) { $0.status != .recording }
+        XCTAssertEqual(record.status, .complete)
+        XCTAssertEqual(record.microphone.channels, channels)
+        XCTAssertEqual(record.audio.channels, channels)
+        XCTAssertEqual(record.audio.bitRate, bitRate)
+        XCTAssertEqual(record.files.map(\.name), ["lesson.mp4"])
+        XCTAssertTrue(record.audioWarnings.isEmpty)
+        XCTAssertEqual(lesson.fileAttempts, 1)
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), ["lesson.mp4"])
+
+        let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
+        let duration = try await asset.load(.duration).seconds
+        XCTAssertGreaterThan(duration, 4.5)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let video = try XCTUnwrap(videoTracks.first)
+        let videoLength = try await video.load(.timeRange).duration.seconds
+        XCTAssertGreaterThan(videoLength, duration - 1)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let audio = try XCTUnwrap(audioTracks.first)
+        let audioLength = try await audio.load(.timeRange).duration.seconds
+        XCTAssertGreaterThan(audioLength, duration - 1)
+        let formats = try await audio.load(.formatDescriptions)
+        let format = try XCTUnwrap(formats.first)
+        let asbd = try XCTUnwrap(CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee)
+        XCTAssertEqual(asbd.mFormatID, kAudioFormatMPEG4AAC)
+        XCTAssertEqual(Int(asbd.mChannelsPerFrame), channels)
+        XCTAssertEqual(asbd.mSampleRate, 48_000)
+    }
+
+    /// The 16 Nov lesson replayed: a stereo microphone, and an AAC encoder that refuses the lesson's rate (EP129's
+    /// 384 kbit/s) when the first sound arrives, with no safer rate to fall back on. Within seconds the Mac and the
+    /// iPad say the video is not being saved and lesson.json records it; the Companion tries again now and then, never
+    /// a new empty file each second, and leaves no empty file behind; End lesson closes it "failed", never "complete",
+    /// and the Mac and the iPad say the lesson was not recorded.
+    func testAnEncoderThatRefusesTheLessonIsWarnedNeverSpinsAndEndsFailed() async throws {
+        var options = options()
+        options.settings.fixedAudioBitRate = 384_000
+        options.safeAudioBitRate = nil
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.channels = 2
+        let (model, iPad, _) = presenting(microphones, options: options)
+        let lesson = model.lesson
+        iPad.present(.student)
+        iPad.send(command: PresentLessonCommand(action: .start))
+        try await waitUntil { lesson.status.state == .recording }
+        let started = Date()
+        let folder = try XCTUnwrap(lesson.folder)
+
+        try await waitUntil(timeout: 4) { lesson.status.warning?.hasPrefix("Recording stopped") == true }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3.5, "warned within seconds")
+        try await waitUntil { iPad.statuses.last?.warning?.hasPrefix("Recording stopped") == true }
+        let live = try await waitForRecord(in: folder) { $0.audioWarnings.contains { $0.kind == .notRecording } }
+        XCTAssertEqual(live.status, .recording)
+
+        // Ten seconds in: a few tries, not one a second, still warned, and no empty file on disk.
+        try await pause(max(0, 10 - Date().timeIntervalSince(started)))
+        XCTAssertGreaterThanOrEqual(lesson.fileAttempts, 2, "it keeps trying")
+        XCTAssertLessThanOrEqual(lesson.fileAttempts, 4, "it does not spin")
+        XCTAssertTrue(lesson.status.warning?.hasPrefix("Recording stopped") == true)
+        XCTAssertEqual(try videoFiles(in: folder).filter { $0.size == 0 }.map(\.name), [])
+
+        let end = PresentLessonCommand(action: .end)
+        iPad.send(command: end)
+        try await waitUntil { lesson.status.state == .failed }
+        XCTAssertEqual(lesson.status.handledCommand, end.id)
+        XCTAssertTrue(lesson.status.message?.contains("not recorded") == true, lesson.status.message ?? "")
+        try await waitUntil { iPad.statuses.last?.state == .failed }
+        XCTAssertEqual(iPad.statuses.last?.handledCommand, end.id)
+        let record = try LessonRecord.read(from: folder)
+        XCTAssertEqual(record.status, .failed)
+        XCTAssertEqual(record.files, [])
+        XCTAssertEqual(record.audioWarnings.map(\.kind), [.notRecording])
+        XCTAssertTrue(record.audioWarnings.allSatisfy { $0.to != nil })
+        try await waitForNoVideoFiles(in: folder, "no empty file is left")
+    }
+
+    /// End lesson pressed just as a retry opens its file (CI hit this on 16 Nov, leaving an empty unlisted lesson.mp4):
+    /// the encoder refuses that file too, and End closes the lesson "failed" with no file listed and no empty file left
+    /// in the folder. Ended from the Mac at once and a few milliseconds into the retry, before and after the refusal
+    /// lands. A writer that creates its file late (as on CI's virtual Macs) is stood in for by an empty file landing
+    /// after End: the second sweep deletes it and leaves lesson.json.
+    func testEndingAsARetryOpensItsFileLeavesNoEmptyFile() async throws {
+        for delay in [0, 2, 5, 10, 20, 40] {
+            var options = options()
+            options.settings.fixedAudioBitRate = 384_000
+            options.safeAudioBitRate = nil
+            options.root = root.appendingPathComponent("end-\(delay)ms", isDirectory: true)
+            let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+            microphones.channels = 2
+            let lesson = CompanionLessonModel(options: options, microphones: microphones)
+            lesson.start()
+            try await waitUntil { lesson.status.state == .recording }
+            let folder = try XCTUnwrap(lesson.folder)
+            let deadline = Date().addingTimeInterval(6)
+            while lesson.fileAttempts < 2, Date() < deadline { try await Task.sleep(for: .milliseconds(1)) }
+            XCTAssertEqual(lesson.fileAttempts, 2, "\(delay) ms: the retry opened its file")
+            if delay > 0 { try await Task.sleep(for: .milliseconds(delay)) }
+            lesson.end()
+            try await waitUntil { lesson.status.state == .failed }
+            let record = try LessonRecord.read(from: folder)
+            XCTAssertEqual(record.status, .failed, "\(delay) ms")
+            XCTAssertEqual(record.files, [], "\(delay) ms")
+            if delay == 0 {
+                FileManager.default.createFile(atPath: folder.appendingPathComponent("lesson.mp4").path, contents: nil)
+            }
+            try await waitForNoVideoFiles(in: folder, "\(delay) ms: no empty file is left")
+            XCTAssertEqual(try LessonRecord.read(from: folder).status, .failed, "\(delay) ms: lesson.json stays")
+        }
+    }
+
+    /// The same refusal with the safe rate on, as in the app: the warning shows, the next file uses 128 kbit/s, which
+    /// the encoder always takes, and the lesson records from then on. lesson.json names the rate the video has.
+    func testAnEncoderRefusalRecoversWithTheSafeRate() async throws {
+        var options = options()
+        options.settings.fixedAudioBitRate = 384_000
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.channels = 2
+        let lesson = CompanionLessonModel(options: options, microphones: microphones)
+        lesson.start()
+        try await waitUntil { lesson.status.state == .recording }
+        let folder = try XCTUnwrap(lesson.folder)
+        try await waitUntil(timeout: 4) { lesson.status.warning?.hasPrefix("Recording stopped") == true }
+        try await waitUntil(timeout: 8) { lesson.status.warning == nil }
+        try await pause(2)
+        await lesson.finish()
+        XCTAssertEqual(lesson.status.state, .idle)
+        let record = try LessonRecord.read(from: folder)
+        XCTAssertEqual(record.status, .complete)
+        XCTAssertEqual(record.audio.bitRate, LessonAudioBitRate.safe)
+        XCTAssertEqual(record.files.map(\.name), ["lesson.mp4"])
+        XCTAssertEqual(record.audioWarnings.map(\.kind), [.notRecording])
+        XCTAssertNotNil(record.audioWarnings.first?.to)
+        let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let audio = try XCTUnwrap(audioTracks.first)
+        let audioLength = try await audio.load(.timeRange).duration.seconds
+        XCTAssertGreaterThan(audioLength, 2)
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), ["lesson.mp4"])
+    }
+
+    /// The same refusal when the microphone sends nothing, so the first sound the encoder sees is silence fill: the
+    /// fallback does not depend on sound having been taken, and the lesson still records at the safe rate.
+    func testAnEncoderRefusalRecoversWithTheSafeRateWhenTheMicrophoneSendsNothing() async throws {
+        var options = options()
+        options.settings.fixedAudioBitRate = 384_000
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.channels = 2
+        microphones.deliversAudio = false
+        let lesson = CompanionLessonModel(options: options, microphones: microphones)
+        lesson.start()
+        try await waitUntil { lesson.status.state == .recording }
+        let folder = try XCTUnwrap(lesson.folder)
+        try await waitUntil(timeout: 8) { lesson.status.warning?.hasPrefix("Recording stopped") == true }
+        try await waitUntil(timeout: 10) { lesson.status.warning == nil || lesson.status.warning?.hasPrefix("Recording stopped") == false }
+        try await pause(2)
+        await lesson.finish()
+        let record = try LessonRecord.read(from: folder)
+        XCTAssertEqual(record.status, .complete)
+        XCTAssertEqual(record.audio.bitRate, LessonAudioBitRate.safe)
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), ["lesson.mp4"])
+        XCTAssertGreaterThan(try videoFiles(in: folder).first?.size ?? 0, 0)
+    }
+
+    /// A microphone that opens but never sends a buffer (on 16 Nov the BOYA's capture never started): the Mac and the
+    /// iPad say no sound is coming in after `startupLimit` (6 s), not the minute a silent microphone is given. The
+    /// picture still records, with silence, and the lesson is complete.
+    func testAMicrophoneThatNeverSendsSoundIsWarnedWithinSeconds() async throws {
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.deliversAudio = false
+        let (model, iPad, _) = presenting(microphones)
+        let lesson = model.lesson
+        iPad.present(.student)
+        iPad.send(command: PresentLessonCommand(action: .start))
+        try await waitUntil { lesson.status.state == .recording }
+        let started = Date()
+        let folder = try XCTUnwrap(lesson.folder)
+        try await waitUntil(timeout: 9) { lesson.status.warning?.hasPrefix("Microphone disconnected") == true }
+        let after = Date().timeIntervalSince(started)
+        XCTAssertGreaterThan(after, LessonAudioHealth.startupLimit - 1)
+        XCTAssertLessThan(after, LessonAudioHealth.startupLimit + 2)
+        try await waitUntil { iPad.statuses.last?.warning?.hasPrefix("Microphone disconnected") == true }
+        try await pause(1)
+        iPad.send(command: PresentLessonCommand(action: .end))
+        let record = try await waitForRecord(in: folder) { $0.status != .recording }
+        XCTAssertEqual(record.status, .complete, "the picture was saved")
+        XCTAssertEqual(record.audioWarnings.map(\.kind), [.disconnected], "the file never stopped saving")
+        let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
+        let duration = try await asset.load(.duration).seconds
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let audio = try XCTUnwrap(audioTracks.first)
+        let audioLength = try await audio.load(.timeRange).duration.seconds
+        XCTAssertGreaterThan(audioLength, duration - 1.5)
+    }
+
+    /// macOS not answering for the microphone list (Core Audio stalled, as on 16 Nov): Start lesson from the iPad is
+    /// answered within `microphoneTimeout` with a failure that says so, and nothing records.
+    func testAStalledSoundSystemFailsTheStartPromptly() async throws {
+        var options = options()
+        options.microphoneTimeout = 1
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.answerDelay = 30
+        let (model, iPad, _) = presenting(microphones, options: options)
+        let lesson = model.lesson
+        iPad.present(.student)
+        let start = PresentLessonCommand(action: .start)
+        iPad.send(command: start)
+        let sent = Date()
+        try await waitUntil(timeout: 3) { lesson.status.state == .failed }
+        XCTAssertLessThan(Date().timeIntervalSince(sent), 2)
+        XCTAssertEqual(lesson.status.handledCommand, start.id)
+        XCTAssertTrue(lesson.status.message?.contains("not answering") == true, lesson.status.message ?? "")
+        XCTAssertEqual(iPad.statuses.last?.state, .failed)
+        XCTAssertEqual(iPad.statuses.last?.handledCommand, start.id, "the iPad's Start is answered")
+        XCTAssertFalse(lesson.isRecording)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    /// The real microphone source never opens a device on the caller's thread (on 16 Nov `startRunning` on the main
+    /// thread froze the Companion for 90 s): `start` and `stop` return at once, and a device that cannot be opened is
+    /// reported, off the main thread, as disconnected.
+    func testTheRealMicrophoneSourceOpensOffTheMainThread() async throws {
+        final class Events: @unchecked Sendable {
+            let lock = NSLock()
+            var count = 0
+            var onMain = false
+        }
+        let events = Events()
+        let source = CaptureAudioSource(candidate: .init(id: "ep134-no-such-microphone", name: "No such microphone", isBuiltIn: false))
+        let began = Date()
+        source.start(settings: .init(), onSample: { _ in }, onEvent: { _ in
+            events.lock.withLock {
+                events.count += 1
+                events.onMain = events.onMain || Thread.isMainThread
+            }
+        })
+        XCTAssertLessThan(Date().timeIntervalSince(began), 0.1, "start returns at once")
+        try await waitUntil(timeout: 5) { events.lock.withLock { events.count } == 1 }
+        XCTAssertFalse(events.lock.withLock { events.onMain })
+        let stopping = Date()
+        source.stop()
+        XCTAssertLessThan(Date().timeIntervalSince(stopping), 0.1, "stop returns at once")
+    }
+
     // MARK: Helpers
 
     // MARK: Pictures
@@ -356,6 +633,22 @@ final class LessonRecorderTests: XCTestCase {
         while !condition() {
             guard Date() < deadline else { return XCTFail("timed out") }
             try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    /// No video file is in `folder` within End's second sweep (`lateEmptyFileSweep`), and none comes back after it.
+    private func waitForNoVideoFiles(in folder: URL, _ message: String) async throws {
+        let deadline = Date().addingTimeInterval(CompanionLessonModel.lateEmptyFileSweep + 2)
+        while try !videoFiles(in: folder).isEmpty, Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), [], message)
+        try await pause(0.5)
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), [], "\(message), and none comes back")
+    }
+
+    /// The video files in `folder`, by name, with their size on disk.
+    private func videoFiles(in folder: URL) throws -> [(name: String, size: Int)] {
+        try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasSuffix(".mp4") }.sorted().map { name in
+            (name, (try? FileManager.default.attributesOfItem(atPath: folder.appendingPathComponent(name).path)[.size] as? Int) ?? 0)
         }
     }
 
