@@ -274,6 +274,11 @@ final class PresentMailbox: @unchecked Sendable {
 }
 
 extension NSScreen {
+    /// The display's Core Graphics ID, stable while it stays connected (an `NSScreen` object may be replaced).
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
+    }
+
     var isBuiltIn: Bool {
         guard let number = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
         return CGDisplayIsBuiltin(CGDirectDisplayID(number.uint32Value)) != 0
@@ -282,23 +287,57 @@ extension NSScreen {
 
 // MARK: - Window
 
-/// The presentation window. On a projector it is borderless and covers the whole display above the menu bar and
-/// Dock, so the class sees only the worksheet; it is a non-activating panel that takes the keyboard when it opens, so
-/// Esc reaches it even though the Companion, a menu-bar app, is not the active app (EP127). It covers only when the
-/// Mac has another display, so the teacher always keeps a menu bar. On the Mac's own display, or when the projector is
-/// the only display, it is an ordinary window that can go full screen, so the Mac stays usable.
+/// The presentation window. On a projector it covers the whole display, so the class sees only the worksheet. It
+/// covers only when the Mac has another display, so the teacher always keeps a menu bar. On the Mac's own display, or
+/// when the projector is the only display, it is an ordinary window that can go full screen, so the Mac stays usable.
+///
+/// It covers the projector the way Keynote or a full-screen browser does (EP135): the window goes into native full
+/// screen on that display, in a Space of its own, so the three-finger swipe between full-screen apps and desktops
+/// moves the projector to the next Space and back to the presentation, still live. Moving to another Space only
+/// changes what that display shows; the presentation and the lesson recording carry on. Entering full screen makes the
+/// Companion the active app, as any full-screen app is when its Space is shown, so Esc reaches the presentation at once.
+/// When the Mac's displays do not have separate Spaces (System Settings, Desktop & Dock), full screen on the projector
+/// would blank the Mac's own display too, so the window is then the borderless panel used before EP135, above the menu
+/// bar and Dock on every Space, which takes the keyboard without activating the Companion (EP127).
 ///
 /// Leaving it from the Mac, as presentation apps do: Esc, Command-W or Command-period; the Exit control that fades in
 /// when the pointer moves over the window and fades out again when it rests; the window's Close button; and **Exit
 /// presentation** in the Companion's menu-bar window. Each only hides the Mac's window (`onHide`); see
-/// `CompanionPresentModel.hide()`.
+/// `CompanionPresentModel.hide()`. Swiping to another Space is not leaving.
 @MainActor
 final class PresentWindowController: NSObject, NSWindowDelegate {
+    /// How the window shows the presentation.
+    enum Style: Equatable {
+        /// An ordinary window that the teacher can put in full screen (the Mac's own display, or its only display).
+        case window
+        /// Native full screen in a Space of its own on the projector (EP135).
+        case fullScreen
+        /// A borderless panel above everything on every Space, for Macs whose displays share Spaces.
+        case coverPanel
+    }
+
     var onHide: (() -> Void)?
     private(set) var window: NSWindow?
-    private(set) var coversScreen = false
+    private(set) var style = Style.window
+    /// The display a covering window was made for. Kept rather than read from the window, which may be on a Space
+    /// that is not shown.
+    private var displayID: CGDirectDisplayID?
+    var coversScreen: Bool { style != .window }
+    /// Puts a window into native full screen or takes it out. Under unit tests no Space is made: the window is
+    /// reported in or out at once, so a test on a Mac with a projector never leaves a full-screen Space behind.
+    lazy var toggleFullScreen: (NSWindow) -> Void = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+        ? { $0.toggleFullScreen(nil) }
+        : { [weak self] window in self?.reportFullScreenToggled(window) }
+    /// The window was ordered in and not hidden since. Kept here rather than read from `isVisible`, so a presentation
+    /// whose Space the teacher swiped away from still counts as shown and is never pulled back to the front.
+    private var ordered = false
+    /// The window is in native full screen, or on its way there.
+    private(set) var inFullScreen = false
+    private var enteringFullScreen = false
     /// The window is leaving native full screen before it hides.
     private var closingFromFullScreen = false
+    /// This controller took the window out of full screen and it is not out yet.
+    private var leavingFullScreen = false
     let canvas = PresentCanvasView()
     let content = PresentContentView()
 
@@ -309,7 +348,7 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
         canvas.onEscape = { [weak self] in self?.onHide?() }
     }
 
-    var isShown: Bool { window?.isVisible == true && !closingFromFullScreen }
+    var isShown: Bool { window != nil && ordered && !closingFromFullScreen }
 
     /// Whether the window covers `screen`: only a display other than the Mac's own, and only while another display
     /// is left for the teacher, so a projector that is the Mac's only display never loses its menu bar.
@@ -317,26 +356,49 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
         !isBuiltIn && screenCount > 1
     }
 
+    /// The window for a display: covering it in its own full-screen Space when the displays have separate Spaces,
+    /// so the teacher can swipe away from it and back, else the panel on every Space.
+    static func style(cover: Bool, separateSpaces: Bool) -> Style {
+        guard cover else { return .window }
+        return separateSpaces ? .fullScreen : .coverPanel
+    }
+
     func show(on screen: NSScreen?) {
         guard let screen = screen ?? NSScreen.main else { return }
         show(on: screen, cover: Self.covers(isBuiltIn: screen.isBuiltIn, screenCount: NSScreen.screens.count))
     }
 
-    func show(on screen: NSScreen, cover: Bool) {
+    func show(on screen: NSScreen, cover: Bool, separateSpaces: Bool = NSScreen.screensHaveSeparateSpaces) {
+        let style = Self.style(cover: cover, separateSpaces: separateSpaces)
         let wasShown = isShown
-        closingFromFullScreen = false
-        if let window, coversScreen == cover, !cover || window.screen == screen {
-            if cover { window.setFrame(screen.frame, display: true) }
-            if wasShown { window.orderFrontRegardless() } else { takeKeyboard(window) }
+        if let window, self.style == style, style == .window || displayID == screen.displayID {
+            closingFromFullScreen = false
+            switch style {
+            case .coverPanel:
+                window.setFrame(screen.frame, display: true)
+                if wasShown { window.orderFrontRegardless() } else { takeKeyboard(window) }
+            case .fullScreen:
+                // Already up in its Space: leave it there, even while the teacher is on another Space.
+                if !(wasShown && inFullScreen) { takeKeyboard(window) }
+            case .window:
+                if wasShown { window.orderFrontRegardless() } else { takeKeyboard(window) }
+            }
             return
         }
-        window?.delegate = nil
-        window?.orderOut(nil)
-        content.removeFromSuperview()
+        discardWindow()
         let made: NSWindow
-        if cover {
+        switch style {
+        case .coverPanel:
             made = PresentCoverPanel(frame: screen.frame)
-        } else {
+        case .fullScreen:
+            made = PresentTitledWindow(contentRect: screen.visibleFrame, styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                                       backing: .buffered, defer: false)
+            made.title = "EmberPad Presentation"
+            made.titleVisibility = .hidden
+            made.titlebarAppearsTransparent = true
+            made.collectionBehavior = [.fullScreenPrimary]
+            made.setFrame(screen.visibleFrame, display: false)
+        case .window:
             let size = CGSize(width: min(1_280, screen.visibleFrame.width * 0.8), height: min(800, screen.visibleFrame.height * 0.8))
             made = PresentTitledWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.titled, .closable, .resizable, .miniaturizable],
                                        backing: .buffered, defer: false)
@@ -349,15 +411,32 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
         made.backgroundColor = .black
         made.delegate = self
         made.contentView = content
-        coversScreen = cover
+        self.style = style
+        displayID = screen.displayID
         window = made
         takeKeyboard(made)
     }
 
+    /// Closes the window being replaced. Closing a window in native full screen also removes its Space.
+    private func discardWindow() {
+        guard let old = window else { return }
+        old.delegate = nil
+        if inFullScreen { old.close() } else { old.orderOut(nil) }
+        content.removeFromSuperview()
+        window = nil
+        ordered = false
+        inFullScreen = false
+        enteringFullScreen = false
+        leavingFullScreen = false
+        closingFromFullScreen = false
+    }
+
     /// Brings the window up with the keyboard, so Esc reaches it at once. The panel takes it without activating the
-    /// Companion, as Spotlight does, so the teacher's frontmost app stays frontmost.
+    /// Companion, as Spotlight does, so the teacher's frontmost app stays frontmost. The full-screen window activates
+    /// the Companion and goes into its own Space on the projector.
     private func takeKeyboard(_ window: NSWindow) {
-        if coversScreen {
+        ordered = true
+        if style == .coverPanel {
             window.orderFrontRegardless()
             window.makeKey()
         } else {
@@ -365,17 +444,24 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
             window.makeKeyAndOrderFront(nil)
         }
         window.makeFirstResponder(canvas)
+        if style == .fullScreen, !inFullScreen {
+            inFullScreen = true
+            enteringFullScreen = true
+            toggleFullScreen(window)
+        }
     }
 
     /// Hides the window. A window in native full screen leaves full screen first, so no empty full-screen Space is
-    /// left behind, and hides when it is out (`windowDidExitFullScreen`).
+    /// left behind, and hides when it is out (`windowDidExitFullScreen`). One still entering it leaves once it is in.
     func close() {
         content.hideExitControl(animated: false)
         guard let window else { return }
-        if window.styleMask.contains(.fullScreen) {
+        if inFullScreen || window.styleMask.contains(.fullScreen) {
+            guard !closingFromFullScreen else { return }
             closingFromFullScreen = true
-            window.toggleFullScreen(nil)
+            if !enteringFullScreen { leaveFullScreen(window) }
         } else {
+            ordered = false
             window.orderOut(nil)
         }
     }
@@ -389,15 +475,55 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
         return false
     }
 
-    func windowDidExitFullScreen(_ notification: Notification) {
+    private func reportFullScreenToggled(_ window: NSWindow) {
+        if leavingFullScreen {
+            windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        } else if enteringFullScreen {
+            windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+        }
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        inFullScreen = true
+        enteringFullScreen = false
+        guard closingFromFullScreen, let window else { return }
+        leaveFullScreen(window)
+    }
+
+    private func leaveFullScreen(_ window: NSWindow) {
+        leavingFullScreen = true
+        toggleFullScreen(window)
+    }
+
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        inFullScreen = false
+        enteringFullScreen = false
         guard closingFromFullScreen else { return }
         closingFromFullScreen = false
+        ordered = false
+        window.orderOut(nil)
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        let wasLeaving = leavingFullScreen
+        inFullScreen = false
+        enteringFullScreen = false
+        leavingFullScreen = false
+        guard closingFromFullScreen else {
+            // Shown again while it was leaving to hide: back into its Space on the projector.
+            if wasLeaving, style == .fullScreen, ordered, let window { takeKeyboard(window) }
+            if !wasLeaving, style == .fullScreen, ordered { onHide?() }
+            return
+        }
+        closingFromFullScreen = false
+        ordered = false
         window?.orderOut(nil)
     }
 }
 
-/// The projector window: borderless, above the menu bar and Dock on every Space, and a non-activating panel that can
-/// still become key, so it takes Esc, Command-W and clicks without making the Companion the active app.
+/// The projector window when the Mac's displays share Spaces: borderless, above the menu bar and Dock on every Space,
+/// and a non-activating panel that can still become key, so it takes Esc, Command-W and clicks without making the
+/// Companion the active app.
 final class PresentCoverPanel: NSPanel {
     init(frame: CGRect) {
         super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -418,7 +544,8 @@ final class PresentCoverPanel: NSPanel {
     }
 }
 
-/// The window on the Mac's own display. Command-W closes it although the Companion has no File menu.
+/// The titled presentation window, on the Mac's own display or in full screen on the projector. Command-W closes it
+/// although the Companion has no File menu.
 final class PresentTitledWindow: NSWindow {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         PresentExitKeys.handle(event, in: self) || super.performKeyEquivalent(with: event)

@@ -18,14 +18,25 @@ final class PresentExitTests: XCTestCase {
         super.tearDown()
     }
 
-    private func controller(cover: Bool) throws -> (PresentWindowController, () -> Int) {
+    /// A controller whose full-screen toggles are only counted, so no Space is made while testing.
+    private func quietController() -> (PresentWindowController, FullScreenToggles) {
         let controller = PresentWindowController()
         controllers.append(controller)
+        let toggles = FullScreenToggles()
+        controller.toggleFullScreen = { toggles.windows.append($0) }
+        return (controller, toggles)
+    }
+
+    private func controller(cover: Bool, separateSpaces: Bool = true) throws -> (PresentWindowController, () -> Int) {
+        let (controller, _) = quietController()
         var hides = 0
         controller.onHide = { hides += 1 }
-        controller.show(on: try XCTUnwrap(NSScreen.main), cover: cover)
+        controller.show(on: try XCTUnwrap(NSScreen.main), cover: cover, separateSpaces: separateSpaces)
         return (controller, { hides })
     }
+
+    /// The window styles the keys and the Exit control must work in: full screen, the panel, the Mac's own window.
+    private static let looks: [(cover: Bool, separateSpaces: Bool)] = [(true, true), (true, false), (false, true)]
 
     private func key(_ characters: String, code: UInt16, modifiers: NSEvent.ModifierFlags = [], in window: NSWindow) throws -> NSEvent {
         try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
@@ -43,9 +54,40 @@ final class PresentExitTests: XCTestCase {
         XCTAssertFalse(PresentWindowController.covers(isBuiltIn: true, screenCount: 1))
     }
 
-    func testTheProjectorWindowTakesKeysWithoutActivatingTheCompanion() throws {
-        let (controller, _) = try controller(cover: true)
+    func testTheProjectorGetsItsOwnFullScreenSpaceUnlessTheDisplaysShareSpaces() {
+        XCTAssertEqual(PresentWindowController.style(cover: true, separateSpaces: true), .fullScreen)
+        // With one Space across all displays, full screen on the projector would blank the Mac's own display too.
+        XCTAssertEqual(PresentWindowController.style(cover: true, separateSpaces: false), .coverPanel)
+        XCTAssertEqual(PresentWindowController.style(cover: false, separateSpaces: true), .window)
+        XCTAssertEqual(PresentWindowController.style(cover: false, separateSpaces: false), .window)
+    }
+
+    /// EP135: the projector window lives in one full-screen Space, like Keynote, so a three-finger swipe moves the
+    /// projector to the next Space and back; it does not join every Space above everything.
+    func testTheProjectorWindowGoesIntoNativeFullScreenInASpaceOfItsOwn() throws {
+        let (controller, toggles) = quietController()
+        controller.show(on: try XCTUnwrap(NSScreen.main), cover: true, separateSpaces: true)
+        let window = try XCTUnwrap(controller.window)
+        XCTAssertFalse(window is NSPanel)
+        XCTAssertEqual(controller.style, .fullScreen)
+        XCTAssertTrue(controller.coversScreen)
+        XCTAssertTrue(window.collectionBehavior.contains(.fullScreenPrimary))
+        XCTAssertTrue(window.collectionBehavior.isDisjoint(with: [.canJoinAllSpaces, .moveToActiveSpace, .stationary, .fullScreenAuxiliary]),
+                      "a window on every Space stays on the projector whichever Space is swiped to")
+        XCTAssertEqual(window.level, .normal)
+        XCTAssertFalse(window.hidesOnDeactivate)
+        XCTAssertEqual(window.screen?.displayID, NSScreen.main?.displayID)
+        XCTAssertTrue(toggles.windows.count == 1 && toggles.windows.first === window)
+        XCTAssertTrue(controller.inFullScreen)
+        XCTAssertTrue(window.firstResponder === controller.canvas)
+        XCTAssertTrue(controller.isShown)
+    }
+
+    func testThePanelStillCoversWithoutActivatingTheCompanionWhenTheDisplaysShareSpaces() throws {
+        let (controller, toggles) = quietController()
+        controller.show(on: try XCTUnwrap(NSScreen.main), cover: true, separateSpaces: false)
         let panel = try XCTUnwrap(controller.window as? PresentCoverPanel)
+        XCTAssertEqual(controller.style, .coverPanel)
         XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
         XCTAssertTrue(panel.styleMask.contains(.borderless))
         XCTAssertEqual(panel.level, .screenSaver)
@@ -55,33 +97,119 @@ final class PresentExitTests: XCTestCase {
         XCTAssertTrue(panel.isKeyWindow)
         XCTAssertTrue(panel.firstResponder === controller.canvas)
         XCTAssertTrue(controller.isShown)
+        XCTAssertTrue(toggles.windows.isEmpty)
+    }
+
+    // MARK: Spaces (EP135)
+
+    func testShowingAgainLeavesTheFullScreenPresentationInItsSpace() throws {
+        let (controller, toggles) = quietController()
+        let screen = try XCTUnwrap(NSScreen.main)
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        let window = try XCTUnwrap(controller.window)
+        // Showing again while it is still entering full screen does not toggle it back out.
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        XCTAssertEqual(toggles.windows.count, 1)
+        controller.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+        // A display change or the next frame never pulls the projector back from the Space the teacher swiped to.
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        XCTAssertTrue(controller.window === window)
+        XCTAssertEqual(toggles.windows.count, 1)
+        XCTAssertTrue(controller.isShown)
+    }
+
+    func testLeavingFromFullScreenLeavesFullScreenFirstThenHides() throws {
+        let (controller, toggles) = quietController()
+        let screen = try XCTUnwrap(NSScreen.main)
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        let window = try XCTUnwrap(controller.window)
+        controller.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+
+        controller.close()
+        XCTAssertEqual(toggles.windows.count, 2, "out of full screen, so no empty Space is left behind")
+        XCTAssertFalse(controller.isShown)
+        controller.close()
+        XCTAssertEqual(toggles.windows.count, 2)
+        controller.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(controller.isShown)
+
+        // Show presentation puts it back in full screen.
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        XCTAssertTrue(controller.window === window)
+        XCTAssertEqual(toggles.windows.count, 3)
+        XCTAssertTrue(controller.isShown)
+    }
+
+    func testLeavingWhileEnteringFullScreenLeavesOnceItIsIn() throws {
+        let (controller, toggles) = quietController()
+        let screen = try XCTUnwrap(NSScreen.main)
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        let window = try XCTUnwrap(controller.window)
+        controller.close()
+        XCTAssertEqual(toggles.windows.count, 1, "a toggle mid-transition is lost, so it waits")
+        XCTAssertFalse(controller.isShown)
+        controller.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+        XCTAssertEqual(toggles.windows.count, 2)
+        controller.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        XCTAssertFalse(window.isVisible)
+    }
+
+    func testLeavingFullScreenBySystemRouteEndsThePresentation() throws {
+        let (controller, toggles) = quietController()
+        var hides = 0
+        controller.onHide = { hides += 1; controller.close() }
+        let screen = try XCTUnwrap(NSScreen.main)
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        let window = try XCTUnwrap(controller.window)
+        controller.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+        controller.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        XCTAssertEqual(hides, 1)
+        XCTAssertFalse(controller.isShown)
+        XCTAssertEqual(toggles.windows.count, 1, "it does not go back into full screen")
+    }
+
+    func testShowingAgainWhileLeavingGoesBackIntoFullScreen() throws {
+        let (controller, toggles) = quietController()
+        let screen = try XCTUnwrap(NSScreen.main)
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        let window = try XCTUnwrap(controller.window)
+        controller.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: window))
+        controller.close()
+        controller.show(on: screen, cover: true, separateSpaces: true)
+        XCTAssertTrue(controller.isShown)
+        XCTAssertEqual(toggles.windows.count, 2)
+        controller.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        XCTAssertEqual(toggles.windows.count, 3)
+        XCTAssertTrue(window.isVisible)
+        XCTAssertTrue(controller.isShown)
     }
 
     // MARK: Keys
 
     func testEscapeLeavesBothWindows() throws {
-        for cover in [true, false] {
-            let (controller, hides) = try controller(cover: cover)
+        for look in Self.looks {
+            let (controller, hides) = try controller(cover: look.cover, separateSpaces: look.separateSpaces)
             let window = try XCTUnwrap(controller.window)
             window.sendEvent(try key("\u{1b}", code: 53, in: window))
-            XCTAssertEqual(hides(), 1, "cover: \(cover)")
+            XCTAssertEqual(hides(), 1, "\(look)")
             // Shift-Esc or Option-Esc is not the exit.
             window.sendEvent(try key("\u{1b}", code: 53, modifiers: .option, in: window))
-            XCTAssertEqual(hides(), 1, "cover: \(cover)")
+            XCTAssertEqual(hides(), 1, "\(look)")
         }
     }
 
     func testCommandWAndCommandPeriodLeaveButCommandQIsLeftToTheApp() throws {
-        for cover in [true, false] {
-            let (controller, hides) = try controller(cover: cover)
+        for look in Self.looks {
+            let (controller, hides) = try controller(cover: look.cover, separateSpaces: look.separateSpaces)
             let window = try XCTUnwrap(controller.window)
             XCTAssertTrue(window.performKeyEquivalent(with: try key("w", code: 13, modifiers: .command, in: window)))
-            XCTAssertEqual(hides(), 1, "cover: \(cover)")
+            XCTAssertEqual(hides(), 1, "\(look)")
             XCTAssertTrue(window.performKeyEquivalent(with: try key(".", code: 47, modifiers: .command, in: window)))
-            XCTAssertEqual(hides(), 2, "cover: \(cover)")
+            XCTAssertEqual(hides(), 2, "\(look)")
             XCTAssertFalse(window.performKeyEquivalent(with: try key("q", code: 12, modifiers: .command, in: window)))
             XCTAssertFalse(window.performKeyEquivalent(with: try key("w", code: 13, modifiers: [.command, .shift], in: window)))
-            XCTAssertEqual(hides(), 2, "cover: \(cover)")
+            XCTAssertEqual(hides(), 2, "\(look)")
         }
     }
 
@@ -136,8 +264,7 @@ final class PresentExitTests: XCTestCase {
     // MARK: The model
 
     func testLeavingHidesOnlyTheMacAndTheNextPresentShowsItAgain() throws {
-        let window = PresentWindowController()
-        controllers.append(window)
+        let (window, _) = quietController()
         let backdrop = PresentBackdropStore(url: FileManager.default.temporaryDirectory
             .appendingPathComponent("PresentExitTests-\(UUID().uuidString)/\(PresentBackdropStore.fileName)"))
         let model = CompanionPresentModel(window: window, backdrop: backdrop)
@@ -184,12 +311,54 @@ final class PresentExitTests: XCTestCase {
         XCTAssertFalse(window.isShown)
     }
 
+    /// EP135: swiping to another Space (or another app taking the keyboard) only changes what the projector shows; the
+    /// presentation is not left, the iPad keeps presenting, and the window keeps getting every frame.
+    func testSwipingToAnotherSpaceDoesNotLeaveThePresentation() throws {
+        let (window, toggles) = quietController()
+        var hides = 0
+        let backdrop = PresentBackdropStore(url: FileManager.default.temporaryDirectory
+            .appendingPathComponent("PresentExitTests-\(UUID().uuidString)/\(PresentBackdropStore.fileName)"))
+        let model = CompanionPresentModel(window: window, backdrop: backdrop)
+        let modelHide = try XCTUnwrap(window.onHide)
+        window.onHide = { hides += 1; modelHide() }
+        let iPad = PresentingIPad(host: model.host)
+        iPad.present()
+        drain()
+        XCTAssertTrue(model.isShowing)
+        let shown = try XCTUnwrap(window.window)
+        if window.style == .fullScreen {
+            window.windowDidEnterFullScreen(Notification(name: NSWindow.didEnterFullScreenNotification, object: shown))
+        }
+        let togglesBefore = toggles.windows.count
+
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: NSWorkspace.shared)
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        shown.resignKey()
+        iPad.heartbeat()
+        drain()
+
+        XCTAssertEqual(hides, 0)
+        XCTAssertFalse(model.hidden)
+        XCTAssertTrue(model.isShowing)
+        XCTAssertTrue(window.isShown)
+        XCTAssertTrue(window.window === shown)
+        XCTAssertEqual(toggles.windows.count, togglesBefore, "the next frame does not pull the projector back")
+        XCTAssertTrue(iPad.isOpen)
+        iPad.stop()
+        drain()
+    }
+
     /// Runs the main queue until the model has drained what the host sent.
     private func drain() {
         let done = expectation(description: "drained")
         DispatchQueue.main.async { DispatchQueue.main.async { done.fulfill() } }
         wait(for: [done], timeout: 2)
     }
+}
+
+/// The windows a controller put into or out of full screen.
+private final class FullScreenToggles {
+    var windows: [NSWindow] = []
 }
 
 /// A synthetic presenting iPad: the PRESENT frames a paired iPad sends, straight into the host.
