@@ -95,7 +95,7 @@ struct LibraryView: View {
         .confirmationDialog("Forget this Mac?", isPresented: $confirmForget, titleVisibility: .visible) {
             Button("Forget Mac", role: .destructive) { pairing.forget() }
         } message: {
-            Text("The pairing secret is deleted from this iPad. Also choose Forget iPad in EmberPad Companion, then pair again with a new code.")
+            Text("The pairing secret is deleted from this iPad. Also choose Forget iPad in Ember Companion, then pair again with a new code.")
         }
         .task {
             await library.refresh()

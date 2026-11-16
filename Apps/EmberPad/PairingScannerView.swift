@@ -14,7 +14,7 @@ struct PairingScannerSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
-                Text("On your Mac, open EmberPad Companion and choose **Pair iPad…**, then point this camera at the code.")
+                Text("On your Mac, open Ember Companion and choose **Pair iPad…**, then point this camera at the code.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Theme.text2)
                 scanner

@@ -142,7 +142,7 @@
 			"isa" = "PBXFileReference";
 			"explicitFileType" = "wrapper.application";
 			"includeInIndex" = "0";
-			"path" = "EmberPad Companion.app";
+			"path" = "Ember Companion.app";
 			"sourceTree" = "BUILT_PRODUCTS_DIR";
 		};
 		"2BB849F50699AF6C557735C3" = {
@@ -179,7 +179,7 @@
 		"C5BB85979BEC08B7DDB7545F" = {
 			"isa" = "XCBuildConfiguration";
 			"buildSettings" = {
-				"PRODUCT_NAME" = "EmberPad Companion";
+				"PRODUCT_NAME" = "Ember Companion";
 				"PRODUCT_MODULE_NAME" = "EmberPadCompanion";
 				"PRODUCT_BUNDLE_IDENTIFIER" = "$(EMBERPAD_BUNDLE_ID).companion";
 				"INFOPLIST_FILE" = "Apps/Companion/Info.plist";
@@ -199,7 +199,7 @@
 		"C3DC2436292009F000012689" = {
 			"isa" = "XCBuildConfiguration";
 			"buildSettings" = {
-				"PRODUCT_NAME" = "EmberPad Companion";
+				"PRODUCT_NAME" = "Ember Companion";
 				"PRODUCT_MODULE_NAME" = "EmberPadCompanion";
 				"PRODUCT_BUNDLE_IDENTIFIER" = "$(EMBERPAD_BUNDLE_ID).companion";
 				"INFOPLIST_FILE" = "Apps/Companion/Info.plist";
@@ -734,7 +734,7 @@
 				"SUPPORTED_PLATFORMS" = "macosx";
 				"ONLY_ACTIVE_ARCH" = "YES";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
-				"TEST_HOST" = "$(BUILT_PRODUCTS_DIR)/EmberPad Companion.app/Contents/MacOS/EmberPad Companion";
+				"TEST_HOST" = "$(BUILT_PRODUCTS_DIR)/Ember Companion.app/Contents/MacOS/Ember Companion";
 			};
 			"name" = "Debug";
 			"baseConfigurationReference" = "88CEAA489E5229503EE15E09";
@@ -755,7 +755,7 @@
 				"SDKROOT" = "macosx";
 				"SUPPORTED_PLATFORMS" = "macosx";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
-				"TEST_HOST" = "$(BUILT_PRODUCTS_DIR)/EmberPad Companion.app/Contents/MacOS/EmberPad Companion";
+				"TEST_HOST" = "$(BUILT_PRODUCTS_DIR)/Ember Companion.app/Contents/MacOS/Ember Companion";
 			};
 			"name" = "Release";
 			"baseConfigurationReference" = "88CEAA489E5229503EE15E09";

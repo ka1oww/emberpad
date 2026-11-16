@@ -89,7 +89,7 @@ public protocol SyncPowerGuard: AnyObject, Sendable {
 /// progress. The display may still sleep; the Mac does not, so a transfer is not cut off by idle sleep.
 public final class SystemSleepAssertion: SyncPowerGuard, @unchecked Sendable {
     /// The name shown in Activity Monitor and `pmset -g assertions`.
-    public static let defaultName = "EmberPad Companion is sending the library to the iPad"
+    public static let defaultName = "Ember Companion is sending the library to the iPad"
 
     private let lock = NSLock()
     private let name: String

@@ -408,7 +408,7 @@ final class CompanionLessonModel: ObservableObject {
             }
             guard authorized else {
                 return setStatus(PresentLessonStatus(state: .failed, message:
-                    "Microphone access is off for EmberPad Companion. Turn it on in System Settings, Privacy & Security, Microphone."))
+                    "Microphone access is off for Ember Companion. Turn it on in System Settings, Privacy & Security, Microphone."))
             }
             do {
                 try start(candidate, fallback: fallback, origin: origin)

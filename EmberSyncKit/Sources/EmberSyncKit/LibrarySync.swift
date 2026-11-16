@@ -110,10 +110,10 @@ public enum LibrarySyncError: Error, Equatable, Sendable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .closedBeforeManifest(.unsupportedVersion): "The Mac runs a different version of EmberPad Companion."
+        case .closedBeforeManifest(.unsupportedVersion): "The Mac runs a different version of Ember Companion."
         case .closedBeforeManifest: "The connection to the Mac closed before the library list arrived."
-        case .manifestUnavailable: "The Mac has no iPad library prepared yet. Prepare it in EmberPad Companion."
-        case .unsupportedManifest: "The Mac's library list is from a different version of EmberPad Companion."
+        case .manifestUnavailable: "The Mac has no iPad library prepared yet. Prepare it in Ember Companion."
+        case .unsupportedManifest: "The Mac's library list is from a different version of Ember Companion."
         case .session: "The sync could not continue. Try Sync now again."
         }
     }

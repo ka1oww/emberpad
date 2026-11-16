@@ -199,7 +199,7 @@ def write_glyph_svg() -> None:
     pts = " ".join(f"{x:.3f},{y:.3f}" for x, y in outline)
     GLYPH_SVG.write_text(
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {GLYPH_PT} {GLYPH_PT}">\n'
-        "  <!-- EmberPad Companion menu-bar template glyph: the Ember star silhouette with its pen-nib vent and slit cut out. -->\n"
+        "  <!-- Ember Companion menu-bar template glyph: the Ember star silhouette with its pen-nib vent and slit cut out. -->\n"
         "  <!-- Derived from Apps/EmberPad/Brand.Sources/AppIcon-small.source.svg; written by generate-brand.py, do not hand-edit. -->\n"
         '  <defs><mask id="nib"><rect width="18" height="18" fill="#FFFFFF"/>'
         f'<rect x="{rx:.3f}" y="{ry:.3f}" width="{rw:.3f}" height="{rh:.3f}" fill="#000000"/>'

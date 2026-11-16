@@ -100,7 +100,7 @@ struct CompanionLibraryContent: View {
                 .frame(width: 34, height: 34)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
-                Text("EmberPad Companion").font(.system(size: 14, weight: .semibold))
+                Text("Ember Companion").font(.system(size: 14, weight: .semibold))
                 HStack(spacing: 5) {
                     if syncLine.tone != .off {
                         Circle().fill(Self.toneColor(syncLine.tone)).frame(width: 7, height: 7)
@@ -331,7 +331,7 @@ struct CompanionLibraryContent: View {
             case .needsApproval:
                 Button("Allow in Login Items…", action: onOpenLoginItems).buttonStyle(.link).font(.system(size: 11))
             case .unavailable:
-                Text("Move EmberPad Companion to Applications to open it at login.")
+                Text("Move Ember Companion to Applications to open it at login.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             case .on, .off:
                 EmptyView()

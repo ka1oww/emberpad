@@ -184,7 +184,7 @@ final class SyncClientTests: XCTestCase {
 
     func testTheAppDeclaresLocalNetworkUseAndTheSyncService() {
         let usage = Bundle.main.object(forInfoDictionaryKey: "NSLocalNetworkUsageDescription") as? String
-        XCTAssertTrue(usage?.contains("EmberPad Companion") == true)
+        XCTAssertTrue(usage?.contains("Ember Companion") == true)
         let services = Bundle.main.object(forInfoDictionaryKey: "NSBonjourServices") as? [String] ?? []
         XCTAssertTrue(services.contains(PairingTLS.serviceType))
         XCTAssertTrue(services.contains(PeerHello.serviceType))
@@ -289,7 +289,7 @@ final class SyncClientTests: XCTestCase {
     /// code, because the usual cause is that the Mac forgot or re-paired this iPad.
     func testErrorCopyIsPlainShortCopy() {
         XCTAssertEqual(SyncClient.notice(for: LibrarySyncConnectError.macNotFound),
-                       "Your Mac was not found nearby. Open EmberPad Companion on the Mac, then try Sync now.")
+                       "Your Mac was not found nearby. Open Ember Companion on the Mac, then try Sync now.")
         XCTAssertEqual(SyncClient.notice(for: NetworkWireTransportError.connectFailed("reset")),
                        "The Mac refused this pairing. If the Companion forgot this iPad, pair again with a new code.")
         XCTAssertEqual(SyncClient.notice(for: NetworkWireTransportError.connectTimedOut),

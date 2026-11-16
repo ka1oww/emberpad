@@ -143,7 +143,7 @@ struct EmberPadCompanion: App {
             CompanionPeerHelloSection(model: peerHello).frame(width: 340)
 #endif
             Divider()
-            Button("Quit EmberPad Companion") { NSApplication.shared.terminate(nil) }
+            Button("Quit Ember Companion") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
                 .padding([.horizontal, .bottom], 14)
         } label: {

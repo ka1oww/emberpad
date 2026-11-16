@@ -4,7 +4,7 @@ import PencilKit
 import SwiftUI
 import EmberSyncKit
 
-/// Present on Mac (EP93): streams what the student view shows to the paired EmberPad Companion, over the same
+/// Present on Mac (EP93): streams what the student view shows to the paired Ember Companion, over the same
 /// TLS-PSK sync link as library sync, peer-to-peer Wi-Fi included, so it needs no Wi-Fi network and no cable. Nothing
 /// is sent, and no connection is made, until the teacher turns it on.
 ///
@@ -26,7 +26,7 @@ final class PresentController: ObservableObject {
         case connected
         /// The link dropped; it is coming back by itself.
         case reconnecting
-        /// The Mac's EmberPad Companion is too old to present.
+        /// The Mac's Ember Companion is too old to present.
         case unsupported
         /// This iPad has not been paired with a Mac.
         case notPaired
@@ -37,7 +37,7 @@ final class PresentController: ObservableObject {
             case .connecting: "Connecting to your Mac…"
             case .connected: "Presenting on your Mac"
             case .reconnecting: "Reconnecting to your Mac…"
-            case .unsupported: "Update EmberPad Companion on your Mac to present"
+            case .unsupported: "Update Ember Companion on your Mac to present"
             case .notPaired: "Pair this iPad with your Mac first"
             }
         }
@@ -224,7 +224,7 @@ final class PresentController: ObservableObject {
         let now = CACurrentMediaTime()
         if pendingLesson != nil, now - pendingSince > Self.commandTimeout {
             pendingLesson = nil
-            lessonProblem = "Your Mac did not answer. Check EmberPad Companion on the Mac."
+            lessonProblem = "Your Mac did not answer. Check Ember Companion on the Mac."
         }
         sender.tick(now: now) { input() }
     }
@@ -490,7 +490,7 @@ struct PresentLessonRows: View {
         if present.isOn, present.light == .connected || present.lesson != nil {
             Section {
                 if !present.macRecords {
-                    Text("Update EmberPad Companion on your Mac to record lessons")
+                    Text("Update Ember Companion on your Mac to record lessons")
                 } else if present.isRecordingLesson {
                     Button(role: .destructive) { present.endLesson() } label: {
                         Label("End lesson", systemImage: "stop.circle")
@@ -567,7 +567,7 @@ struct PresentLessonChrome: ViewModifier {
                 Button("Stop presenting, keep recording") { present.stop() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("If you keep recording, end the lesson from EmberPad Companion on the Mac.")
+                Text("If you keep recording, end the lesson from Ember Companion on the Mac.")
             }
             .alert("Lesson recording", isPresented: Binding(get: { present.lessonProblem != nil }, set: { if !$0 { present.lessonProblem = nil } })) {
                 Button("OK", role: .cancel) {}
