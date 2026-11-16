@@ -471,7 +471,8 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(lesson.fileAttempts, 2, "it keeps trying")
         XCTAssertLessThanOrEqual(lesson.fileAttempts, 4, "it does not spin")
         XCTAssertTrue(lesson.status.warning?.hasPrefix("Recording stopped") == true)
-        XCTAssertEqual(try videoFiles(in: folder).filter { $0.size == 0 }.map(\.name), [])
+        // A retry holds its refused file open for an instant, so wait for the gap between tries instead of sampling once.
+        try await waitUntil { (try? videoFiles(in: folder))?.contains { $0.size == 0 } == false }
 
         let end = PresentLessonCommand(action: .end)
         iPad.send(command: end)
