@@ -29,6 +29,22 @@ final class StressLayoutTests: XCTestCase {
         XCTAssertEqual(StressGate.fit(ys, above: 900), ys)
     }
 
+    /// EP132: erasing and writing straight on writes fresh strokes 45 pt under each of its rows at 190, 360 and 530.
+    /// On the iPad Air in landscape the lowest row closed up to the floor, so its fresh strokes went below the screen.
+    /// They are now on it, each row stays clear of the strokes under the row above, and a page the screen shows whole
+    /// keeps the rows as they were.
+    func testInkWrittenUnderTheLowestRowStaysOnALandscapeScreen() {
+        let floor: CGFloat = 458 - StressGate.rowMargin
+        let ys: [CGFloat] = [190, 360, 530]
+        let fitted = StressGate.fit(ys, below: 45, above: floor)
+        XCTAssertEqual(fitted.first, ys.first, "the first row stays put")
+        XCTAssertLessThanOrEqual((fitted.max() ?? .infinity) + 45, floor,
+                                 "the ink under the lowest row is on the screen: \(fitted)")
+        let gaps = zip(fitted.dropFirst(), fitted).map { $0 - $1 - 45 }
+        XCTAssertGreaterThanOrEqual(gaps.min() ?? 0, 30, "each row stays clear of the ink under the row above: \(fitted)")
+        XCTAssertEqual(StressGate.fit(ys, below: 45, above: 900), ys)
+    }
+
     /// The landscape-shaped window a portrait Simulator lays the page out in: the screen's width, and the height the
     /// screen turned on its side has at that width; a screen already wide is used as it is.
     func testLandscapeWindowHasTheScreenTurnedOnItsSide() {

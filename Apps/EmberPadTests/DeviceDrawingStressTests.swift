@@ -1072,17 +1072,20 @@ final class DeviceDrawingStressTests: XCTestCase {
         var seed = 0
         // Fresh strokes 45 pt below the row: clear of the erased ink and the eraser's path, and never crossing other
         // ink (a scribble to erase).
+        let below: CGFloat = 45
         func fresh(_ xs: [CGFloat], y: CGFloat, _ label: String) {
             scenario.tools.select(.pen)
             for (k, x) in xs.enumerated() {
                 seed += 1
-                scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: x, y: y + 45), seed: seed), speed: 420,
+                scenario.pen(StressInk.samples(StressInk.squiggle(at: CGPoint(x: x, y: y + below), seed: seed), speed: 420,
                                                seed: UInt64(500 + seed)), "\(label) #\(k + 1)")
                 kept += 1
                 StressPage.pump([0.012, 0.03, 0.06][k % 3])
             }
         }
-        for (cycle, y) in scenario.fit([190, 360, 530]).enumerated() {
+        // The rows close up so the fresh strokes under the lowest are on the screen too (EP132: on the iPad in
+        // landscape they were written below it, so read only on the frame a scroll showed them, and never seen to land).
+        for (cycle, y) in scenario.fit([190, 360, 530], below: below).enumerated() {
             scenario.tools.select(.pen)
             var row: [Int] = []
             for n in 0..<6 {
@@ -1227,10 +1230,11 @@ final class StressScenario {
         return shown.isNull ? .null : canvas.pageSpace.convert(shown, from: window).intersection(canvas.pageSpace.bounds)
     }
 
-    /// The heights `ys` of a scenario's rows of writing, kept on the part of page 0 the screen shows (`StressGate.fit`).
-    func fit(_ ys: [CGFloat]) -> [CGFloat] {
+    /// The heights `ys` of a scenario's rows of writing, kept on the part of page 0 the screen shows (`StressGate.fit`),
+    /// with the ink written `below` each row.
+    func fit(_ ys: [CGFloat], below: CGFloat = 0) -> [CGFloat] {
         let shown = shownPart()
-        return shown.isNull ? ys : StressGate.fit(ys, above: shown.maxY - StressGate.rowMargin)
+        return shown.isNull ? ys : StressGate.fit(ys, below: below, above: shown.maxY - StressGate.rowMargin)
     }
 
     /// The centre of what the screen shows of `index`, in page points.
@@ -1582,12 +1586,13 @@ final class StressScenario {
               blips.isEmpty ? "none" : describe(blips) + " (each " + String(format: "%.0f ms", StressBounds.blip * 1000)
                   + " or less: confirm on a recording)", advisory: true)
         // Pen to ink.
-        let latencies = marks.filter(\.timesInk).flatMap { mark in
-            mark.points.indices.compactMap { i -> Double? in
+        let timed = marks.filter(\.timesInk).flatMap { mark in
+            mark.points.indices.compactMap { i -> (wait: Double, label: String, at: CFTimeInterval)? in
                 guard let drawn = mark.drawnAt[i], let seen = mark.firstSeen[i] else { return nil }
-                return max(0, seen - drawn)
+                return (max(0, seen - drawn), mark.label, drawn - sampler.scenarioStart)
             }
-        }.sorted()
+        }
+        let latencies = timed.map(\.wait).sorted()
         let missed = marks.filter(\.timesInk).filter { if case .visible = $0.expect { return true } else { return false } }
             .reduce(0) { $0 + $1.firstSeen.filter { $0 == nil }.count }
         if !latencies.isEmpty {
@@ -1597,8 +1602,18 @@ final class StressScenario {
             metrics["penToInkP95Ms"] = p95 * 1000
             metrics["penToInkMaxMs"] = worst * 1000
             metrics["penToInkSamples"] = Double(latencies.count)
+            // Points first read only after a wait off the screen, named so their times are not taken for the pen's.
+            let waited = marks.filter(\.timesInk).reduce(0) { sum, mark in
+                sum + mark.dueOffScreen.filter { mark.drawnAt[$0] != nil && mark.firstSeen[$0] != nil }.count
+            }
+            let offScreen = waited > 0 ? "; \(waited) of them off the screen once written, so read only when it showed them" : ""
+            // The slowest points over the bound, with their stroke and when the Pencil passed them (EP132).
+            let slow = timed.filter { $0.wait > StressBounds.penToInkMax }.sorted { $0.wait > $1.wait }.prefix(3)
+                .map { "\($0.label) at " + String(format: "%.2f s, %.0f ms", $0.at, $0.wait * 1000) }
+            let slowest = slow.isEmpty ? "" : "; slowest: " + slow.joined(separator: "; ")
             check("pen to ink is quick", p95 <= StressBounds.penToInkP95 && worst <= StressBounds.penToInkMax,
-                  String(format: "p50 %.0f ms, p95 %.0f ms, max %.0f ms over %d points", p50 * 1000, p95 * 1000, worst * 1000, latencies.count))
+                  String(format: "p50 %.0f ms, p95 %.0f ms, max %.0f ms over %d points", p50 * 1000, p95 * 1000, worst * 1000, latencies.count)
+                      + offScreen + slowest)
         }
         if missed > 0 { notes.append("\(missed) pen points were never read as ink (off screen, or never drawn)") }
         // Landing.

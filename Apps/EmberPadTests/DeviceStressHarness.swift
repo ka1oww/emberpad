@@ -48,8 +48,11 @@ enum StressGate {
     /// The heights `ys` of a scenario's rows of writing, laid out for a page the screen shows whole (an iPad in
     /// portrait). Where the lowest would sit below `floor` (an iPad on its stand in landscape shows only the page's top
     /// half), the rows below the first close up, in proportion, so the lowest sits at `floor`: ink written where the
-    /// screen does not show it cannot be seen to land (EP122). Where they fit, they are kept as they are.
-    static func fit(_ ys: [CGFloat], above floor: CGFloat) -> [CGFloat] {
+    /// screen does not show it cannot be seen to land (EP122). Where they fit, they are kept as they are. `below` is how
+    /// far under each row the scenario writes more ink (EP132: the strokes written straight after an erase); the rows
+    /// close up until that ink, too, sits no lower than `floor`.
+    static func fit(_ ys: [CGFloat], below: CGFloat = 0, above floor: CGFloat) -> [CGFloat] {
+        let floor = floor - below
         guard let top = ys.min(), let bottom = ys.max(), bottom > top, bottom > floor else { return ys }
         let scale = max(0, floor - top) / (bottom - top)
         return ys.map { top + ($0 - top) * scale }
@@ -678,6 +681,9 @@ final class StressFrameSampler {
         /// Whether any point of it was on the screen on some frame once due, so it could be read at all. Ink written
         /// where the screen does not show it is never judged (EP122).
         var everOnScreen = false
+        /// The points the screen did not show on some frame after the Pencil passed them, before any frame read them as
+        /// ink: their pen-to-ink times include that wait (EP132).
+        var dueOffScreen: Set<Int> = []
         var cameBackAt: CFTimeInterval?
         var run: (start: CFTimeInterval, frames: Int, worst: Double, model: String, evidence: String?, screen: [Double]?)?
 
@@ -943,7 +949,10 @@ final class StressFrameSampler {
         var due = 0
         for index in mark.points.indices where lifted || mark.drawnAt[index] != nil {
             due += 1
-            guard tiles.visible.contains(mark.points[index]) else { continue }
+            guard tiles.visible.contains(mark.points[index]) else {
+                if mark.firstSeen[index] == nil { mark.dueOffScreen.insert(index) }
+                continue
+            }
             var hit = isInked(mark.points[index], tiles: tiles, sync: false, pageOnly: false)
             // A point of landed ink read as bare is read again once the GPU has finished writing to its tile, so a
             // tile caught mid-draw is not taken for ink gone. (Ink not yet seen, or meant to go, is judged on the fast
