@@ -156,7 +156,7 @@ struct PairingCodeView: View {
             Button("Done", action: onDone)
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .tint(CompanionLibraryContent.emberRed)
+                .tint(CompanionSettingsContent.emberRed)
         }
         .padding(20)
         .frame(width: 360)

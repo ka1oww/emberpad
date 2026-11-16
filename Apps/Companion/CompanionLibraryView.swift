@@ -29,11 +29,12 @@ struct CompanionAutoPrepareStatus: Equatable {
     }
 }
 
-/// The menu-bar window content from design 5.7: header, the Drive EMBER source folder,
-/// subjects with document counts, the list of PDFs not read this time, the Prepare button, the iPad pairing and sync
-/// section and the renewal line. The header's status line is the sync server's (EP-23). Values in, actions out, so the window can render a synthetic snapshot
-/// (screenshots) as well as the live model without touching the real library.
-struct CompanionLibraryContent: View {
+/// The Settings window's content (EP139; the menu-bar window's setup sections from design 5.7 before that): the Drive
+/// EMBER source folder and the Prepare button, subjects with document counts, the list of PDFs not read this time, the
+/// iPad pairing and sync section with the ink backup folder and Open at login, and the renewal line. Values in, actions
+/// out, so the window can render a synthetic snapshot (screenshots, tests) as well as the live models without touching
+/// the real library.
+struct CompanionSettingsContent: View {
     static let emberRed = Color(red: 178 / 255, green: 58 / 255, blue: 46 / 255)
 
     /// Nil when no folder was chosen and the Drive EMBER folder was not found.
@@ -50,7 +51,6 @@ struct CompanionLibraryContent: View {
     var pairingMessage: String?
     var onPair: () -> Void = {}
     var onForgetPairing: () -> Void = {}
-    var syncLine = SyncStatusLine(status: nil, servingDocuments: nil)
     var lastSyncedAt: Date?
     /// EP-33: where the iPad's ink backup is kept, when it last arrived, and why a chosen folder was refused.
     var backupFolder: URL?
@@ -69,52 +69,39 @@ struct CompanionLibraryContent: View {
         return EmberLibrarySource.displayOrder(counts.keys).map { ($0, counts[$0, default: 0]) }
     }
 
-    private static let timeFormatter: DateFormatter = {
+    static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         return formatter
     }()
 
+    /// The window's sections, top to bottom, with a divider between each.
+    enum Section: String, CaseIterable {
+        case emberFolder, subjects, notRead, iPadPairing, inkBackup, openAtLogin, renewal
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            headerSection
-            Divider()
-            sourceSection
-            Divider()
-            subjectsSection
-            Divider()
-            notFoundSection
-            Divider()
-            iPadSection
-            Divider()
-            renewalSection
-        }
-    }
-
-    // MARK: 1. Header
-
-    private var headerSection: some View {
-        HStack(spacing: 10) {
-            Image("CompanionBadge")
-                .resizable()
-                .frame(width: 34, height: 34)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Ember Companion").font(.system(size: 14, weight: .semibold))
-                HStack(spacing: 5) {
-                    if syncLine.tone != .off {
-                        Circle().fill(Self.toneColor(syncLine.tone)).frame(width: 7, height: 7)
-                    }
-                    Text(syncLine.text).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
-                }
-                .opacity(0.65)
-                .accessibilityElement(children: .combine)
+            ForEach(Section.allCases, id: \.self) { section in
+                if section != Section.allCases.first { Divider() }
+                view(for: section)
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
     }
 
-    // MARK: 2. Source folder
+    @ViewBuilder private func view(for section: Section) -> some View {
+        switch section {
+        case .emberFolder: sourceSection
+        case .subjects: subjectsSection
+        case .notRead: notFoundSection
+        case .iPadPairing: iPadSection
+        case .inkBackup: backupRow
+        case .openAtLogin: openAtLoginRow
+        case .renewal: renewalSection
+        }
+    }
+
+    // MARK: 1. Source folder
 
     private var sourceSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -163,7 +150,7 @@ struct CompanionLibraryContent: View {
         .accessibilityElement(children: .combine)
     }
 
-    // MARK: 3. Subjects with counts
+    // MARK: 2. Subjects with counts
 
     private var subjectsSection: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -238,16 +225,7 @@ struct CompanionLibraryContent: View {
         return "\(read) documents read · \(skipped) build files skipped · \(notRead) not read"
     }
 
-    static func toneColor(_ tone: SyncStatusLine.Tone) -> Color {
-        switch tone {
-        case .off: .secondary
-        case .ready: .green
-        case .active: emberRed
-        case .problem: .orange
-        }
-    }
-
-    // MARK: 4. iPad (pairing, the sync server and open at login)
+    // MARK: 3. iPad (pairing and the sync server), the ink backup folder and open at login
 
     private static let pairedFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -283,8 +261,6 @@ struct CompanionLibraryContent: View {
             if let pairingMessage {
                 Text(pairingMessage).font(.system(size: 12)).foregroundStyle(.secondary)
             }
-            backupRow
-            openAtLoginRow
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
     }
@@ -317,7 +293,7 @@ struct CompanionLibraryContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.top, 2)
+        .padding(.horizontal, 14).padding(.vertical, 8)
     }
 
     /// Off until the user turns it on; the Companion never registers itself.
@@ -340,10 +316,10 @@ struct CompanionLibraryContent: View {
                 Text(loginItemMessage).font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
-        .padding(.top, 2)
+        .padding(.horizontal, 14).padding(.vertical, 8)
     }
 
-    // MARK: 5. Renewal (static placeholder; nothing is loaded, installed or scheduled)
+    // MARK: 4. Renewal (static placeholder; nothing is loaded, installed or scheduled)
 
     private var renewalSection: some View {
         VStack(alignment: .leading, spacing: 6) {
