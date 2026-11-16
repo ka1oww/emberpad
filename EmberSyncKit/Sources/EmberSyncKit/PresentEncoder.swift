@@ -35,8 +35,44 @@ public struct PresentInkInput: Sendable {
     }
 }
 
+/// One stroke in progress, as the encoder needs it (EP142). The encoder remembers how many of a stroke's samples the
+/// Mac holds and asks `points` only for the ones after them, so a frame of a long stroke costs no more than a frame
+/// of a short one: nothing here is compared or copied in proportion to the stroke's length.
+public struct PresentLiveInput: Sendable {
+    /// Names the stroke for as long as it is drawn. The iPad never gives two strokes the same id.
+    public var id: UInt64
+    public var pageIndex: Int
+    /// sRGB red, green, blue and alpha, each 0 to 1.
+    public var rgba: [CGFloat]
+    public var width: CGFloat
+    /// How many Pencil samples the stroke has. Samples are only ever added: the first `count` never change.
+    public var count: Int
+    /// The samples from index `from` to the last, in the page's ink space.
+    public var points: @Sendable (_ from: Int) -> [CGPoint]
+    /// Predicted touches beyond the last sample. Each frame's replace the last frame's.
+    public var predicted: [CGPoint]
+
+    public init(id: UInt64, pageIndex: Int, rgba: [CGFloat], width: CGFloat, count: Int,
+                points: @escaping @Sendable (_ from: Int) -> [CGPoint], predicted: [CGPoint] = []) {
+        self.id = id
+        self.pageIndex = pageIndex
+        self.rgba = rgba
+        self.width = width
+        self.count = count
+        self.points = points
+        self.predicted = predicted
+    }
+
+    /// A stroke whose samples are all in hand.
+    public init(id: UInt64, pageIndex: Int, rgba: [CGFloat], width: CGFloat, points: [CGPoint], predicted: [CGPoint] = []) {
+        self.init(id: id, pageIndex: pageIndex, rgba: rgba, width: width, count: points.count,
+                  points: { from in Array(points[min(max(from, 0), points.count)...]) }, predicted: predicted)
+    }
+}
+
 /// What is shown now, as the iPad's present loop reads it once per display frame.
 public struct PresentInput: Sendable {
+    /// The shown frame. Its strokes in progress are not read: they come in `live`.
     public var view: PresentedView
     /// The open document's session; ink revisions count within it.
     public var session: UUID?
@@ -44,6 +80,8 @@ public struct PresentInput: Sendable {
     public var pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)]
     /// Ink of each placed page, keyed by page index.
     public var ink: [Int: PresentInkInput]
+    /// The strokes in progress on the placed pages, in the order they began.
+    public var live: [PresentLiveInput]
     /// Version 5 (EP129): the open document, for the lesson's record. Leave nil on an older link.
     public var document: PresentLessonDocument?
     /// Version 5 (EP129): the teacher's Start or End lesson not yet handled by the Mac. Sent once per link.
@@ -51,12 +89,13 @@ public struct PresentInput: Sendable {
 
     public init(view: PresentedView, session: UUID? = nil,
                 pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)] = [:],
-                ink: [Int: PresentInkInput] = [:], document: PresentLessonDocument? = nil,
+                ink: [Int: PresentInkInput] = [:], live: [PresentLiveInput] = [], document: PresentLessonDocument? = nil,
                 lessonCommand: PresentLessonCommand? = nil) {
         self.view = view
         self.session = session
         self.pages = pages
         self.ink = ink
+        self.live = live
         self.document = document
         self.lessonCommand = lessonCommand
     }
@@ -96,7 +135,7 @@ public struct PresentEncoder: Sendable {
     private var needsReset = true
     private var sentFrame: PresentFrame?
     private var sentInk: [Int: (revision: UInt64, strokes: [PresentStrokeID])] = [:]
-    private var sentLive: [(id: UInt32, stroke: PresentedView.LiveStroke)] = []
+    private var sentLive: [SentLive] = []
     private var nextLiveID: UInt32 = 1
     private var sentLaser: PresentedView.Laser?
     private var sentTrail: [PresentedView.TrailPiece] = []
@@ -184,7 +223,7 @@ public struct PresentEncoder: Sendable {
 
         // Live strokes, the laser and its trail.
         let page: PresentedView.Page? = if case .page(let page) = input.view.screen { page } else { nil }
-        out.update.live = liveChanges(page?.liveStrokes ?? [])
+        out.update.live = liveChanges(page == nil ? [] : input.live)
         if page?.laser != sentLaser {
             out.update.laser = PresentLaserChange(dot: page?.laser)
             sentLaser = page?.laser
@@ -220,35 +259,54 @@ public struct PresentEncoder: Sendable {
         return page.pages.compactMap { input.pages[$0.pageIndex]?.ref }
     }
 
-    /// Matches each stroke now in progress to one sent before (same page and style, same first point, in order) and
-    /// sends only the points after what both share; strokes that left are ended.
-    private mutating func liveChanges(_ strokes: [PresentedView.LiveStroke]) -> [PresentLiveChange] {
+    /// A stroke in progress as the Mac holds it: its id on the link, and how much of it was sent.
+    private struct SentLive: Sendable {
+        var id: UInt32
+        var source: UInt64
+        var pageIndex: Int
+        var rgba: [CGFloat]
+        var width: CGFloat
+        /// The stroke's samples the Mac holds; any points it holds after them are `predicted`.
+        var count: Int
+        var predicted: [CGPoint]
+
+        func continues(as stroke: PresentLiveInput) -> Bool {
+            source == stroke.id && pageIndex == stroke.pageIndex && rgba == stroke.rgba && width == stroke.width
+                && stroke.count >= count
+        }
+    }
+
+    /// Matches each stroke now in progress to the one sent before under its id and sends only its samples the Mac
+    /// lacks, with this frame's predicted points in place of the last frame's; strokes that left are ended. Only the
+    /// new samples are read (EP142), so the work does not grow with the stroke. A predicted point that came true (the
+    /// same point is now a sample, or is predicted again) stays on the Mac and is not sent twice.
+    private mutating func liveChanges(_ strokes: [PresentLiveInput]) -> [PresentLiveChange] {
         var changes: [PresentLiveChange] = []
         var remaining = sentLive
-        var next: [(id: UInt32, stroke: PresentedView.LiveStroke)] = []
+        var next: [SentLive] = []
         for stroke in strokes {
-            if let index = remaining.firstIndex(where: { Self.sameStroke($0.stroke, stroke) }) {
-                let old = remaining.remove(at: index)
-                if old.stroke.points != stroke.points {
-                    let keep = zip(old.stroke.points, stroke.points).prefix { $0 == $1 }.count
-                    changes.append(.extend(id: old.id, keep: keep, points: PresentPoints(Array(stroke.points[keep...]))))
+            if let index = remaining.firstIndex(where: { $0.continues(as: stroke) }) {
+                var sent = remaining.remove(at: index)
+                // What now follows the samples the Mac holds, against the predicted points it holds after them.
+                let ahead = (stroke.count > sent.count ? stroke.points(sent.count) : []) + stroke.predicted
+                let kept = zip(sent.predicted, ahead).prefix { $0 == $1 }.count
+                if kept < sent.predicted.count || kept < ahead.count {
+                    changes.append(.extend(id: sent.id, keep: sent.count + kept, points: PresentPoints(Array(ahead[kept...]))))
                 }
-                next.append((old.id, stroke))
+                sent.count = stroke.count
+                sent.predicted = stroke.predicted
+                next.append(sent)
             } else {
                 let id = nextLiveID
                 nextLiveID &+= 1
                 changes.append(.begin(id: id, pageIndex: stroke.pageIndex, rgba: stroke.rgba, width: stroke.width,
-                                      points: PresentPoints(stroke.points)))
-                next.append((id, stroke))
+                                      points: PresentPoints(stroke.points(0) + stroke.predicted)))
+                next.append(SentLive(id: id, source: stroke.id, pageIndex: stroke.pageIndex, rgba: stroke.rgba,
+                                     width: stroke.width, count: stroke.count, predicted: stroke.predicted))
             }
         }
         changes += remaining.map { .end(id: $0.id) }
         sentLive = next
         return changes
-    }
-
-    private static func sameStroke(_ old: PresentedView.LiveStroke, _ new: PresentedView.LiveStroke) -> Bool {
-        old.pageIndex == new.pageIndex && old.rgba == new.rgba && old.width == new.width
-            && old.points.first == new.points.first
     }
 }

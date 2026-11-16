@@ -236,14 +236,15 @@ struct PresentTests {
         scene.linkOpened()
         encoder.resnapshot(heldAssets: [])
         let points = (0..<10).map { CGPoint(x: CGFloat($0) * 10, y: 100) }
-        #expect(scene.apply(try next(&encoder, worksheet.input(page: 0, live: [stroke(Array(points[0..<3]))]), now: 0)) == .applied)
+        #expect(scene.apply(try next(&encoder, worksheet.input(page: 0, live: [liveStroke(Array(points[0..<3]))]), now: 0)) == .applied)
         // Three more real points and one predicted one: only those four travel.
         let predicted = CGPoint(x: 999, y: 999)
-        let moved = try next(&encoder, worksheet.input(page: 0, live: [stroke(Array(points[0..<6]) + [predicted])]), now: 0.02)
+        let moved = try next(&encoder, worksheet.input(page: 0, live: [liveStroke(Array(points[0..<6]), predicted: [predicted])]), now: 0.02)
         #expect(moved.live == [.extend(id: 1, keep: 3, points: PresentPoints(Array(points[3..<6]) + [predicted]))])
         #expect(scene.apply(moved) == .applied)
+        #expect(scene.presented == worksheet.view(page: 0, live: [stroke(Array(points[0..<6]) + [predicted])]))
         // The prediction is replaced by the real points.
-        let further = try next(&encoder, worksheet.input(page: 0, live: [stroke(Array(points[0..<10]))]), now: 0.04)
+        let further = try next(&encoder, worksheet.input(page: 0, live: [liveStroke(Array(points[0..<10]))]), now: 0.04)
         #expect(further.live == [.extend(id: 1, keep: 6, points: PresentPoints(Array(points[6..<10])))])
         #expect(scene.apply(further) == .applied)
         #expect(scene.presented == worksheet.view(page: 0, live: [stroke(points)]))
@@ -253,6 +254,109 @@ struct PresentTests {
         #expect(commit.live == [.end(id: 1)] && commit.ink.count == 1)
         #expect(scene.apply(commit) == .applied)
         #expect(scene.live.isEmpty && worksheet.strokes(in: scene, page: 0) == worksheet.committed(page: 0))
+    }
+
+    /// EP142: a display frame of a long stroke costs the iPad no more than a frame of a short one. Each frame the
+    /// encoder reads only the samples the Mac lacks; it never reads, copies or compares the stroke from its start.
+    @Test func aLongLiveStrokeIsReadOnlyWhereItGrew() throws {
+        let worksheet = FakeWorksheet()
+        var encoder = PresentEncoder()
+        var scene = PresentScene()
+        scene.linkOpened()
+        encoder.resnapshot(heldAssets: [])
+        let reads = LiveReads()
+        func point(_ index: Int) -> CGPoint { CGPoint(x: CGFloat(index % 500), y: CGFloat(index / 500)) }
+        func frame(_ points: [CGPoint], predicted: [CGPoint]) -> PresentInput {
+            worksheet.input(page: 0, live: [PresentLiveInput(
+                id: 7, pageIndex: 0, rgba: [0, 0, 0, 1], width: 2.5, count: points.count,
+                points: { from in
+                    reads.add(from: from, of: points.count)
+                    return Array(points[from...])
+                }, predicted: predicted)])
+        }
+
+        // A scribble 6,000 samples long, grown four samples a display frame, each frame with fresh predicted points.
+        var points = [point(0)]
+        #expect(scene.apply(try next(&encoder, frame(points, predicted: []), now: 0)) == .applied)
+        var frames = 0
+        while points.count < 6_000 {
+            let held = points.count
+            points += (held..<(held + 4)).map(point)
+            // Predicted points are guesses: they lie off the path the samples then take.
+            let predicted = [CGPoint(x: point(held + 4).x + 0.5, y: point(held + 4).y), CGPoint(x: point(held + 5).x + 0.5, y: 1)]
+            frames += 1
+            let update = try next(&encoder, frame(points, predicted: predicted), now: Double(frames) / 60)
+            #expect(update.live == [.extend(id: 1, keep: held, points: PresentPoints(Array(points[held...]) + predicted))])
+            #expect(scene.apply(update) == .applied)
+            #expect(reads.last == LiveReads.Read(from: held, samples: 4), "frame \(frames) read only its own new samples")
+            if frames % 300 == 0 { #expect(scene.presented == worksheet.view(page: 0, live: [stroke(points + predicted)])) }
+        }
+        #expect(reads.all.count == frames + 1 && reads.all.map(\.samples).reduce(0, +) == points.count,
+                "every sample is read once, in the frame that brought it")
+
+        // The Pencil rests: the predicted points go, and the stroke is not read at all.
+        let rested = try next(&encoder, frame(points, predicted: []), now: 200)
+        #expect(rested.live == [.extend(id: 1, keep: points.count, points: PresentPoints([]))])
+        #expect(scene.apply(rested) == .applied)
+        // Nothing moved: nothing about the stroke is sent or read, however long it is.
+        #expect(try next(&encoder, frame(points, predicted: []), now: 300).live.isEmpty)
+        #expect(reads.all.count == frames + 1)
+        #expect(scene.presented == worksheet.view(page: 0, live: [stroke(points)]))
+    }
+
+    /// A predicted point that came true is already on the Mac, so it is kept there and not sent a second time, as it
+    /// always was: what travels for a frame is exactly what differs from what the Mac holds.
+    @Test func aPredictedPointThatCameTrueIsNotSentAgain() throws {
+        let worksheet = FakeWorksheet()
+        var encoder = PresentEncoder()
+        var scene = PresentScene()
+        scene.linkOpened()
+        encoder.resnapshot(heldAssets: [])
+        let points = (0..<8).map { CGPoint(x: CGFloat($0) * 10, y: 100) }
+        let first = worksheet.input(page: 0, live: [liveStroke(Array(points[0..<3]), predicted: [points[3], points[4]])])
+        #expect(scene.apply(try next(&encoder, first, now: 0)) == .applied)
+        // Both predicted points became samples, and two more are predicted: only those two travel.
+        let came = try next(&encoder, worksheet.input(page: 0, live: [liveStroke(Array(points[0..<5]), predicted: [points[5], points[6]])]),
+                            now: 0.02)
+        #expect(came.live == [.extend(id: 1, keep: 5, points: PresentPoints([points[5], points[6]]))])
+        #expect(scene.apply(came) == .applied)
+        // The first prediction came true and the second did not: the Mac keeps up to the first and takes the rest.
+        let off = CGPoint(x: 61, y: 108)
+        let half = try next(&encoder, worksheet.input(page: 0, live: [liveStroke(Array(points[0..<6]) + [off])]), now: 0.04)
+        #expect(half.live == [.extend(id: 1, keep: 6, points: PresentPoints([off]))])
+        #expect(scene.apply(half) == .applied)
+        #expect(scene.presented == worksheet.view(page: 0, live: [stroke(Array(points[0..<6]) + [off])]))
+        // The predicted points became samples and nothing else changed: the Mac holds every point, so nothing is sent.
+        let again = worksheet.input(page: 0, live: [liveStroke(Array(points[0..<6]), predicted: [off, points[7]])])
+        #expect(scene.apply(try next(&encoder, again, now: 0.06)) == .applied)
+        let settled = try next(&encoder, worksheet.input(page: 0, live: [liveStroke(Array(points[0..<6]) + [off, points[7]])]), now: 5)
+        #expect(settled.live.isEmpty)
+        #expect(scene.presented == worksheet.view(page: 0, live: [stroke(Array(points[0..<6]) + [off, points[7]])]))
+    }
+
+    /// EP142: strokes are told apart by the id the iPad gives them, so a new stroke is never taken for more of an
+    /// old one, even when frames in between were skipped and it starts where the old one did.
+    @Test func aNewLiveStrokeIsNeverSentAsMoreOfTheLastOne() throws {
+        let worksheet = FakeWorksheet()
+        var encoder = PresentEncoder()
+        var scene = PresentScene()
+        scene.linkOpened()
+        encoder.resnapshot(heldAssets: [])
+        let first = [CGPoint(x: 10, y: 10), CGPoint(x: 20, y: 10), CGPoint(x: 30, y: 10)]
+        #expect(scene.apply(try next(&encoder, worksheet.input(page: 0, live: [liveStroke(first, id: 1)]), now: 0)) == .applied)
+        // The first stroke left and a second began at the same point, in the same pen, with no frame sent between.
+        let second = [CGPoint(x: 10, y: 10), CGPoint(x: 10, y: 20), CGPoint(x: 10, y: 30), CGPoint(x: 10, y: 40)]
+        let swapped = try next(&encoder, worksheet.input(page: 0, live: [liveStroke(second, id: 2)]), now: 0.1)
+        #expect(swapped.live == [.begin(id: 2, pageIndex: 0, rgba: [0, 0, 0, 1], width: 2.5, points: PresentPoints(second)),
+                                 .end(id: 1)])
+        #expect(scene.apply(swapped) == .applied)
+        #expect(scene.presented == worksheet.view(page: 0, live: [stroke(second)]))
+        // Two strokes at once (the last one still waiting for its ink): each grows under its own id.
+        let third = [CGPoint(x: 50, y: 50)]
+        let both = try next(&encoder, worksheet.input(page: 0, live: [liveStroke(second, id: 2), liveStroke(third, id: 3)]), now: 0.2)
+        #expect(both.live == [.begin(id: 3, pageIndex: 0, rgba: [0, 0, 0, 1], width: 2.5, points: PresentPoints(third))])
+        #expect(scene.apply(both) == .applied)
+        #expect(scene.presented == worksheet.view(page: 0, live: [stroke(second), stroke(third)]))
     }
 
     // MARK: Links
@@ -432,6 +536,26 @@ private func stroke(_ points: [CGPoint]) -> PresentedView.LiveStroke {
     PresentedView.LiveStroke(pageIndex: 0, points: points, rgba: [0, 0, 0, 1], width: 2.5)
 }
 
+/// The same stroke as the iPad hands it to the encoder: its samples, and the predicted points beyond them.
+private func liveStroke(_ points: [CGPoint], predicted: [CGPoint] = [], id: UInt64 = 1) -> PresentLiveInput {
+    PresentLiveInput(id: id, pageIndex: 0, rgba: [0, 0, 0, 1], width: 2.5, points: points, predicted: predicted)
+}
+
+/// Which of a live stroke's samples the encoder asked for.
+private final class LiveReads: @unchecked Sendable {
+    struct Read: Equatable {
+        var from: Int
+        var samples: Int
+    }
+
+    private let lock = NSLock()
+    private var reads: [Read] = []
+
+    func add(from: Int, of count: Int) { lock.withLock { reads.append(Read(from: from, samples: count - from)) } }
+    var all: [Read] { lock.withLock { reads } }
+    var last: Read? { lock.withLock { reads.last } }
+}
+
 /// A synthetic worksheet: two Letter pages whose "drawings" are lists of stroke numbers, so a test can check exactly
 /// which committed strokes the Mac holds.
 final class FakeWorksheet: @unchecked Sendable {
@@ -443,7 +567,8 @@ final class FakeWorksheet: @unchecked Sendable {
     private var next = 0
     private let paper: PresentAsset
     private let realisticInk: Bool
-    var liveStrokes: [PresentedView.LiveStroke] = []
+    private var liveStrokes: [PresentLiveInput] = []
+    private var liveSerial: UInt64 = 0
 
     init(realisticInk: Bool = false, paperBytes: Int? = nil) {
         self.realisticInk = realisticInk
@@ -460,7 +585,7 @@ final class FakeWorksheet: @unchecked Sendable {
                                                  liveStrokes: live, laser: laser, laserTrail: trail)))
     }
 
-    func input(page: Int, live: [PresentedView.LiveStroke]? = nil) -> PresentInput {
+    func input(page: Int, live: [PresentLiveInput]? = nil) -> PresentInput {
         let paper = self.paper
         // One consistent read, as the iPad reads its document on the main thread.
         let (list, revision, current) = lock.withLock { (strokes[page] ?? [], revisions[page] ?? 0, liveStrokes) }
@@ -469,12 +594,13 @@ final class FakeWorksheet: @unchecked Sendable {
         let shown = PresentedView(screen: .page(.init(documentID: documentID, framing: "presenterPage", focusedPageIndex: page,
                                                       visibleRect: letter, margin: 0,
                                                       pages: [.init(pageIndex: page, frame: letter, inkRevision: revision)],
-                                                      liveStrokes: live ?? current, laser: nil, laserTrail: [])))
+                                                      liveStrokes: [], laser: nil, laserTrail: [])))
         return PresentInput(
             view: shown, session: session,
             pages: [page: (PresentPageRef(pageIndex: page, asset: paper.hash, size: CGSize(width: 612, height: 792)), { @Sendable in paper })],
             ink: [page: PresentInkInput(revision: revision, strokes: list.map { PresentStrokeID(created: Double($0), points: 1, bounds: .zero) },
-                                        drawing: { range in Self.encode(Array(list[range]), realistic: realistic) })])
+                                        drawing: { range in Self.encode(Array(list[range]), realistic: realistic) })],
+            live: live ?? current)
     }
 
     func commit(page: Int, strokes count: Int) {
@@ -496,7 +622,16 @@ final class FakeWorksheet: @unchecked Sendable {
 
     func committed(page: Int) -> [Int] { lock.withLock { strokes[page] ?? [] } }
     func revision(_ page: Int) -> UInt64 { lock.withLock { revisions[page] ?? 0 } }
-    func setLive(_ live: [PresentedView.LiveStroke]) { lock.withLock { liveStrokes = live } }
+    /// The strokes in progress. As on the iPad, a stroke keeps its id while it is drawn and no id is used twice.
+    func setLive(_ live: [PresentedView.LiveStroke]) {
+        lock.withLock {
+            if liveStrokes.isEmpty, !live.isEmpty { liveSerial += 1 }
+            liveStrokes = live.enumerated().map { index, stroke in
+                PresentLiveInput(id: liveSerial * 1_000 + UInt64(index), pageIndex: stroke.pageIndex, rgba: stroke.rgba,
+                                 width: stroke.width, points: stroke.points)
+            }
+        }
+    }
 
     /// The strokes the Mac holds for `page`: every segment, in order.
     func strokes(in scene: PresentScene, page: Int) -> [Int] {

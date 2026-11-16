@@ -45,9 +45,14 @@ struct LiveInkStrokes: Equatable {
     static let maxStrokes = 4
 
     private(set) var strokes: [Stroke] = []
-    private var nextID: UInt64 = 0
+    /// The id of the stroke begun last. Ids count up from the one given at init, so the model that owns the live ink
+    /// can carry them across one set of strokes to the next and no two strokes ever share an id (EP142): Present
+    /// tells a stroke it has already sent from a new one by its id alone.
+    private(set) var lastID: UInt64
     /// Per page with strokes on it: the last ink revision already matched to a commit.
     private var settled: [Int: UInt64] = [:]
+
+    init(after lastID: UInt64 = 0) { self.lastID = lastID }
 
     var isEmpty: Bool { strokes.isEmpty }
     /// The stroke the Pencil is drawing now, if any.
@@ -56,9 +61,9 @@ struct LiveInkStrokes: Equatable {
     mutating func begin(pageIndex: Int, style: LiveInkStyle, baseRevision: UInt64, points: [CGPoint], now: TimeInterval) {
         // A pen-down without a pen-up first: the earlier stroke still waits for its own commit.
         lift(at: now)
-        nextID &+= 1
+        lastID &+= 1
         if settled[pageIndex] == nil { settled[pageIndex] = baseRevision }
-        strokes.append(Stroke(id: nextID, pageIndex: pageIndex, style: style, baseRevision: baseRevision, points: points))
+        strokes.append(Stroke(id: lastID, pageIndex: pageIndex, style: style, baseRevision: baseRevision, points: points))
         if strokes.count > Self.maxStrokes { strokes.removeFirst(strokes.count - Self.maxStrokes) }
         pruneSettled()
     }

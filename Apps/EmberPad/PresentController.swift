@@ -287,7 +287,8 @@ final class PresentController: ObservableObject {
     }
 
     static func input(from student: StudentDisplayModel, paper: PresentPaperCache, ink: PresentInkCache) -> PresentInput {
-        let view = student.presented
+        // EP142: the strokes in progress come beside the view, so a frame never copies or compares a whole stroke.
+        let (view, strokes) = student.presentedParts
         // EP130: the Teacher copy the teacher chose to show has paper but no ink, under its own session, so the Mac
         // drops the worksheet's ink rather than drawing it on the answers.
         if view.showsTeacherCopy, !student.paused, let teacher = student.teacherFrame {
@@ -314,7 +315,12 @@ final class PresentController: ObservableObject {
             drawings[slice.pageIndex] = ink.input(session: snapshot.sessionID, pageIndex: slice.pageIndex,
                                                   revision: slice.inkRevision, drawing: slice.drawing)
         }
-        return PresentInput(view: view, session: snapshot.sessionID, pages: pages, ink: drawings)
+        let live = strokes.map { stroke in
+            // The samples are shared with the model, not copied, and the encoder reads only the ones the Mac lacks.
+            PresentLiveInput(id: stroke.id, pageIndex: stroke.pageIndex, rgba: StudentDisplayModel.rgba(stroke.style.color),
+                             width: stroke.style.width, points: stroke.points, predicted: stroke.predicted)
+        }
+        return PresentInput(view: view, session: snapshot.sessionID, pages: pages, ink: drawings, live: live)
     }
 }
 
