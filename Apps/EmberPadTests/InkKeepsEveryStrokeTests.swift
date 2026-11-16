@@ -157,6 +157,108 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         }
     }
 
+    /// EP146: PencilKit leaves one such step for every stroke it throws away, and a landing dropped 8 at most. On a
+    /// loaded Mac it threw away 13 strokes, then 50, in one stretch of writing: put back, they left 5 and 42 steps
+    /// that changed nothing under their own (122 steps for 120 strokes on CI). All are dropped, with the strokes put
+    /// back alone and with a committed stroke landing above them.
+    func testEveryStepLeftForTheStrokesPencilKitThrewAwayIsDroppedAsTheyArePutBack() async throws {
+        for committedToo in [false, true] {
+            let (controller, session) = try await PenFeelTests.makeController()
+            let canvas = try PenFeelTests.canvas(controller, session)
+            controller.focus(canvas)
+            let undo = Self.pencilKitUndo(for: controller)
+            for n in 0..<12 {
+                try Self.throwAway(n, on: canvas, controller)
+                Self.pencilKitStep(undo, on: canvas, removing: [])
+            }
+            if committedToo {
+                let stroke = Self.liveStroke(y: 100, at: 0)
+                Self.pencilKitStep(undo, on: canvas, removing: [stroke])
+                Self.commit(stroke, on: canvas, controller)
+            }
+            await InkSettle.settle()
+            let count = committedToo ? 13 : 12
+            let label = "12 strokes thrown away\(committedToo ? ", then one committed" : "")"
+            XCTAssertEqual(canvas.drawing.strokes.count, count, "\(label): every stroke is on the page")
+            XCTAssertEqual(session.drawing(on: 0).strokes.count, count, "\(label): and saved")
+            XCTAssertEqual(controller.emptyInkStepsOwed, 0, "\(label): PencilKit's step for each was met")
+            XCTAssertFalse(undo.canRedo, "\(label): the dropped steps leave no redo behind")
+            Self.assertOneUndoStepPerStroke(canvas, undo, count: count, label)
+        }
+    }
+
+    /// EP146: strokes PencilKit throws away between two it commits leave their steps between those two strokes'
+    /// steps. The landing passes over every one of them. It gave up after as many as there were strokes landing and
+    /// four more, and then landed nothing: the strokes thrown away never went back on the page.
+    func testStepsLeftForStrokesThrownAwayBetweenTwoCommittedStrokesAreDropped() async throws {
+        let (controller, session) = try await PenFeelTests.makeController()
+        let canvas = try PenFeelTests.canvas(controller, session)
+        controller.focus(canvas)
+        let undo = Self.pencilKitUndo(for: controller)
+        let strokes = (0..<2).map { Self.liveStroke(y: 100 + CGFloat($0) * 60, at: $0) }
+        Self.pencilKitStep(undo, on: canvas, removing: [strokes[0]])
+        Self.commit(strokes[0], on: canvas, controller)
+        for n in 0..<9 {
+            try Self.throwAway(n, on: canvas, controller)
+            Self.pencilKitStep(undo, on: canvas, removing: [])
+        }
+        Self.pencilKitStep(undo, on: canvas, removing: [strokes[1]])
+        Self.commit(strokes[1], on: canvas, controller)
+        await InkSettle.settle()
+        XCTAssertEqual(canvas.drawing.strokes.count, 11, "every stroke is on the page")
+        XCTAssertEqual(canvas.drawing.strokes.map(\.ink.inkType), Array(repeating: .fountainPen, count: 11))
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 11, "and saved")
+        XCTAssertEqual(controller.emptyInkStepsOwed, 0, "PencilKit's step for each stroke it threw away was met")
+        Self.assertOneUndoStepPerStroke(canvas, undo, count: 11, "9 strokes thrown away between two committed")
+    }
+
+    /// EP146: PencilKit can make its step for a stroke it threw away only after the stroke has been put back. It is
+    /// dropped as the page goes idle. No watch was kept for it unless a stroke that landed was owed a step too, so it
+    /// stayed on top and the newest tap of undo did nothing (25 steps for 24 brackets on CI).
+    func testAStepPencilKitMakesLateForAStrokeItThrewAwayIsDropped() async throws {
+        for committedToo in [false, true] {
+            let (controller, session) = try await PenFeelTests.makeController()
+            let canvas = try PenFeelTests.canvas(controller, session)
+            controller.focus(canvas)
+            let undo = Self.pencilKitUndo(for: controller)
+            if committedToo {
+                let stroke = Self.liveStroke(y: 100, at: 0)
+                Self.pencilKitStep(undo, on: canvas, removing: [stroke])
+                Self.commit(stroke, on: canvas, controller)
+            }
+            try Self.throwAway(0, on: canvas, controller)
+            await InkSettle.settle()
+            let count = committedToo ? 2 : 1
+            let label = "a late step for a stroke thrown away\(committedToo ? " after one committed" : "")"
+            XCTAssertEqual(canvas.drawing.strokes.count, count, "\(label): the stroke is back on the page")
+            XCTAssertEqual(controller.emptyInkStepsOwed, 1, "\(label): PencilKit has not made its step yet")
+            Self.pencilKitStep(undo, on: canvas, removing: [])
+            await InkSettle.settle()
+            XCTAssertEqual(controller.emptyInkStepsOwed, 0, "\(label): the step was met")
+            XCTAssertFalse(undo.canRedo, "\(label): the dropped step leaves no redo behind")
+            XCTAssertEqual(session.drawing(on: 0).strokes.count, count, "\(label): every stroke is saved")
+            Self.assertOneUndoStepPerStroke(canvas, undo, count: count, label)
+        }
+    }
+
+    /// EP146: a step PencilKit never makes is not waited for past the next landing, which drops only what is there.
+    func testAStepPencilKitNeverMakesIsNotExpectedPastTheNextLanding() async throws {
+        let (controller, session) = try await PenFeelTests.makeController()
+        let canvas = try PenFeelTests.canvas(controller, session)
+        controller.focus(canvas)
+        let undo = Self.pencilKitUndo(for: controller)
+        try Self.throwAway(0, on: canvas, controller)
+        await InkSettle.settle()
+        XCTAssertEqual(controller.emptyInkStepsOwed, 1, "PencilKit has not made its step yet")
+        let stroke = Self.liveStroke(y: 100, at: 0)
+        Self.pencilKitStep(undo, on: canvas, removing: [stroke])
+        Self.commit(stroke, on: canvas, controller)
+        await InkSettle.settle()
+        XCTAssertEqual(controller.emptyInkStepsOwed, 0, "the next landing ends the wait")
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 2, "every stroke is saved")
+        Self.assertOneUndoStepPerStroke(canvas, undo, count: 2, "a step never made")
+    }
+
     /// On a slow run loop PencilKit can group a burst's strokes out of order: its newest step takes strokes from
     /// either side of one an older step takes. Every stroke still lands with the pen feel, as its own step (EP98).
     func testStrokesPencilKitGroupsOutOfOrderEachLandAsTheirOwnStep() async throws {
@@ -513,6 +615,27 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         controller.canvasViewDrawingDidChange(canvas)
     }
 
+    /// PencilKit throws a stroke away: the pen draws stroke `n` live, PencilKit begins its own for the same touch and
+    /// never commits it, and its flight is given up, so the live pen's copy waits to go on the page.
+    private static func throwAway(_ n: Int, on canvas: PKCanvasView, _ controller: PDFOverlayPageController,
+                                  file: StaticString = #filePath, line: UInt = #line) throws {
+        let wave = LivePenTests.wave(length: 60).map { CGPoint(x: $0.x, y: $0.y + 300 + CGFloat(n) * 14) }
+        let samples = LivePenTests.samples(wave)
+        XCTAssertNotNil(controller.liveInkTarget(at: samples[0].location, on: canvas), "a pen stroke on the focused page",
+                        file: file, line: line)
+        controller.liveInk.onStroke?(.began(Array(samples.prefix(1))))
+        controller.canvasViewDidBeginUsingTool(canvas)
+        controller.liveInk.onStroke?(.moved(Array(samples.dropFirst().dropLast()), predicted: []))
+        controller.liveInk.onStroke?(.ended(Array(samples.suffix(1))))
+        controller.canvasViewDidEndUsingTool(canvas)
+        let waiting = controller.recoveredInk.count
+        let flights = controller.inkFlights.flights
+        controller.inkFlights.remove(canvas: ObjectIdentifier(canvas))
+        controller.recoverDiscarded(flights)
+        XCTAssertEqual(controller.recoveredInk.count, waiting + 1, "the live pen's copy waits to go on the page",
+                       file: file, line: line)
+    }
+
     /// An undo step as PencilKit makes one: `strokes` come off the canvas wherever they are, and redo puts the page
     /// back. One for strokes no longer on the page changes nothing.
     private static func pencilKitStep(_ undo: UndoManager, on canvas: PKCanvasView, removing strokes: [PKStroke]) {
@@ -651,12 +774,14 @@ private final class WritingPage {
         }
     }
 
-    /// Lets everything waiting land: PencilKit's commits, the swaps, and any stroke put back from the live pen.
+    /// Lets everything waiting land: PencilKit's commits, the swaps, and any stroke put back from the live pen. EP146:
+    /// and lets PencilKit make the step it leaves for each stroke it threw away, which the page then drops; it can
+    /// come after the stroke is back on the page, and a fixed wait could end just before it was dropped.
     func settle(timeout: TimeInterval = 6) {
         let deadline = Date().addingTimeInterval(timeout)
         Self.turn(0.1)
         while controller.hasPendingInk || !controller.inkFlights.isEmpty || !controller.livePen.strokes.allSatisfy(\.isLifted)
-                || controller.livePen.strokes.contains(where: \.owed), Date() < deadline {
+                || controller.livePen.strokes.contains(where: \.owed) || controller.emptyInkStepsOwed > 0, Date() < deadline {
             Self.turn(0.02)
         }
         Self.turn(0.2)
