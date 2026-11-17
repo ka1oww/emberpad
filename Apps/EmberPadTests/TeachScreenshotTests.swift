@@ -8,8 +8,8 @@ import EmberSyncKit
 
 /// EP153 proof: the real editor, hosted in the app's main scene with a synthetic worksheet. The toolbar lasso goes
 /// round a printed question, a tap inside opens the menu with Teach, and Teach adds the A3 squared page after the page
-/// with the question at its top left, then turns to it with the pen. Also shows the A4 page before and after Teach,
-/// since a worksheet with an A3 page shows every page at the A3 page's scale (EP154). Screenshots are attached and
+/// with the question at its top left, then turns to it with the pen. Also shows the A4 page before and after Teach
+/// (the captures were taken before EP154, when an A3 page shrank the A4 pages). Screenshots are attached and
 /// written to `EP153_SHOTS_DIR` when the test runner has it (`TEST_RUNNER_EP153_SHOTS_DIR`), else to the temporary
 /// directory.
 @MainActor
