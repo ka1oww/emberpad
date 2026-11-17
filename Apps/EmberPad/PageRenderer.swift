@@ -48,6 +48,8 @@ protocol WorksheetPageRenderer: AnyObject {
 /// out (no other page edit was under way).
 struct PageUndo {
     let name: String
+    /// The page the edit made, which undo must be on for the edit to be undone.
+    let page: Int
     let perform: @MainActor () -> Bool
 }
 
@@ -704,7 +706,7 @@ extension EditorScreen {
             if tools.current == .lasso { tools.select(.pen) }
             // The question is at the page's top, which would land under the palette at the top of the view.
             made.startPageLeadIn = TeachPage.landingLeadIn
-            made.pageUndo = PageUndo(name: "Teach") {
+            made.pageUndo = PageUndo(name: "Teach", page: request.index) {
                 editPages(.remove(added), show: request.sourcePage)
             }
         }

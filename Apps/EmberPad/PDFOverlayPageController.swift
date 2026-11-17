@@ -549,7 +549,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         }
         // EP153: below every ink step, the Teach that opened these pages. A page edit starts the undo history afresh,
         // so it is always the first step taken, and it never sits among the ink steps a landing pops and drops.
-        if let pageUndo, pageUndo.perform() { self.pageUndo = nil }
+        if let pageUndo, let active = activeCanvas, canvases[pageUndo.page] === active, pageUndo.perform() { self.pageUndo = nil }
     }
     func redo() {
         guard !readOnly else { return }

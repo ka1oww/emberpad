@@ -313,7 +313,7 @@ final class TeachTests: XCTestCase {
         XCTAssertNotNil(canvas.undoManager)
 
         var removed = 0
-        controller.pageUndo = PageUndo(name: "Teach") { removed += 1; return true }
+        controller.pageUndo = PageUndo(name: "Teach", page: 0) { removed += 1; return true }
         // Ink written after the Teach is undone first.
         controller.clearInk(onPage: 0)
         HoldPage.turn(0.5)
@@ -322,6 +322,13 @@ final class TeachTests: XCTestCase {
         HoldPage.turn(0.5)
         XCTAssertEqual(session.drawing(on: 0).strokes.count, 1)
         XCTAssertEqual(removed, 0, "the ink step comes first")
+        // Another page with no ink history leaves the Teach page alone.
+        controller.pageUndo = PageUndo(name: "Teach", page: 1) { removed += 1; return true }
+        controller.undo()
+        HoldPage.turn(0.2)
+        XCTAssertEqual(removed, 0, "undo on another page is a no-op")
+        XCTAssertNotNil(controller.pageUndo)
+        controller.pageUndo = PageUndo(name: "Teach", page: 0) { removed += 1; return true }
         // Then the Teach itself, once.
         controller.undo()
         HoldPage.turn(0.2)
@@ -330,7 +337,7 @@ final class TeachTests: XCTestCase {
         controller.undo()
         XCTAssertEqual(removed, 1, "one undo, not two")
         // Redo never removes it.
-        controller.pageUndo = PageUndo(name: "Teach") { removed += 1; return true }
+        controller.pageUndo = PageUndo(name: "Teach", page: 0) { removed += 1; return true }
         controller.redo()
         XCTAssertEqual(removed, 1)
         // A read-only page takes no undo.
