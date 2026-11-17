@@ -63,12 +63,9 @@ final class ScribbleKeepsUpTests: XCTestCase {
                 outlinedAt = index
             }
         }
-        // The last judgement comes back, as it would while the Pencil rests a moment before it lifts: waited for until
-        // the outline holds everything all the samples so far erase, however slow the runner.
+        // The last judgement comes back, as it would while the Pencil rests a moment before it lifts.
+        HoldPage.turn(0.2)
         let preview = try XCTUnwrap(page.controller.scribblePreview, "the stroke is watched as a scribble")
-        let everything = Set(ScribbleInk(ScribblePreviewTests.strokes(words)).erased(by: ScribbleErase.resampled(preview.samples)))
-        let deadline = Date().addingTimeInterval(10)
-        while !everything.isSubset(of: preview.erased), Date() < deadline { HoldPage.turn(0.02) }
         let ink = try XCTUnwrap(preview.ink, "and was judged while it was drawn")
         XCTAssertEqual(ink.judgedOnMainThread, 0, "no judgement of the scribble ran on the main thread while it was drawn")
         XCTAssertFalse(preview.erased.isEmpty, "the outline is round the ink the scribble goes through")
@@ -122,11 +119,9 @@ final class ScribbleKeepsUpTests: XCTestCase {
             pencil.move(to: point)
             if let drawn = inkView.livePenLayer(id: id)?.drawnRevision { drawnRevisions.insert(drawn) }
         }
-        let revision = try XCTUnwrap(page.controller.livePen.writing?.revision)
-        // The live pen draws the newest revision a moment after the last move, however slow the runner.
-        let deadline = Date().addingTimeInterval(10)
-        while inkView.livePenLayer(id: id)?.drawnRevision != revision, Date() < deadline { HoldPage.turn(0.02) }
+        HoldPage.turn(0.2)
         XCTAssertEqual(LivePenStrokes.shapedOnMainThread - before, 0, "no Pencil move shaped the stroke on the main thread")
+        let revision = try XCTUnwrap(page.controller.livePen.writing?.revision)
         XCTAssertEqual(inkView.livePenLayer(id: id)?.drawnRevision, revision, "the live pen has drawn the stroke as it is now")
         XCTAssertGreaterThan(drawnRevisions.count, 20, "and drew it all along")
         let shown = try XCTUnwrap(inkView.livePenStrokes.last, "its layer holds its shape")

@@ -298,7 +298,7 @@ final class InkStaysDrawnTests: XCTestCase {
         controller.livePenClock = { frozen }
         controller.landInkEdits()
         let landed = try XCTUnwrap(controller.livePen.strokes.first { $0.committedAt != nil })
-        Self.wait(until: { inkView.livePenLayer(id: landed.id)?.view.isHidden ?? true }, timeout: 20)
+        Self.wait(until: { inkView.livePenLayer(id: landed.id)?.view.isHidden ?? true }, timeout: 4)
         let view = try XCTUnwrap(inkView.livePenLayer(id: landed.id)?.view, "still kept, hidden, after the handover")
         XCTAssertTrue(view.isHidden, "the page shows the stroke, so its layer is hidden")
         HoldPage.turn(0.2)

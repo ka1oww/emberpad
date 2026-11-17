@@ -66,7 +66,7 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         let page = try writingPage(baseStrokes: 150)
         var mostWaiting = 0
         for n in 0..<80 {
-            page.write(count: 1, gaps: [0.1], neverPausing: true)
+            page.write(count: 1, gaps: [0.1])
             mostWaiting = max(mostWaiting, page.controller.pendingInkEdits.count)
             guard page.controller.pendingInkEdits.count >= InkLandingTiming.mostWaiting else { continue }
             page.waitForASafeFrame()
@@ -74,7 +74,6 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
                               "the queue is bounded: a full queue lands at the first safe frame (stroke \(n + 1))")
         }
         XCTAssertGreaterThanOrEqual(mostWaiting, 24, "short bursts still wait for the pause")
-        page.controller.inkTiming.lastLift = nil
         page.assertEveryStrokeKept(80, "80 strokes with no pause")
     }
 
@@ -735,12 +734,10 @@ private final class WritingPage {
     static func turn(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
     /// Writes `count` brackets, each lift followed by the next pen-down after the next of `gaps`, in turn.
-    /// With `neverPausing`, the pause after each lift never ends by itself, however long the runner takes to turn the gap.
-    func write(count: Int, gaps: [TimeInterval], neverPausing: Bool = false) {
+    func write(count: Int, gaps: [TimeInterval]) {
         let first = written
         for n in 0..<count {
             stroke(first + n)
-            if neverPausing { controller.inkTiming.lastLift = CACurrentMediaTime() + 60 }
             Self.turn(gaps[n % gaps.count])
         }
     }
