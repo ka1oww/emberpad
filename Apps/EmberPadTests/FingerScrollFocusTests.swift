@@ -23,6 +23,10 @@ final class FingerScrollFocusTests: XCTestCase {
         let (controller, _) = try await makeController(pages: 3, pageSize: CGSize(width: 842, height: 420))
         host(controller)
         await settle()
+        // PDFKit may still name its page in view a moment after layout (short pages put two on the screen), and the
+        // controller focuses that page when it does. Take the baseline once the focus has caught up with it.
+        for _ in 0..<50 where focused(controller) != [currentPage(controller)] { try await frame() }
+        await settle()
         let focusedPage = try XCTUnwrap(focused(controller).first)
         XCTAssertEqual(focused(controller), [focusedPage], "one page is focused")
         let other = try XCTUnwrap(onScreen(controller).first { $0 != focusedPage }, "short pages put more than one on the screen")
