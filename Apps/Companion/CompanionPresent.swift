@@ -877,6 +877,43 @@ final class PresentCanvasView: NSView {
         redraw(latest: true)
     }
 
+    /// A page bitmap the cache lacks, to be made off the main thread by `rasterise`.
+    struct PaperRequest: Sendable {
+        let asset: PresentAsset
+        let pageSize: CGSize
+        let scale: CGFloat
+    }
+
+    /// A page bitmap made off the main thread, crossing back to it; `CGImage` is immutable.
+    struct PaperBitmap: @unchecked Sendable {
+        let request: PaperRequest
+        let image: CGImage
+    }
+
+    private var paperMisses: [PaperRequest]?
+
+    /// The page bitmaps that laying out the latest frame would have to make now, each once; draws nothing new.
+    func missingPapers(for scene: PresentScene, status: PresentHost.Status) -> [PaperRequest] {
+        paperMisses = []
+        layOutLatest(scene, status: status)
+        defer { paperMisses = nil }
+        var seen = Set<String>()
+        return (paperMisses ?? []).filter { seen.insert(PresentPaperImages.key(for: $0.asset, scale: $0.scale)).inserted }
+    }
+
+    /// Makes the bitmaps; runs anywhere.
+    nonisolated static func rasterise(_ requests: [PaperRequest]) -> [PaperBitmap] {
+        requests.compactMap { request in
+            PresentPaperImages.rasterise(request.asset, pageSize: request.pageSize, scale: request.scale)
+                .map { PaperBitmap(request: request, image: $0) }
+        }
+    }
+
+    /// Keeps bitmaps made off the main thread, for the next layout to use.
+    func adopt(_ bitmaps: [PaperBitmap]) {
+        for bitmap in bitmaps { paperImages.insert(bitmap.image, for: bitmap.request.asset, scale: bitmap.request.scale) }
+    }
+
     /// Draws the picture as it is at `time`, as a display refresh does; tests call it with a clock of their own.
     func refresh(at time: TimeInterval) {
         redraw(at: time)
@@ -1010,7 +1047,14 @@ final class PresentCanvasView: NSView {
             layers.ink.frame = frame
             let scale = PresentGeometry.rasterScale(pageSize: pageSize, displayedPoints: frame.width, screenScale: screenScale)
             if let ref, let asset = scene.asset(for: ref.asset) {
-                layers.paper.contents = paperImages.image(for: asset, pageSize: pageSize, scale: scale)
+                if paperMisses == nil {
+                    layers.paper.contents = paperImages.image(for: asset, pageSize: pageSize, scale: scale)
+                } else if let image = paperImages.cached(for: asset, scale: scale) {
+                    layers.paper.contents = image
+                } else {
+                    // Collecting what is missing: the page keeps the bitmap it has until the new one is adopted.
+                    paperMisses?.append(PaperRequest(asset: asset, pageSize: pageSize, scale: scale))
+                }
             } else {
                 layers.paper.contents = nil
             }
@@ -1216,13 +1260,21 @@ struct PresentPaperImages {
     private var order: [String] = []
     static let capacity = 8
 
-    mutating func image(for asset: PresentAsset, pageSize: CGSize, scale: CGFloat) -> CGImage? {
-        let key = "\(asset.hash)@\(scale)"
-        if let image = cache[key] { return image }
-        guard let image = Self.rasterise(asset, pageSize: pageSize, scale: scale) else { return nil }
+    static func key(for asset: PresentAsset, scale: CGFloat) -> String { "\(asset.hash)@\(scale)" }
+
+    func cached(for asset: PresentAsset, scale: CGFloat) -> CGImage? { cache[Self.key(for: asset, scale: scale)] }
+
+    mutating func insert(_ image: CGImage, for asset: PresentAsset, scale: CGFloat) {
+        let key = Self.key(for: asset, scale: scale)
+        if cache[key] == nil { order.append(key) }
         cache[key] = image
-        order.append(key)
         while order.count > Self.capacity { cache[order.removeFirst()] = nil }
+    }
+
+    mutating func image(for asset: PresentAsset, pageSize: CGSize, scale: CGFloat) -> CGImage? {
+        if let image = cached(for: asset, scale: scale) { return image }
+        guard let image = Self.rasterise(asset, pageSize: pageSize, scale: scale) else { return nil }
+        insert(image, for: asset, scale: scale)
         return image
     }
 

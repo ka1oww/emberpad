@@ -632,6 +632,36 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertGreaterThan(audioLength, duration - 1.5)
     }
 
+    /// Start lesson with a Student copy on the iPad's screen: preparing its papers (decoding, the GPU's first take) takes
+    /// about a second, and none of it may hold the main thread, which draws the projector. A heartbeat on the main
+    /// thread, counted from the moment the lesson says it is recording, never goes quiet for more than a quarter second.
+    func testStartingALessonDoesNotHoldTheMainThread() async throws {
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        let (model, iPad, _) = presenting(microphones)
+        let lesson = model.lesson
+        var recordingSince: Date?
+        let earlier = lesson.onStatus
+        lesson.onStatus = { status in
+            earlier?(status)
+            if status.state == .recording, recordingSince == nil { recordingSince = Date() }
+        }
+        iPad.present(.student)
+        iPad.send(command: PresentLessonCommand(action: .start))
+        var last = Date()
+        var longest: TimeInterval = 0
+        let end = last.addingTimeInterval(5)
+        while last < end {
+            try await Task.sleep(for: .milliseconds(10))
+            let now = Date()
+            if let since = recordingSince, now > since { longest = max(longest, now.timeIntervalSince(max(last, since))) }
+            last = now
+        }
+        XCTAssertEqual(lesson.status.state, .recording)
+        print("EP141 longest main-thread gap after Start: \(Int(longest * 1_000)) ms")
+        XCTAssertLessThan(longest, 0.25, "starting the lesson held the main thread")
+        await lesson.finish()
+    }
+
     /// macOS not answering for the microphone list (Core Audio stalled, as on 16 Nov): Start lesson from the iPad is
     /// answered within `microphoneTimeout` with a failure that says so, and nothing records.
     func testAStalledSoundSystemFailsTheStartPromptly() async throws {
