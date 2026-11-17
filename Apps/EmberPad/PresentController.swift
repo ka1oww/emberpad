@@ -79,6 +79,11 @@ final class PresentController: ObservableObject {
         try await LibrarySyncConnector.connectForPresent(credential, attempt: attempt)
     }
 
+    /// Times every Pencil sample from the student view to the Mac's presented frame (EP148), for a Present turned on
+    /// after it is set. Nil in the app, always: nothing is timed, and no update asks the Mac to report. Only the
+    /// device latency test sets one (`scripts/device-present-latency.sh`).
+    var latencyProbe: PresentLatencyProbe?
+
     private let student: StudentDisplayModel
     private let paper = PresentPaperCache()
     private let ink = PresentInkCache()
@@ -108,7 +113,11 @@ final class PresentController: ObservableObject {
             return
         }
         let connect = self.connect
-        let sender = PresentSender(connect: { attempt in try await connect(credential, attempt) },
+        let probe = latencyProbe
+        student.onLiveSamples = probe.map { probe in
+            { strokes in for stroke in strokes { probe.sampled(stroke: stroke.id, count: stroke.count) } }
+        }
+        let sender = PresentSender(connect: { attempt in try await connect(credential, attempt) }, probe: probe,
                                    onState: { [weak self] state in
                                        Task { @MainActor in self?.linkChanged(state) }
                                    },
@@ -135,6 +144,7 @@ final class PresentController: ObservableObject {
         suspendWork?.cancel()
         suspendWork = nil
         endBackgroundTask()
+        student.onLiveSamples = nil
         let sender = self.sender
         self.sender = nil
         paper.removeAll()

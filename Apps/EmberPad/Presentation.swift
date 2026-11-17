@@ -470,9 +470,14 @@ final class StudentDisplayModel: ObservableObject {
         }
     }
 
+    /// Told of the strokes in progress, each with how many Pencil samples it has now, whenever they are set: the
+    /// Pencil's end of the Present latency measurement (EP148). Nil, and so never called, unless one is running.
+    var onLiveSamples: ((_ strokes: [(id: UInt64, count: Int)]) -> Void)?
+
     private func setLiveInk(_ value: StudentLiveInk?) {
         let next = value?.strokes.isEmpty == false ? value : nil
         if next != liveInk { liveInk = next }
+        if let onLiveSamples, let next { onLiveSamples(next.strokes.strokes.map { ($0.id, $0.points.count) }) }
     }
 }
 

@@ -380,14 +380,22 @@ final class StressPage {
     private struct WeakController { weak var controller: PDFOverlayPageController? }
     static var earlierStillAlive: Int { earlier.filter { $0.controller != nil }.count }
 
-    init(pages: Int = 3, ink: [Int: [PKStroke]] = [:]) throws {
+    /// `presenting` has the student view show the worksheet from the start, as once a teacher has opened it in class
+    /// with the student view not paused (EP148: the Present latency run); the stress scenarios leave it paused.
+    init(pages: Int = 3, ink: [Int: [PKStroke]] = [:], presenting: Bool = false) throws {
         suiteName = "EmberPadTests.EP110.\(UUID().uuidString)"
         tools = ToolState(defaults: UserDefaults(suiteName: suiteName)!)
         tools.select(.pen)
         root = FileManager.default.temporaryDirectory.appendingPathComponent("ep110-\(UUID().uuidString)", isDirectory: true)
         session = try StudentMirrorFixture.session(.student, pages: pages, root: root)
         for (page, strokes) in ink { session.update(PKDrawing(strokes: strokes), page: page) }
-        controller = PDFOverlayPageController(session: session, student: StudentDisplayModel(), tools: tools)
+        let student = StudentDisplayModel()
+        if presenting {
+            // Before the renderer publishes its first page, as the app does it.
+            student.opened(session.record)
+            student.paused = false
+        }
+        controller = PDFOverlayPageController(session: session, student: student, tools: tools)
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .first { $0.session.role == .windowApplication })
         window = UIWindow(windowScene: scene)
