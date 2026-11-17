@@ -172,6 +172,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// False until the remembered position has been put back, so PDFKit's first layout on page 1 never overwrites it.
     private var positionRestored = false
     private var lifecycleObservers: [NSObjectProtocol] = []
+    /// EP154: the worksheet's notes fit for the view's size (see `WorksheetZoom`), and that size. Nil before the first
+    /// layout. Internal for tests.
+    private(set) var notesFit: CGFloat?
+    private var notesFitSize: CGSize = .zero
 
     init(session: DocumentSession, student: StudentDisplayModel, tools: ToolState) {
         self.session = session; self.student = student; self.tools = tools
@@ -197,7 +201,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         // EP-11 continuous layout (design 5.2): vertical scrolling, 16 pt gaps, shadows, canvas chrome.
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
-        pdfView.autoScales = true
+        // EP154: the worksheet fits its notes, not its widest page, as GoodNotes does (`fitNotes`), so PDFKit's own
+        // fit stays off. Its pinch range is left as it is: it zooms out past a whole A3 page.
+        pdfView.autoScales = false
         pdfView.displayBox = .cropBox
         pdfView.pageBreakMargins = UIEdgeInsets(top: 8, left: 24, bottom: 8, right: 24)
         pdfView.pageShadowsEnabled = true
@@ -279,7 +285,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             let remembered = readingPositions?.position(for: session.record.id)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                remembered?.restore(into: pdfView, indexOfPageID: { [session] id in session.pages.pages.firstIndex { $0.id == id } })
+                remembered?.restore(into: pdfView, indexOfPageID: { [session] id in session.pages.pages.firstIndex { $0.id == id } },
+                                    notesFit: notesFit)
+                // A remembered place puts its page's left edge at the view's; fitted, the notes stay centred.
+                if isAtNotesFit { centreHorizontally() }
                 positionRestored = true
             }
         }
@@ -291,6 +300,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        fitNotes()
         observeScrolling()
         viewportThrottle.signal() // Rotation and split-view resizes move the visible rect too.
     }
@@ -303,6 +313,46 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         scrollObservation = scrollView.observe(\.contentOffset, options: []) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.viewportThrottle.signal() }
         }
+    }
+
+    /// EP154: on the first layout, and when the view changes size (rotation, split view), fits the worksheet's notes to
+    /// its width, unless the teacher has zoomed since it last did: then their zoom stays, as with PDFKit's fit before.
+    private func fitNotes() {
+        let size = pdfView.bounds.size
+        guard size.width > 0, size.height > 0, size != notesFitSize,
+              let fit = WorksheetZoom.notesFit(for: pdfView, pages: session.pages) else { return }
+        let fitted = notesFit.map { WorksheetZoom.isFitted(pdfView.scaleFactor, fit: $0) } ?? true
+        notesFitSize = size
+        notesFit = fit
+        guard fitted else { return }
+        // PDFKit zooms about the view's centre; the point at the top of the view stays there instead.
+        let top = CGPoint(x: pdfView.bounds.midX, y: pdfView.bounds.minY)
+        let page = pdfView.page(for: top, nearest: true)
+        let point = page.map { pdfView.convert(top, to: $0) }
+        pdfView.scaleFactor = fit
+        pdfView.layoutIfNeeded()
+        if let page, let point, let scrollView = Self.firstScrollView(in: pdfView) {
+            let inset = scrollView.adjustedContentInset
+            let lowest = -inset.top
+            let highest = max(lowest, scrollView.contentSize.height + inset.bottom - scrollView.bounds.height)
+            let moved = pdfView.convert(point, from: page).y - top.y
+            scrollView.contentOffset.y = min(max(scrollView.contentOffset.y + moved, lowest), highest)
+        }
+        centreHorizontally()
+    }
+
+    /// The worksheet is at its notes fit: the teacher has not zoomed.
+    var isAtNotesFit: Bool { notesFit.map { WorksheetZoom.isFitted(pdfView.scaleFactor, fit: $0) } ?? false }
+
+    /// EP154: a page wider than the view (an A3 page beside A4 notes) overflows it evenly on both sides, so the notes
+    /// sit in the middle, as in GoodNotes. A worksheet no wider than the view PDFKit centres itself.
+    private func centreHorizontally() {
+        guard let scrollView = Self.firstScrollView(in: pdfView) else { return }
+        pdfView.layoutIfNeeded()
+        let inset = scrollView.adjustedContentInset
+        let spare = scrollView.contentSize.width + inset.left + inset.right - scrollView.bounds.width
+        guard spare > 0 else { return }
+        scrollView.contentOffset.x = spare / 2 - inset.left
     }
 
     private static func firstScrollView(in view: UIView) -> UIScrollView? {
@@ -341,7 +391,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// all save, so a relaunch after the app was ended in the background still opens here.
     func saveReadingPosition() {
         guard positionRestored, let readingPositions,
-              let position = ReadingPosition.capture(from: pdfView, pageID: { [session] in session.page(at: $0)?.id }) else { return }
+              let position = ReadingPosition.capture(from: pdfView, pageID: { [session] in session.page(at: $0)?.id },
+                                                     notesFit: notesFit) else { return }
         readingPositions.save(position, for: session.record.id)
     }
 
@@ -902,6 +953,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     func goToPage(_ index: Int, leadIn: CGFloat) {
         guard let page = session.pdf.page(at: index) else { return }
         pdfView.go(to: page)
+        // EP154: fitted, a page jumped to shows centred, as it opened, however far an A3 page was scrolled sideways.
+        if isAtNotesFit { centreHorizontally() }
         guard leadIn > 0, let scrollView = Self.firstScrollView(in: pdfView) else { return }
         pdfView.layoutIfNeeded()
         scrollView.contentOffset.y = max(-scrollView.adjustedContentInset.top, scrollView.contentOffset.y - leadIn)

@@ -15,16 +15,27 @@ struct ReadingPosition: Codable, Equatable {
     var y: Double
     /// The zoom relative to the fit-to-width scale: 1 is fitted, as a notebook first opens.
     var zoom: Double
+    /// EP154: the fit `zoom` is relative to. nil, for the Teacher copy and every position saved before EP154: PDFKit's
+    /// fit-to-width scale, which fits the widest page. `.notes`: the worksheet's notes fit (see `WorksheetZoom`).
+    var zoomBasis: ZoomBasis? = nil
 
-    /// Where `view` is now, or nil while it has no laid-out page.
+    enum ZoomBasis: String, Codable { case notes }
+
+    /// Where `view` is now, or nil while it has no laid-out page. With `notesFit` (a worksheet, EP154) the zoom is
+    /// kept relative to it; without it, relative to PDFKit's fit-to-width scale.
     @MainActor
-    static func capture(from view: PDFView, pageID: (Int) -> String? = { _ in nil }) -> ReadingPosition? {
+    static func capture(from view: PDFView, pageID: (Int) -> String? = { _ in nil },
+                        notesFit: CGFloat? = nil) -> ReadingPosition? {
         guard let document = view.document, view.bounds.width > 0, view.bounds.height > 0 else { return nil }
         let corner = CGPoint(x: view.bounds.minX, y: view.bounds.minY)
         guard let page = view.page(for: corner, nearest: true) else { return nil }
         let index = document.index(for: page)
         guard index != NSNotFound else { return nil }
         let point = view.convert(corner, to: page)
+        if let notesFit, notesFit > 0 {
+            return ReadingPosition(page: index, pageID: pageID(index), x: Double(point.x), y: Double(point.y),
+                                   zoom: Double(view.scaleFactor / notesFit), zoomBasis: .notes)
+        }
         let fit = view.scaleFactorForSizeToFit
         let zoom = fit > 0 ? Double(view.scaleFactor / fit) : 1
         return ReadingPosition(page: index, pageID: pageID(index), x: Double(point.x), y: Double(point.y), zoom: zoom)
@@ -39,13 +50,16 @@ struct ReadingPosition: Codable, Equatable {
     }
 
     /// Zooms and scrolls `view` back here. Call after the view's first layout, or PDFKit lands on the first page.
+    /// A worksheet passes its `notesFit` (EP154), already applied to the view. A position saved against it comes back
+    /// at the same zoom relative to it. One saved before EP154, against the fit of the widest page, comes back fitted
+    /// (now the notes fit) when it was fitted, and at the scale it was left at when it was zoomed, as before.
     @MainActor
-    func restore(into view: PDFView, indexOfPageID: (String) -> Int? = { _ in nil }) {
+    func restore(into view: PDFView, indexOfPageID: (String) -> Int? = { _ in nil }, notesFit: CGFloat? = nil) {
         guard let document = view.document,
               let index = pageIndex(pageCount: document.pageCount, indexOfPageID: indexOfPageID),
               let page = document.page(at: index) else { return }
         if abs(zoom - 1) > Self.zoomTolerance {
-            let fit = view.scaleFactorForSizeToFit
+            let fit = zoomBasis == .notes ? notesFit ?? view.scaleFactorForSizeToFit : view.scaleFactorForSizeToFit
             if fit > 0 {
                 let scale = min(max(fit * zoom, view.minScaleFactor), view.maxScaleFactor)
                 view.scaleFactor = scale
@@ -64,7 +78,8 @@ struct ReadingPosition: Codable, Equatable {
     func opening(onPage page: Int, pageCount: Int? = nil) -> ReadingPosition {
         let target = pageCount.map { min(max(page, 0), max($0 - 1, 0)) } ?? max(page, 0)
         if pageIndex(pageCount: pageCount ?? .max) == target { return self }
-        return ReadingPosition(page: target, pageID: nil, x: -.greatestFiniteMagnitude, y: .greatestFiniteMagnitude, zoom: zoom)
+        return ReadingPosition(page: target, pageID: nil, x: -.greatestFiniteMagnitude, y: .greatestFiniteMagnitude, zoom: zoom,
+                               zoomBasis: zoomBasis)
     }
 
     /// Zoom closer to the fitted scale than this is the fitted scale.
