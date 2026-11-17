@@ -97,22 +97,7 @@ fi
 xcrun xcresulttool export attachments --path "$OUT/StressTest.xcresult" --output-path "$OUT/attachments" >/dev/null 2>&1
 
 # The summary is attached by the last test; copy it out under predictable names.
-python3 -I - "$OUT" <<'EOF'
-import json, os, shutil, sys
-out = sys.argv[1]
-folder = os.path.join(out, "attachments")
-try:
-    manifest = json.load(open(os.path.join(folder, "manifest.json")))
-except Exception:
-    manifest = []
-for test in manifest:
-    for item in test.get("attachments", []):
-        name = item.get("suggestedHumanReadableName", "")
-        for kind in ("json", "md"):
-            if name.startswith("stress-summary." + kind):
-                shutil.copyfile(os.path.join(folder, item["exportedFileName"]),
-                                os.path.join(out, "summary." + kind))
-EOF
+python3 -I "$ROOT/scripts/stress_summary.py" "$OUT" >/dev/null
 
 if [[ ! -f $OUT/summary.json ]]; then
   print -u2 "no summary was attached (the run stopped early?); see $OUT/xcodebuild.log"

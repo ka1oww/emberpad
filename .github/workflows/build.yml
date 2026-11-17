@@ -27,12 +27,21 @@ jobs:
           zsh -n resign/config.example.zsh
           plutil -lint resign/dev.emberpad.renew.plist Apps/EmberPad/Info.plist Apps/Companion/Info.plist
           python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("resign/support.py").read_text())'
+      - name: Check the scripts and the iPad test shards
+        run: |
+          python3 -I scripts/test_stress_summary.py
+          python3 -I scripts/test_check_test_shards.py
+          python3 -I scripts/test_pick_ci_simulator.py
+          python3 -I scripts/test_report_hung_test.py
+          python3 -I scripts/check_test_shards.py
 
-  # The iPad test target is split into three parallel shards, balanced by the
-  # per-class runtimes in CI. Shards 1 and 2 list their classes explicitly;
-  # shard 3 skips exactly those classes, so it runs everything else, including
-  # any test class added later. Every test therefore runs in exactly one shard,
+  # The iPad tests (the EmberPadTests unit target and the EmberPadUITests real-touch target) are split into
+  # four parallel shards, balanced by the per-class runtimes in CI at about ten minutes of tests each, so
+  # that with the build and the Simulator's boot each stays well inside the job's 30 minutes. Shards 1, 2
+  # and 4 list their classes explicitly; shard 3 skips exactly those classes, so it runs everything else in
+  # both targets, including any test class added later. Every test therefore runs in exactly one shard,
   # except DeviceDrawingStressTests, which runs only from scripts/device-stress-test.sh.
+  # scripts/check_test_shards.py holds the lists to that, and runs in the unsigned-builds job.
   ipad-tests:
     name: ipad-tests (shard ${{ matrix.shard }})
     runs-on: macos-26
@@ -49,6 +58,10 @@ jobs:
               -only-testing:EmberPadTests/WorksheetHeaderScreenshotTests
               -only-testing:EmberPadTests/CircleLassoTests
               -only-testing:EmberPadTests/InkKeepsEveryStrokeTests
+              -only-testing:EmberPadTests/ToolbarDockScreenshotTests
+              -only-testing:EmberPadTests/ScribbleOutlineSteadyTests
+              -only-testing:EmberPadTests/TeacherCopyCardTests
+              -only-testing:EmberPadTests/InkStaysDrawnTests
           - shard: 2
             selection: >-
               -only-testing:EmberPadTests/LibraryScreenshotTests
@@ -57,6 +70,13 @@ jobs:
               -only-testing:EmberPadTests/LibraryFolderBrowserTests
               -only-testing:EmberPadTests/LiveInkTests
               -only-testing:EmberPadTests/LaserPointerScreenshotTests
+              -only-testing:EmberPadTests/ScribblePreviewTests
+              -only-testing:EmberPadTests/DocumentTransitionTests
+              -only-testing:EmberPadTests/LibraryFolderTransitionTests
+              -only-testing:EmberPadTests/LassoSelectsTheSameInkTests
+              -only-testing:EmberPadTests/HoldToShapeTests
+              -only-testing:EmberPadUITests/ToolbarFingerDragUITests
+              -only-testing:EmberPadUITests/ToolbarFreeDragUITests
           - shard: 3
             selection: >-
               -skip-testing:EmberPadTests/PageToolsScreenshotTests
@@ -65,28 +85,58 @@ jobs:
               -skip-testing:EmberPadTests/WorksheetHeaderScreenshotTests
               -skip-testing:EmberPadTests/CircleLassoTests
               -skip-testing:EmberPadTests/InkKeepsEveryStrokeTests
+              -skip-testing:EmberPadTests/ToolbarDockScreenshotTests
+              -skip-testing:EmberPadTests/ScribbleOutlineSteadyTests
+              -skip-testing:EmberPadTests/TeacherCopyCardTests
+              -skip-testing:EmberPadTests/InkStaysDrawnTests
               -skip-testing:EmberPadTests/LibraryScreenshotTests
               -skip-testing:EmberPadTests/EraserPreviewScreenshotTests
               -skip-testing:EmberPadTests/PageNavigationTests
               -skip-testing:EmberPadTests/LibraryFolderBrowserTests
               -skip-testing:EmberPadTests/LiveInkTests
               -skip-testing:EmberPadTests/LaserPointerScreenshotTests
+              -skip-testing:EmberPadTests/ScribblePreviewTests
+              -skip-testing:EmberPadTests/DocumentTransitionTests
+              -skip-testing:EmberPadTests/LibraryFolderTransitionTests
+              -skip-testing:EmberPadTests/LassoSelectsTheSameInkTests
+              -skip-testing:EmberPadTests/HoldToShapeTests
+              -skip-testing:EmberPadUITests/PresentTeacherCopyUITests
+              -skip-testing:EmberPadUITests/ReadingPositionUITests
+              -skip-testing:EmberPadUITests/ToolbarDragTrackingUITests
+              -skip-testing:EmberPadUITests/ToolbarFingerDragUITests
+              -skip-testing:EmberPadUITests/ToolbarFreeDragUITests
               -skip-testing:EmberPadTests/DeviceDrawingStressTests
+          - shard: 4
+            selection: >-
+              -only-testing:EmberPadUITests/PresentTeacherCopyUITests
+              -only-testing:EmberPadUITests/ReadingPositionUITests
+              -only-testing:EmberPadUITests/ToolbarDragTrackingUITests
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
-      # A fresh runner's first simulator boot takes minutes, so start it before
-      # checkout and let it overlap the build; the test step waits for it.
+      - uses: actions/checkout@v4
+      # The tests run on an iPad Pro 11-inch (M5) and no other size: how much of a page fits on the screen is part
+      # of what some UI tests check. scripts/pick_ci_simulator.py finds or creates that iPad on the newest iOS
+      # runtime, and fails this step, saying what is installed, when the runner cannot give one.
+      # A fresh runner's first simulator boot takes minutes, so it starts here; the test step waits for it.
       - name: Start booting the Simulator
         run: |
-          UDID=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; devs=json.load(sys.stdin)["devices"]; cands=[d for lst in devs.values() for d in lst]; pick=next((d for d in cands if d["name"].startswith("iPad")), next((d for d in cands if d["name"].startswith("iPhone")), None)); assert pick, "no simulator device"; print(pick["udid"])')
+          UDID=$(python3 -I scripts/pick_ci_simulator.py)
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl boot "$UDID"
-      - uses: actions/checkout@v4
       - name: Test iPad app on Simulator
         env:
           SELECTION: ${{ matrix.selection }}
         run: |
           xcrun simctl bootstatus "$UDID" -b
+          # On a Simulator xcodebuild cannot say where a hung test was stuck, so scripts/report_hung_test.py watches
+          # the log and prints the app's call stacks when a test has logged nothing for 150 s.
+          LOG="$RUNNER_TEMP/ipad-tests.log"
+          : > "$LOG"
+          python3 -I scripts/report_hung_test.py "$LOG" &
+          trap "kill $! 2>/dev/null" EXIT
+          set -o pipefail
           # SELECTION is a space-separated list of flags; word splitting is intended.
-          xcodebuild -project EmberPad.xcodeproj -scheme EmberPad -configuration Debug -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/ios-test" CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES $SELECTION test
+          # Each test may run for 5 minutes, twice the longest any has taken in CI (149 s). One that hangs then
+          # fails by name and the rest still run; without the limit it ran until the job's 30 minutes were up.
+          xcodebuild -project EmberPad.xcodeproj -scheme EmberPad -configuration Debug -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/ios-test" CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES $SELECTION -test-timeouts-enabled YES -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 test 2>&1 | tee "$LOG"

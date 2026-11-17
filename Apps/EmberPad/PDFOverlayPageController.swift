@@ -96,6 +96,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let ownSteps: Set<String>
         var observer: NSObjectProtocol?
     }
+    /// EP146: how many undo steps PencilKit still owes for strokes it threw away that a landing has put back. It
+    /// leaves one step that changes nothing for each (measured: 13 for 13 strokes, 50 for 50), among the steps a
+    /// landing pops, just below them, or up to half a second after the landing. Each is dropped where it is met, by
+    /// that landing or by the idle watch, so the count says how many more there are to drop than
+    /// `mostEmptyStepsDropped` and how long to watch; one not met by the next landing is taken as never coming.
+    /// Internal for tests.
+    private(set) var emptyInkStepsOwed = 0
     /// Pages whose undo or redo may have brought back PencilKit's clear copy of a stroke, to make visible.
     private var clearInkPages: Set<Int> = []
     /// When the latest lift and commit were, which decide when the queued changes may land.
@@ -2013,8 +2020,8 @@ extension PDFOverlayPageController {
         }
         let drawing = canvas.drawing
         let strokes = drawing.strokes
-        let recovered = recoveredStrokes(lost, missingFrom: strokes, landing: edits.count)
-            + takenBackStrokes(edits.filter(\.dropped), missingFrom: strokes)
+        let putBack = recoveredStrokes(lost, missingFrom: strokes, landing: edits.count)
+        let recovered = putBack + takenBackStrokes(edits.filter(\.dropped), missingFrom: strokes)
         let edits = edits.filter { !$0.dropped }
         let undoManager = inkSelection.undoManagerOverride ?? canvas.undoManager
         var byIndex: [Int: PendingInkEdit.Kind] = [:]
@@ -2037,8 +2044,13 @@ extension PDFOverlayPageController {
         // edits apply straight to the drawing and register none either. A recovered stroke always has its own step.
         let mayPop = start < strokes.count && undoManager?.canUndo == true
         var owed: [Int] = []
+        // EP146: PencilKit owes a step that changes nothing for each stroke it threw away that goes back on the page
+        // now. Those it has made already are among the steps popped or just below them, and are dropped, however many.
+        let emptyStepsOwedBefore = emptyInkStepsOwed
+        emptyInkStepsOwed += putBack.count
         if let undoManager, mayPop {
             guard let popped = pop(undoManager, on: canvas, page: page, drawing: drawing, from: strokes, to: start) else {
+                emptyInkStepsOwed = emptyStepsOwedBefore
                 return showClearInk(on: canvas, page: page, strokes: strokes)
             }
             start = popped.end
@@ -2085,7 +2097,7 @@ extension PDFOverlayPageController {
         if replay.lassoNewest {
             inkSelection.lassoNewestStroke(page: page, strokeCount: after.strokes.count, undoManager: undoManager)
         }
-        if let undoManager, mayPop {
+        if let undoManager, mayPop || !putBack.isEmpty {
             // The strokes on the page now for those PencilKit had made no step for (the replay has one step per
             // stroke from `start`), with any still owed from an earlier landing on this page.
             let steps = owed.filter { $0 >= start && $0 - start < registered }.map { replay.steps[$0 - start] }
@@ -2094,6 +2106,9 @@ extension PDFOverlayPageController {
                 return added
             }
             let stillOwed = lateInkSteps?.page == page ? lateInkSteps : nil
+            // EP146: an empty step owed since an earlier landing was met by this one, or never comes; only those for
+            // the strokes put back now are still watched for.
+            emptyInkStepsOwed = min(emptyInkStepsOwed, putBack.count)
             expectLateInkSteps(page: page, strokes: (stillOwed?.strokes ?? []).union(landed.map(InkStrokeID.init)),
                                ownSteps: (stillOwed?.ownSteps ?? []).union(steps.map(\.actionName)),
                                undoManager: undoManager)
@@ -2109,11 +2124,15 @@ extension PDFOverlayPageController {
     /// late step that arrived while the next strokes waited is met only by that landing. Forgotten by then, it was
     /// kept as a step that took a landed stroke back, and the landing's own change of the drawing left it a step that
     /// changes nothing: one tap of undo did nothing (122 steps for 120 strokes on CI).
+    /// EP146: the watch is also for the steps that change nothing PencilKit still owes for strokes it threw away
+    /// (`emptyInkStepsOwed`), which it can make after the landing that put them back. With no stroke owed a step
+    /// there was no watch, and such a step stayed on top: the newest tap of undo did nothing (25 steps for 24
+    /// brackets on CI).
     private func expectLateInkSteps(page: Int, strokes: Set<InkStrokeID>, ownSteps: Set<String> = [],
                                     undoManager: UndoManager) {
         if let observer = lateInkSteps?.observer { NotificationCenter.default.removeObserver(observer) }
         lateInkSteps = nil
-        guard !strokes.isEmpty else { return }
+        guard !strokes.isEmpty || emptyInkStepsOwed > 0 else { return }
         let until = CACurrentMediaTime() + Self.lateInkStepWait
         let observer = NotificationCenter.default.addObserver(forName: .NSUndoManagerDidCloseUndoGroup, object: undoManager,
                                                               queue: nil) { [weak self] _ in
@@ -2123,7 +2142,7 @@ extension PDFOverlayPageController {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.inkEditsMayLand, !self.hasPendingInk, let canvas = self.canvases[page] else { return }
                     self.dropEmptySteps(undoManager, on: canvas, page: page)
-                    if self.lateInkSteps?.strokes.isEmpty == true {
+                    if self.lateInkSteps?.strokes.isEmpty == true, self.emptyInkStepsOwed == 0 {
                         self.expectLateInkSteps(page: page, strokes: [], undoManager: undoManager)
                     }
                 }
@@ -2170,9 +2189,9 @@ extension PDFOverlayPageController {
         var current = drawing
         var end = strokes.count
         var inOrder = true
-        // Each step for these strokes takes at least one off, and as many again may change nothing; past that, a
-        // pop would take older ink.
-        let most = 2 * (strokes.count - start) + 4
+        // Each step for these strokes takes at least one off, and as many again may change nothing, with one more
+        // for each stroke PencilKit threw away among them (EP146); past that, a pop would take older ink.
+        let most = 2 * (strokes.count - start) + 4 + emptyInkStepsOwed
         defer { isReplacingStroke = false }
         while end > start || !inOrder {
             // Below `start` an "Ink" step is EmberPad's own, made when earlier strokes landed: PencilKit's steps for
@@ -2240,7 +2259,11 @@ extension PDFOverlayPageController {
         isReplacingStroke = true
         guard scribbleRevisions.filter({ $0.key != page }) == others else { return .otherPage }
         let after = canvas.drawing
-        if after.strokes.count == drawing.strokes.count && after == drawing { return .empty }
+        if after.strokes.count == drawing.strokes.count && after == drawing {
+            // EP146: one of the steps PencilKit owed for the strokes it threw away, if any is still owed.
+            emptyInkStepsOwed = max(emptyInkStepsOwed - 1, 0)
+            return .empty
+        }
         if let late, late.page == page, after.strokes.count < drawing.strokes.count {
             let left = Set(after.strokes.map(InkStrokeID.init))
             let taken = drawing.strokes.map(InkStrokeID.init).filter { !left.contains($0) }
@@ -2273,6 +2296,9 @@ extension PDFOverlayPageController {
     /// EP113: all of EmberPad's own steps, not only "Ink". Tried, a step is undone and redone, and PencilKit draws the
     /// page as it was in between: the straight highlight or the erase below a landing went, or came back, for a frame.
     /// A dropped step leaves no redo behind either.
+    /// EP146: up to `mostEmptyStepsDropped`, and one more for each step PencilKit still owes for a stroke it threw
+    /// away. With 8 at most whatever was owed, a landing that put 13 strokes back left 5 such steps, and one that put
+    /// 50 back left 42: that many taps of undo in a row did nothing (122 steps for 120 strokes on CI).
     private func dropEmptySteps(_ undoManager: UndoManager, on canvas: PKCanvasView, page: Int) {
         let drawing = canvas.drawing
         let couldRedo = undoManager.canRedo
@@ -2281,7 +2307,7 @@ extension PDFOverlayPageController {
             isReplacingStroke = false
             if dropped > 0, !couldRedo { undoManager.emberClearRedo() }
         }
-        for _ in 0..<Self.mostEmptyStepsDropped {
+        for _ in 0..<Self.mostEmptyStepsDropped + emptyInkStepsOwed {
             guard undoManager.canUndo, !ownInkStepNames.contains(undoManager.undoActionName) else { return }
             guard case .empty = undoStep(undoManager, on: canvas, page: page, from: drawing) else {
                 return _ = putBack(1, on: undoManager)
@@ -2290,7 +2316,8 @@ extension PDFOverlayPageController {
         }
     }
 
-    /// How many empty steps one landing drops below its own at most.
+    /// How many empty steps one landing drops below its own at most, besides those PencilKit owes for the strokes
+    /// it threw away (`emptyInkStepsOwed`).
     static let mostEmptyStepsDropped = 8
 
     /// Makes PencilKit's clear copies of pen strokes on `page` visible in place, with no undo step.

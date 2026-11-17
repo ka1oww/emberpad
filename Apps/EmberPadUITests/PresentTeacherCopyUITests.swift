@@ -14,6 +14,13 @@ final class PresentTeacherCopyUITests: XCTestCase {
         app = XCUIApplication()
     }
 
+    /// Back to portrait: the Simulator keeps its orientation for whichever test class runs next. EP146: left in
+    /// landscape, every class after this one ran sideways, and ReadingPositionUITests' four swipes no longer
+    /// scrolled the wider worksheet past page 2.
+    override func tearDownWithError() throws {
+        XCUIDevice.shared.orientation = .portrait
+    }
+
     private func launch(_ arguments: [String]) {
         app.launchArguments = arguments
         app.launch()
