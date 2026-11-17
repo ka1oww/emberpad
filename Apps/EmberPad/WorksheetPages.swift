@@ -1,5 +1,6 @@
 import UIKit
 import PDFKit
+import ObjectiveC
 import PencilKit
 import EmberSyncKit
 
@@ -49,44 +50,50 @@ enum PaperTemplateRenderer {
     }
 
     private static func render(_ template: PaperTemplate) -> Data {
-        let size = template.pageSize
-        let bounds = CGRect(origin: .zero, size: size)
+        let bounds = CGRect(origin: .zero, size: template.pageSize)
         let format = UIGraphicsPDFRendererFormat()
         format.documentInfo = [kCGPDFContextCreator as String: "Ember Slate"]
         return UIGraphicsPDFRenderer(bounds: bounds, format: format).pdfData { context in
             context.beginPage()
-            let cg = context.cgContext
-            (template.color == .yellow ? yellowPaper : UIColor.white).setFill()
-            cg.fill(bounds)
-            switch template.kind {
-            case .blank:
-                break
-            case .squared:
-                cg.setStrokeColor(lineColor.cgColor)
-                cg.setLineWidth(lineWidth)
-                let xs = lines(across: size.width, pitch: gridPitch)
-                let ys = lines(across: size.height, pitch: gridPitch)
-                for x in xs { cg.move(to: CGPoint(x: x, y: 0)); cg.addLine(to: CGPoint(x: x, y: size.height)) }
-                for y in ys { cg.move(to: CGPoint(x: 0, y: y)); cg.addLine(to: CGPoint(x: size.width, y: y)) }
-                cg.strokePath()
-            case .dotted:
-                cg.setFillColor(dotColor.cgColor)
-                let radius: CGFloat = 0.6
-                for x in lines(across: size.width, pitch: gridPitch) {
-                    for y in lines(across: size.height, pitch: gridPitch) {
-                        cg.fillEllipse(in: CGRect(x: x - radius, y: y - radius, width: 2 * radius, height: 2 * radius))
-                    }
+            draw(template, in: context.cgContext)
+        }
+    }
+
+    /// Draws `template`'s paper filling its page, in a context whose origin is the page's top left. A Teach page
+    /// (EP153) draws its question over it.
+    static func draw(_ template: PaperTemplate, in cg: CGContext) {
+        let size = template.pageSize
+        let bounds = CGRect(origin: .zero, size: size)
+        cg.setFillColor((template.color == .yellow ? yellowPaper : UIColor.white).cgColor)
+        cg.fill(bounds)
+        switch template.kind {
+        case .blank:
+            break
+        case .squared:
+            cg.setStrokeColor(lineColor.cgColor)
+            cg.setLineWidth(lineWidth)
+            let xs = lines(across: size.width, pitch: gridPitch)
+            let ys = lines(across: size.height, pitch: gridPitch)
+            for x in xs { cg.move(to: CGPoint(x: x, y: 0)); cg.addLine(to: CGPoint(x: x, y: size.height)) }
+            for y in ys { cg.move(to: CGPoint(x: 0, y: y)); cg.addLine(to: CGPoint(x: size.width, y: y)) }
+            cg.strokePath()
+        case .dotted:
+            cg.setFillColor(dotColor.cgColor)
+            let radius: CGFloat = 0.6
+            for x in lines(across: size.width, pitch: gridPitch) {
+                for y in lines(across: size.height, pitch: gridPitch) {
+                    cg.fillEllipse(in: CGRect(x: x - radius, y: y - radius, width: 2 * radius, height: 2 * radius))
                 }
-            case .ruled:
-                cg.setStrokeColor(lineColor.cgColor)
-                cg.setLineWidth(lineWidth)
-                var y = ruledPitch * 3
-                while y < size.height - ruledPitch / 2 {
-                    cg.move(to: CGPoint(x: 0, y: y)); cg.addLine(to: CGPoint(x: size.width, y: y))
-                    y += ruledPitch
-                }
-                cg.strokePath()
             }
+        case .ruled:
+            cg.setStrokeColor(lineColor.cgColor)
+            cg.setLineWidth(lineWidth)
+            var y = ruledPitch * 3
+            while y < size.height - ruledPitch / 2 {
+                cg.move(to: CGPoint(x: 0, y: y)); cg.addLine(to: CGPoint(x: size.width, y: y))
+                y += ruledPitch
+            }
+            cg.strokePath()
         }
     }
 }
@@ -111,8 +118,13 @@ enum WorksheetPages {
             let page: PDFPage?
             if entry.isOriginal, let source = entry.pdfPage {
                 page = originalPages[source]
+            } else if let template = entry.template, let excerpt = entry.excerpt {
+                // EP153: a Teach page, its question drawn afresh from the PDF's own page.
+                guard originalPages.indices.contains(excerpt.pdfPage) else { throw LibraryError.invalidDocument }
+                page = pdf.borrowOnlyPage(of: TeachPage.pdfData(template, excerpt: excerpt, source: originalPages[excerpt.pdfPage]))
+                page?.teachLoops = TeachPage.loops(of: excerpt)
             } else if let template = entry.template {
-                page = PaperTemplateRenderer.page(for: template)
+                page = pdf.borrowOnlyPage(of: PaperTemplateRenderer.pdfData(for: template))
             } else if let source = entry.pdfPage, originalPages.indices.contains(source) {
                 // A duplicate of one of the PDF's own pages.
                 page = originalPages[source].copy() as? PDFPage
@@ -193,5 +205,21 @@ enum PageInkRotation {
             turned[index] = displayed(drawing, entry: entry, page: pdf.page(at: index)).dataRepresentation()
         }
         return turned
+    }
+}
+
+extension PDFDocument {
+    nonisolated(unsafe) private static var lendersKey: UInt8 = 0
+
+    /// The page of the one-page PDF `data`, to insert into this document, which keeps that PDF's document for as long
+    /// as it lives (EP153). A page taken from a document that is then let go still draws where it is put, but a copy of
+    /// it, as Present on Mac sends, saves blank. The page is not yet inserted.
+    func borrowOnlyPage(of data: Data) -> PDFPage? {
+        guard let lender = PDFDocument(data: data), let page = lender.page(at: 0) else { return nil }
+        withUnsafePointer(to: &Self.lendersKey) { key in
+            let lenders = (objc_getAssociatedObject(self, key) as? [PDFDocument]) ?? []
+            objc_setAssociatedObject(self, key, lenders + [lender], .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+        return page
     }
 }

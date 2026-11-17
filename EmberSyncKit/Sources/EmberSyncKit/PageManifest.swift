@@ -38,6 +38,46 @@ public struct PaperTemplate: Codable, Hashable, Sendable {
     }
 }
 
+/// EP153: Teach. A part of one of the worksheet's own PDF pages, drawn onto an added paper page: the content of
+/// `original.pdf` page `pdfPage`, shown as it was turned to `rotation`, inside every loop in `clips`, carried onto the
+/// paper by `transform`. It is drawn from `original.pdf` each time the worksheet opens, as vectors at any zoom, so a
+/// Teach page needs no file of its own and is only ever a part of its own worksheet's PDF.
+public struct PageExcerpt: Codable, Hashable, Sendable {
+    /// The zero-based page of `original.pdf` the content comes from.
+    public var pdfPage: Int
+    /// The rotation that page is drawn at, in degrees clockwise (0, 90, 180 or 270): its own rotation in the PDF plus
+    /// any the teacher had added when the loop was drawn, so the question lands upright as it was seen.
+    public var rotation: Int
+    /// The loops drawn round the content, in the space of that page as drawn (points, origin top left, `rotation`
+    /// applied). Only what is inside all of them shows. A Teach page taught again adds its loop to the first.
+    public var clips: [[CGPoint]]
+    /// From that space to the paper page's own (points, origin top left).
+    public var transform: CGAffineTransform
+
+    public init(pdfPage: Int, rotation: Int, clips: [[CGPoint]], transform: CGAffineTransform) {
+        self.pdfPage = pdfPage; self.rotation = rotation; self.clips = clips; self.transform = transform
+    }
+
+    /// A real part of page `pdfPage` of a PDF of `pdfPageCount` pages: finite loops of at least three points, a
+    /// quarter-turn rotation and a transform that can be undone.
+    func isValid(pdfPageCount: Int) -> Bool {
+        let numbers = [transform.a, transform.b, transform.c, transform.d, transform.tx, transform.ty]
+        return (0..<pdfPageCount).contains(pdfPage) && PageEntry.rotations.contains(rotation) && !clips.isEmpty
+            && clips.allSatisfy { $0.count >= 3 && $0.allSatisfy { $0.x.isFinite && $0.y.isFinite } }
+            && numbers.allSatisfy(\.isFinite) && abs(transform.a * transform.d - transform.b * transform.c) > 1e-9
+    }
+
+    /// The part on the paper page: the box round what all the loops hold, carried by `transform`.
+    public var placedBounds: CGRect {
+        let boxes = clips.compactMap { loop -> CGRect? in
+            guard let first = loop.first else { return nil }
+            return loop.dropFirst().reduce(CGRect(origin: first, size: .zero)) { $0.union(CGRect(origin: $1, size: .zero)) }
+        }
+        guard let first = boxes.first else { return .null }
+        return boxes.dropFirst().reduce(first) { $0.intersection($1) }.applying(transform)
+    }
+}
+
 /// One page of a worksheet, in reading order.
 public struct PageEntry: Codable, Equatable, Sendable, Identifiable {
     /// Stable for the life of the page. The PDF's own pages are `pdf-<index>`, so every migration names them
@@ -55,11 +95,13 @@ public struct PageEntry: Codable, Equatable, Sendable, Identifiable {
     public var rotation: Int
     /// EP62: the page is bookmarked (GoodNotes' favourite).
     public var isBookmarked: Bool
+    /// EP153: the part of the worksheet a Teach put on this paper page, or nil. Only a paper page has one.
+    public var excerpt: PageExcerpt?
 
     public init(id: String, pdfPage: Int?, template: PaperTemplate?, hasInk: Bool, rotation: Int = 0,
-                isBookmarked: Bool = false) {
+                isBookmarked: Bool = false, excerpt: PageExcerpt? = nil) {
         self.id = id; self.pdfPage = pdfPage; self.template = template; self.hasInk = hasInk
-        self.rotation = rotation; self.isBookmarked = isBookmarked
+        self.rotation = rotation; self.isBookmarked = isBookmarked; self.excerpt = excerpt
     }
 
     public static func originalID(pdfPage: Int) -> String { "pdf-\(pdfPage)" }
@@ -93,8 +135,9 @@ public struct PageEntry: Codable, Equatable, Sendable, Identifiable {
     static let rotations: Set<Int> = [0, 90, 180, 270]
 
     // `rotation` and `bookmarked` are written only when set, so a page nobody turned or bookmarked encodes exactly as
-    // before EP62, and a `pages.json` written before them reads as unturned and unbookmarked.
-    private enum CodingKeys: String, CodingKey { case id, pdfPage, template, hasInk, rotation, bookmarked }
+    // before EP62, and a `pages.json` written before them reads as unturned and unbookmarked. `excerpt` (EP153) is
+    // written only on a Teach page, so every other page encodes as before.
+    private enum CodingKeys: String, CodingKey { case id, pdfPage, template, hasInk, rotation, bookmarked, excerpt }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -104,6 +147,7 @@ public struct PageEntry: Codable, Equatable, Sendable, Identifiable {
         hasInk = try c.decode(Bool.self, forKey: .hasInk)
         rotation = try c.decodeIfPresent(Int.self, forKey: .rotation) ?? 0
         isBookmarked = try c.decodeIfPresent(Bool.self, forKey: .bookmarked) ?? false
+        excerpt = try c.decodeIfPresent(PageExcerpt.self, forKey: .excerpt)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -114,6 +158,7 @@ public struct PageEntry: Codable, Equatable, Sendable, Identifiable {
         try c.encode(hasInk, forKey: .hasInk)
         if rotation != 0 { try c.encode(rotation, forKey: .rotation) }
         if isBookmarked { try c.encode(true, forKey: .bookmarked) }
+        try c.encodeIfPresent(excerpt, forKey: .excerpt)
     }
 }
 
@@ -151,12 +196,15 @@ public struct PageManifest: Codable, Equatable, Sendable {
     public var hasTeacherContent: Bool { pages.contains { $0.hasInk } || hasCustomLayout }
 
     /// Every page of the PDF appears exactly once as an original (in any order, since EP62 pages can be moved);
-    /// every id is unique and safe; every entry is either a PDF page or a template page; and every rotation is a
-    /// quarter turn.
+    /// every id is unique and safe; every entry is either a PDF page or a template page; every rotation is a
+    /// quarter turn; and a Teach excerpt (EP153) is on a template page and a real part of the PDF.
     public func isValid(pdfPageCount: Int) -> Bool {
         guard format == Self.currentFormat, Set(ids).count == pages.count,
               pages.allSatisfy({ PageEntry.isSafeID($0.id) && (($0.pdfPage == nil) != ($0.template == nil)) }),
               pages.allSatisfy({ PageEntry.rotations.contains($0.rotation) }),
+              pages.allSatisfy({ page in
+                  page.excerpt.map { page.template != nil && $0.isValid(pdfPageCount: pdfPageCount) } ?? true
+              }),
               pages.allSatisfy({ $0.pdfPage.map { (0..<pdfPageCount).contains($0) } ?? true }) else { return false }
         return pages.filter(\.isOriginal).compactMap(\.pdfPage).sorted() == Array(0..<pdfPageCount)
     }

@@ -20,7 +20,8 @@ struct WorksheetSearchSnippet: Equatable {
 }
 
 /// Searches the worksheet's own PDF text (EP63), as GoodNotes' Search does. Pages added in Ember Slate are blank
-/// paper with no text, so they never match. Handwriting is not searched.
+/// paper with no text, so they never match, except a Teach page's question (EP153), which matches where it shows.
+/// Handwriting is not searched.
 enum WorksheetSearch {
     /// Case- and accent-insensitive, as library title search is.
     static let options: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
@@ -33,7 +34,11 @@ enum WorksheetSearch {
     static func hits(for query: String, in document: PDFDocument) -> [WorksheetSearchHit] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return [] }
-        let found = document.findString(needle, withOptions: options)
+        // A Teach page holds its PDF page's whole text, but shows only what is inside its loops.
+        let found = document.findString(needle, withOptions: options).filter { selection in
+            guard let page = selection.pages.first, let loops = page.teachLoops else { return true }
+            return TeachPage.shows(selection, on: page, inside: loops)
+        }
         return found.enumerated().compactMap { offset, selection in
             guard let page = selection.pages.first else { return nil }
             let index = document.index(for: page)

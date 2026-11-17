@@ -419,6 +419,8 @@ final class LibraryController: ObservableObject {
         case move(String, to: Int)
         /// Draws added paper page `id` on other paper (EP62).
         case changeTemplate(String, PaperTemplate)
+        /// EP153: a Teach page, with the part of the worksheet the lasso held, after the page it was drawn on.
+        case teach(TeachRequest)
     }
 
     /// Applies `edit` to the open worksheet `id` and returns the session that replaces its current one. The current
@@ -436,6 +438,9 @@ final class LibraryController: ObservableObject {
                 try await store.rotatePage(pageID, quarterTurns: clockwise ? 1 : -1, documentID: id)
             case .move(let pageID, let index): try await store.movePage(pageID, to: index, documentID: id)
             case .changeTemplate(let pageID, let template): try await store.changeTemplate(pageID, to: template, documentID: id)
+            case .teach(let request):
+                try await store.insertPage(request.template, excerpt: request.excerpt, ink: request.ink, at: request.index,
+                                           documentID: id)
             }
         } catch {
             showError(error.localizedDescription)
