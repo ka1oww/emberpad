@@ -13,6 +13,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// Each live canvas's page view (EP-49), held here as well as by PDFKit so a canvas always keeps its page space.
     private var pageViews: [Int: PageInkView] = [:]
     private weak var activeCanvas: PKCanvasView?
+    /// EP151: a page a touch landed on, readied for the Pencil before UIKit says whether the touch is the Pencil.
+    private weak var armedCanvas: PKCanvasView?
     private var pageObserver: NSObjectProtocol?
     private var viewportObservers: [NSObjectProtocol] = []
     private var scrollObservation: NSKeyValueObservation?
@@ -61,6 +63,20 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// EP120: a confirmed Clear Page waiting for PencilKit to commit a stroke it still holds. Internal for tests.
     var pendingClearPage: DispatchWorkItem?
     private var currentPage = 0
+    /// EP151: a page change the teacher's own scroll made, whose focus, page pill and saved reading position wait for
+    /// the scroll to stop. Focusing a page mid-scroll cost a frame or more each time a page boundary went by.
+    private var pageSettlePending = false
+    /// The page the scroll landed on is focused when it stops, unless the Pencil has chosen a page in the meantime.
+    private var pageSettleFocusPending = false
+    /// Watches, once a frame, for the scroll that `pageSettlePending` waits on to stop.
+    private var pageSettleLink: CADisplayLink?
+    private weak var scrollView: UIScrollView?
+    /// Whether the teacher's finger or fling is still moving the worksheet. Internal so tests can stand in for a drag.
+    lazy var scrollIsMoving: () -> Bool = { [weak self] in
+        guard let scrollView = self?.scrollView else { return false }
+        return scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
+            || scrollView.isZooming || scrollView.isZoomBouncing
+    }
     /// Off from the moment the worksheet starts leaving, so a late throttled frame cannot put a page back on the
     /// student view after the editor has cleared it.
     private var publishing = true
@@ -181,9 +197,14 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         pdfView.pageShadowsEnabled = true
         pdfView.backgroundColor = .emberCanvas
         pdfView.onCanvasFocus = { [weak self] canvas in
-            guard let self, self.activeCanvas !== canvas else { return }
+            guard let self else { return }
+            // The Pencil chose this page, so a scroll that stops later does not move the focus off it.
+            self.pageSettleFocusPending = false
+            guard self.activeCanvas !== canvas else { return }
             self.focus(canvas)
         }
+        pdfView.onCanvasArm = { [weak self] canvas in self?.arm(canvas) }
+        pdfView.onFingerDown = { [weak self] in self?.disarm() }
         pdfView.document = session.pdf
         session.drawingDidChange = { [weak self] _, _ in
             // Any visible page's committed ink can be on the student view, not only the focused page's.
@@ -271,6 +292,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// including deceleration, which the visible-pages and scale notifications miss.
     private func observeScrolling() {
         guard scrollObservation == nil, let scrollView = Self.firstScrollView(in: pdfView) else { return }
+        self.scrollView = scrollView
         scrollObservation = scrollView.observe(\.contentOffset, options: []) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.viewportThrottle.signal() }
         }
@@ -291,6 +313,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        if pageSettlePending { settlePageChange(focusing: false) }
         saveReadingPosition()
         landInkEdits()
         cancelInkLandingWaits()
@@ -373,7 +396,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     func pdfView(_ pdfView: PDFView, willDisplayOverlayView overlayView: UIView, for page: PDFPage) {
-        if let canvas = (overlayView as? PageInkView)?.canvas, session.pdf.index(for: page) == currentPage { focus(canvas) }
+        // While a scroll's page change waits to settle, the settle focuses the page instead.
+        if let canvas = (overlayView as? PageInkView)?.canvas, session.pdf.index(for: page) == currentPage, !pageSettlePending {
+            focus(canvas)
+        }
     }
 
     func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
@@ -612,10 +638,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let pointing = tools.current == .laser && !readOnly
         // EP99: EmberPad's own whole-stroke eraser takes the Pencil; PencilKit's would erase only what the tip touches.
         let ownEraser = tools.current == .eraser && tools.settings.eraserMode == .wholeStroke && !readOnly
+        armedCanvas = nil
         for candidate in canvases.values {
-            let focused = candidate === activeCanvas && !readOnly
-            candidate.drawingGestureRecognizer.isEnabled = focused && !lasso && !pointing && !ownEraser
-            InkSelectionController.lassoRecognizer(on: candidate)?.isEnabled = focused && lasso
+            setInput(on: candidate, focused: candidate === activeCanvas && !readOnly)
             Self.turnOffPencilKitSelection(on: candidate)
         }
         if laser.isEnabled != pointing { laser.isEnabled = pointing }
@@ -625,6 +650,38 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if eraserHover.isEnabled != erasing { eraserHover.isEnabled = erasing }
         if wholeStrokeEraserClaim.isEnabled != ownEraser { wholeStrokeEraserClaim.isEnabled = ownEraser }
         if !erasing { hideEraserCircle() }
+    }
+
+    /// Turns on, or off, the recognisers by which `canvas` takes the Pencil, as `updateCanvasInput` does for the
+    /// focused page and the rest.
+    private func setInput(on canvas: PKCanvasView, focused: Bool) {
+        let lasso = tools.current == .lasso && !readOnly
+        let pointing = tools.current == .laser && !readOnly
+        let ownEraser = tools.current == .eraser && tools.settings.eraserMode == .wholeStroke && !readOnly
+        let drawing = focused && !lasso && !pointing && !ownEraser
+        if canvas.drawingGestureRecognizer.isEnabled != drawing { canvas.drawingGestureRecognizer.isEnabled = drawing }
+        if let lassoRecognizer = InkSelectionController.lassoRecognizer(on: canvas), lassoRecognizer.isEnabled != (focused && lasso) {
+            lassoRecognizer.isEnabled = focused && lasso
+        }
+    }
+
+    /// EP151: a touch is landing on `canvas`, and UIKit has not yet said whether it is the Pencil. Its recognisers
+    /// are turned on now, while UIKit gathers the ones the touch will reach, so a Pencil's first stroke on a page
+    /// that is not focused still draws. Only that: a finger is not focusing the page, and focusing (the first
+    /// responder, the tool, the student view) waits for the window to say the touch is the Pencil
+    /// (`PageHitTestPDFView.touchesWillBeDelivered`).
+    private func arm(_ canvas: PKCanvasView) {
+        guard canvas !== activeCanvas, !readOnly else { return }
+        if armedCanvas !== canvas { disarm() }
+        armedCanvas = canvas
+        setInput(on: canvas, focused: true)
+    }
+
+    /// The touch that armed a page was a finger, so that page goes back to not taking the Pencil.
+    private func disarm() {
+        guard let canvas = armedCanvas else { return }
+        armedCanvas = nil
+        if canvas !== activeCanvas { setInput(on: canvas, focused: false) }
     }
 
     /// PencilKit has started the eraser on the ink it holds. "Erase highlighter only" set the pen ink aside before
@@ -815,13 +872,46 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let index = session.pdf.index(for: page)
         guard index != NSNotFound, index != currentPage else { return }
         currentPage = index
-        if let canvas = canvases[currentPage] { focus(canvas) }
-        else {
-            studentPage = index
-            publishPage()
+        guard scrollIsMoving() else { return settlePageChange(focusing: true) }
+        // EP151: mid-scroll, only the student view follows at once (Present and the class view keep up with the
+        // teacher). Focusing the page, the page pill and the saved reading position wait for the scroll to stop,
+        // once, for the page it stops on. A programmatic jump is not a scroll, so it settles at once.
+        studentPage = index
+        publishPage()
+        pageSettlePending = true
+        pageSettleFocusPending = true
+        guard pageSettleLink == nil else { return }
+        let link = CADisplayLink(target: PageSettleTicker(self), selector: #selector(PageSettleTicker.tick(_:)))
+        link.add(to: .main, forMode: .common)
+        pageSettleLink = link
+    }
+
+    /// Called once a frame while a scroll's page change waits; settles it once the worksheet has stopped.
+    fileprivate func checkPageSettled() {
+        guard pageSettlePending else { return stopPageSettleLink() }
+        if !scrollIsMoving() { settlePageChange(focusing: pageSettleFocusPending) }
+    }
+
+    private func settlePageChange(focusing: Bool) {
+        pageSettlePending = false
+        pageSettleFocusPending = false
+        stopPageSettleLink()
+        // Without focusing, the student view already shows what it should: the page the scroll reached, or the page
+        // the Pencil has since chosen.
+        if focusing {
+            if let canvas = canvases[currentPage] { focus(canvas) }
+            else {
+                studentPage = currentPage
+                publishPage()
+            }
         }
-        onPageChange?(index)
+        onPageChange?(currentPage)
         saveReadingPosition()
+    }
+
+    private func stopPageSettleLink() {
+        pageSettleLink?.invalidate()
+        pageSettleLink = nil
     }
 
     private func publishPage() {
@@ -2581,20 +2671,62 @@ extension PDFOverlayPageController {
 /// Select only the touched page's drawing recognizer using public APIs.
 final class PageHitTestPDFView: PDFView {
     var visibleCanvases: [PKCanvasView] = []
+    /// The Pencil touched this page: focus it.
     var onCanvasFocus: ((PKCanvasView) -> Void)?
+    /// A touch, of a kind not yet known, is landing on this page: ready it for the Pencil (EP151).
+    var onCanvasArm: ((PKCanvasView) -> Void)?
+    /// A finger touched down, so the page `onCanvasArm` readied need not stay ready (EP151).
+    var onFingerDown: (() -> Void)?
+
+    func canvas(at point: CGPoint) -> PKCanvasView? {
+        visibleCanvases.first(where: { $0.pageSpace.bounds.contains($0.pageSpace.convert(point, from: self)) })
+    }
 
     @discardableResult
     func focusCanvas(at point: CGPoint) -> PKCanvasView? {
-        guard let canvas = visibleCanvases.first(where: { $0.pageSpace.bounds.contains($0.pageSpace.convert(point, from: self)) }) else {
-            return nil
-        }
+        guard let canvas = canvas(at: point) else { return nil }
         onCanvasFocus?(canvas)
         return canvas
     }
 
+    /// EP151: UIKit hit-tests a new touch before saying what it is (the event's `allTouches` is still empty here)
+    /// and gathers the recognisers the touch will reach straight after. So the page under every touch is readied
+    /// for the Pencil here, cheaply, and focused only once the window reports that the touch is the Pencil
+    /// (`touchesWillBeDelivered`). Focusing it here, for a finger too, held up the start of every scroll that began
+    /// on a page other than the focused one.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        if event?.type == .touches { focusCanvas(at: point) }
+        if event?.type == .touches, let canvas = canvas(at: point) { onCanvasArm?(canvas) }
         return super.hitTest(point, with: event)
+    }
+
+    /// Called by the window for every touches event before UIKit hands it to any recogniser or view (EP151). A
+    /// Pencil touching down focuses the page under it, so the stroke's recognisers find it focused, as hit testing
+    /// used to; a finger touching down leaves the focus where it is.
+    static func touchesWillBeDelivered(_ event: UIEvent) {
+        guard event.type == .touches, let touches = event.allTouches else { return }
+        for touch in touches where touch.phase == .began {
+            guard let pdfView = enclosingPDFView(of: touch.view) else { continue }
+            if touch.type == .pencil { pdfView.focusCanvas(at: touch.location(in: pdfView)) }
+            else { pdfView.onFingerDown?() }
+        }
+    }
+
+    private static func enclosingPDFView(of view: UIView?) -> PageHitTestPDFView? {
+        var view = view
+        while let current = view {
+            if let pdfView = current as? PageHitTestPDFView { return pdfView }
+            view = current.superview
+        }
+        return nil
+    }
+}
+
+/// The main window (EP151). It tells a worksheet what kind of touch is landing before UIKit hands the touch to any
+/// recogniser, because hit testing, where the worksheet first sees the touch, cannot tell a finger from the Pencil.
+final class EmberWindow: UIWindow {
+    override func sendEvent(_ event: UIEvent) {
+        PageHitTestPDFView.touchesWillBeDelivered(event)
+        super.sendEvent(event)
     }
 }
 
@@ -2603,6 +2735,17 @@ extension PDFPage {
     var displayedSize: CGSize {
         let size = bounds(for: .cropBox).size
         return rotation % 180 == 0 ? size : CGSize(width: size.height, height: size.width)
+    }
+}
+
+/// Drives `checkPageSettled` while a scroll's page change waits (EP151). A link whose controller has gone stops itself.
+@MainActor
+private final class PageSettleTicker: NSObject {
+    private weak var controller: PDFOverlayPageController?
+    init(_ controller: PDFOverlayPageController) { self.controller = controller }
+    @objc func tick(_ link: CADisplayLink) {
+        guard let controller else { return link.invalidate() }
+        controller.checkPageSettled()
     }
 }
 

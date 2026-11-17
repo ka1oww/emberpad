@@ -48,6 +48,31 @@ final class PencilEventStub: UIEvent {
     override func predictedTouches(for touch: UITouch) -> [UITouch]? { [] }
 }
 
+/// A stand-in finger touch (EP151), as `PencilTouchStub` is for the Pencil: only ever handed to a hit test and to
+/// `PageHitTestPDFView.touchesWillBeDelivered`, as UIKit hands a real one, never to `UIApplication.sendEvent`.
+final class DirectTouchStub: UITouch {
+    private weak var stubWindow: UIWindow?
+    private weak var stubView: UIView?
+    let point: CGPoint
+    init(window: UIWindow, view: UIView, at point: CGPoint) {
+        stubWindow = window; stubView = view; self.point = point
+        super.init()
+    }
+    override var window: UIWindow? { stubWindow }
+    override var view: UIView? { stubView }
+    override var phase: UITouch.Phase { .began }
+    override var type: UITouch.TouchType { .direct }
+    override var tapCount: Int { 1 }
+    override func location(in view: UIView?) -> CGPoint { (view ?? stubWindow)?.convert(point, from: nil) ?? point }
+}
+
+final class DirectTouchEventStub: UIEvent {
+    let touch: DirectTouchStub
+    init(_ touch: DirectTouchStub) { self.touch = touch; super.init() }
+    override var type: UIEvent.EventType { .touches }
+    override var allTouches: Set<UITouch>? { [touch] }
+}
+
 /// One Pencil stroke handed to `recognizers` in steps along a straight line, in window coordinates, letting the run
 /// loop turn between samples as real input would.
 @MainActor

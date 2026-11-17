@@ -57,7 +57,7 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
         #if DEBUG
         UITestLaunch.prepareIfRequested()
         #endif
-        let window = UIWindow(windowScene: scene)
+        let window = EmberWindow(windowScene: scene)
         switch AppEnvironment.shared {
         case .success(let environment):
             self.environment = environment

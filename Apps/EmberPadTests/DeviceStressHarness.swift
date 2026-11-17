@@ -99,12 +99,19 @@ enum StressBounds {
     /// EP126: the most drawings a page is given through one drag or resize of a selection: one to pick it up and one to
     /// drop it, never one per move.
     static let lassoPageDrawings = 2
+    /// EP151: the longest gap between two display frames around a page boundary passing while a finger scrolls the
+    /// pages: two 60 Hz frames (33 ms), so a crossing never holds the page back behind the finger for longer.
+    static let scrollCrossingFrameGap: Double = 2.0 / 60
+    /// EP151: what the worksheet may do on the main thread when a finger touches down on a page, from its hit test to
+    /// the window handing the touch on, before the scroll can start.
+    static let fingerTouchDown: Double = 0.008
 
     static var summary: [String: Double] {
         ["penToInkP95Ms": penToInkP95 * 1000, "penToInkMaxMs": penToInkMax * 1000,
          "longestFrameGapMs": longestFrameGap * 1000, "removalMs": removal * 1000, "landingMs": landing * 1000,
          "blipMs": blip * 1000, "lassoFrameGapMs": lassoFrameGap * 1000, "lassoMomentMs": lassoMoment * 1000,
-         "lassoPageDrawings": Double(lassoPageDrawings)]
+         "lassoPageDrawings": Double(lassoPageDrawings), "scrollCrossingFrameGapMs": scrollCrossingFrameGap * 1000,
+         "fingerTouchDownMs": fingerTouchDown * 1000]
     }
 }
 
