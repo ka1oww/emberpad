@@ -794,9 +794,11 @@ final class CompanionLessonModel: ObservableObject {
         } else {
             recording.log.endFile(at: date(bytes == 0 ? now : recording.segmentGrewAt, in: recording))
         }
-        let flight = recording.flight
+        // A failed writer lands no frame (appendVideo refuses), so only a live one is waited for.
+        let flight = dead ? nil : recording.flight
+        let limit = options.frameDrainLimit
         Task {
-            await flight.drained(within: options.frameDrainLimit)
+            await flight?.drained(within: limit)
             _ = await writer.finish()
         }
         notRecording(recording, from: bytes == 0 ? recording.segmentStart : recording.segmentGrewAt, at: now)
