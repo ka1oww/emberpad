@@ -194,10 +194,13 @@ struct AddPagePopover: View {
 struct PaperTemplatePicker: View {
     let title: String
     let apply: (PaperTemplate) -> Void
+    var fixedSize = false
     @State private var template: PaperTemplate
 
-    init(initial: PaperTemplate, title: String = "Templates", apply: @escaping (PaperTemplate) -> Void) {
+    init(initial: PaperTemplate, title: String = "Templates", fixedSize: Bool = false,
+         apply: @escaping (PaperTemplate) -> Void) {
         self.title = title
+        self.fixedSize = fixedSize
         self.apply = apply
         _template = State(initialValue: initial)
     }
@@ -214,6 +217,7 @@ struct PaperTemplatePicker: View {
                         Label(template.sizeTitle, systemImage: "doc").font(Theme.meta)
                     }
                     .accessibilityLabel("Paper size, \(template.sizeTitle)")
+                    .disabled(fixedSize)
                     Spacer()
                     Picker("Colour", selection: $template.color) {
                         Text("White").tag(PaperTemplate.Color.white)
@@ -227,6 +231,7 @@ struct PaperTemplatePicker: View {
                     Text("Landscape").tag(PaperTemplate.Orientation.landscape)
                 }
                 .pickerStyle(.segmented)
+                .disabled(fixedSize)
                 Text("Essentials").font(Theme.meta).foregroundStyle(Theme.text2)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 12)], spacing: 12) {
                     ForEach(PaperTemplate.Kind.allCases, id: \.self) { kind in

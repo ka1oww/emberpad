@@ -35,6 +35,22 @@ protocol WorksheetPageRenderer: AnyObject {
     /// EP119: lands every stroke and ink change in flight, then takes no more input, before the worksheet leaves the
     /// screen for another tab.
     func landInkBeforeLeaving(timeout: TimeInterval) async
+    /// EP153: the lasso's Teach, which the editor carries out. Nil offers no Teach.
+    var onTeach: ((TeachRequest) -> Void)? { get set }
+    /// EP153: the page edit that opened these pages, undone once every ink step is.
+    var pageUndo: PageUndo? { get set }
+    /// EP153: how far above `startPage`'s top the view lands, so the top of the page shows below the floating palette.
+    var startPageLeadIn: CGFloat { get set }
+}
+
+/// EP153: a page edit's undo, kept below the ink's undo steps rather than among them: landing ink pops and drops
+/// steps that change no drawing, which a page edit's step would look like. `perform` returns whether it was carried
+/// out (no other page edit was under way).
+struct PageUndo {
+    let name: String
+    /// The page the edit made, which undo must be on for the edit to be undone.
+    let page: Int
+    let perform: @MainActor () -> Bool
 }
 
 /// This is the replacement point for report option B. Ink and persistence belong to DocumentSession.
@@ -626,6 +642,8 @@ extension EditorScreen {
         chrome.rotatePage = { clockwise in rotatePage(clockwise: clockwise) }
         chrome.changeTemplate = { template in changeTemplate(template) }
         chrome.pageAction = { action in pageAction(action) }
+        // EP153: only a Student copy takes added pages, so only it offers Teach.
+        if opened.record.role == .student { made.onTeach = { request in teach(request) } }
         made.setReadOnly(chrome.readOnly)
         search.highlight = { [weak made] matches, current in made?.highlightSearch(matches, current: current) }
         search.reveal = { [weak made] match in made?.reveal(match) }
@@ -657,9 +675,12 @@ extension EditorScreen {
     }
 
     /// Saves the page in view's ink, changes the pages, then reopens the worksheet on its new pages with `show` in
-    /// view. Ink input is off throughout, so no stroke lands on a page that is moving.
-    private func editPages(_ edit: LibraryController.PageEdit, show page: Int) {
-        guard let old = renderer, session != nil, !editingPages else { return }
+    /// view, and then runs `done` with them. Ink input is off throughout, so no stroke lands on a page that is moving.
+    /// Returns false, doing nothing, while another page edit is under way.
+    @discardableResult
+    private func editPages(_ edit: LibraryController.PageEdit, show page: Int,
+                           done: ((DocumentSession, any WorksheetPageRenderer) -> Void)? = nil) -> Bool {
+        guard let old = renderer, session != nil, !editingPages else { return false }
         editingPages = true
         old.setPageInput(false)
         Task {
@@ -668,8 +689,25 @@ extension EditorScreen {
                 let next = try await library.editPages(documentID, edit)
                 old.retire()
                 install(next, startPage: min(max(page, 0), next.pdf.pageCount - 1))
+                if let made = renderer { done?(next, made) }
             } catch {
                 if library.liveSession(for: documentID) != nil { old.setPageInput(true) }
+            }
+        }
+        return true
+    }
+
+    /// EP153: the lasso's Teach. Adds the Teach page straight after the page the lasso was drawn on, turns to it with
+    /// the pen in hand, and makes removing it the first undo. The page the lasso was on is left as it was.
+    private func teach(_ request: TeachRequest) {
+        guard canAddPages else { return }
+        editPages(.teach(request), show: request.index) { next, made in
+            guard let added = next.page(at: request.index)?.id else { return }
+            if tools.current == .lasso { tools.select(.pen) }
+            // The question is at the page's top, which would land under the palette at the top of the view.
+            made.startPageLeadIn = TeachPage.landingLeadIn
+            made.pageUndo = PageUndo(name: "Teach", page: request.index) {
+                editPages(.remove(added), show: request.sourcePage)
             }
         }
     }
@@ -836,7 +874,8 @@ extension EditorScreen {
         .popover(isPresented: $chrome.changeTemplateOpen, arrowEdge: .top) {
             if let template = currentEntry?.template {
                 NavigationStack {
-                    PaperTemplatePicker(initial: template, title: "Change Template") { changeTemplate($0) }
+                    PaperTemplatePicker(initial: template, title: "Change Template",
+                                        fixedSize: currentEntry?.excerpt != nil) { changeTemplate($0) }
                 }
                 .frame(width: 380, height: 440)
                 .tint(Theme.accent)

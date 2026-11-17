@@ -216,6 +216,34 @@ public actor LibraryStore {
         return manifest
     }
 
+    /// EP153: Teach. Adds a page of `template` paper at zero-based `index` showing `excerpt`, a part of one of this
+    /// worksheet's own PDF pages, with `ink` (a `PKDrawing.dataRepresentation()`, or nil for none) already on it.
+    /// Only a Student copy takes one, and an excerpt can only name this worksheet's own PDF, so a Teach page never
+    /// holds anything of a Teacher copy. Returns the new manifest; the new page is `pages[index]`.
+    @discardableResult
+    public func insertPage(_ template: PaperTemplate, excerpt: PageExcerpt, ink: Data?, at index: Int,
+                           documentID: UUID) throws -> PageManifest {
+        var record = try read(documentID)
+        guard record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        var manifest = try pageManifest(for: record)
+        guard (0...manifest.count).contains(index) else { throw LibraryError.pageOutOfRange }
+        let page = PageEntry(id: UUID().uuidString, pdfPage: nil, template: template, hasInk: ink != nil, excerpt: excerpt)
+        var next = manifest
+        next.pages.insert(page, at: index)
+        guard next.isValid(pdfPageCount: manifest.pages.filter(\.isOriginal).count) else { throw LibraryError.invalidDocument }
+        // Protect the worksheet first: a crash in between overprotects it, never lets an update replace it.
+        record.hasInk = true
+        try write(record)
+        // The ink is in place before the manifest names the page, so the page never shows up without it.
+        if let ink {
+            try files.createDirectory(at: inkFolder(documentID), withIntermediateDirectories: true)
+            try ink.write(to: inkURL(documentID, page.id), options: .atomic)
+        }
+        manifest = next
+        try writePageManifest(manifest, documentID)
+        return manifest
+    }
+
     /// Copies the page `pageID`, paper and ink, straight after it. Returns the new manifest.
     @discardableResult
     public func duplicatePage(_ pageID: String, documentID: UUID) throws -> PageManifest {
@@ -225,7 +253,7 @@ public actor LibraryStore {
         guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
         let source = manifest.pages[index]
         let copy = PageEntry(id: UUID().uuidString, pdfPage: source.pdfPage, template: source.template, hasInk: source.hasInk,
-                             rotation: source.rotation)
+                             rotation: source.rotation, excerpt: source.excerpt)
         record.hasInk = true
         try write(record)
         // The ink is in place before the manifest names the copy, so the copy never shows up without it.
@@ -305,6 +333,10 @@ public actor LibraryStore {
         var manifest = try pageManifest(for: record)
         guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
         guard manifest.pages[index].template != nil else { throw LibraryError.pageKeepsItsPaper }
+        if let current = manifest.pages[index].template, manifest.pages[index].excerpt != nil,
+           current.size != template.size || current.orientation != template.orientation {
+            throw LibraryError.pageKeepsItsSize
+        }
         manifest.pages[index].template = template
         try commit(manifest, record: &record)
         return manifest

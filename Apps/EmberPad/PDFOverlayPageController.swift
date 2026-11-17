@@ -152,6 +152,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private var highlighterErase: HighlighterEraseStroke?
     /// Read-only mode (EP63): the pages take no ink, lasso, eraser, laser, paste or undo. Internal for tests.
     private(set) var readOnly = false
+    /// EP153: adds the Teach page the lasso asked for; the editor sets it for a Student copy. Without it the lasso
+    /// offers no Teach.
+    var onTeach: ((TeachRequest) -> Void)?
+    /// EP153: the page edit this worksheet was just reopened by (a Teach), undone once every ink step is.
+    var pageUndo: PageUndo?
     /// Two-finger double tap undoes, three-finger double tap redoes. Internal for tests.
     let undoTap = UITapGestureRecognizer()
     let redoTap = UITapGestureRecognizer()
@@ -160,6 +165,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     var viewController: UIViewController { self }
     var onPageChange: ((Int) -> Void)?
     var startPage: Int?
+    var startPageLeadIn: CGFloat = 0
     /// EP121: where this worksheet is remembered as left (page, scroll and zoom), read when it appears and written as
     /// it is left. Nil (as in tests) remembers nothing.
     var readingPositions: ReadingPositions?
@@ -264,8 +270,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             startPage = nil
             // After PDFKit's first layout, or `go(to:)` lands on the first page.
             DispatchQueue.main.async { [weak self] in
-                self?.goToPage(page)
-                self?.positionRestored = true
+                guard let self else { return }
+                goToPage(page, leadIn: startPageLeadIn)
+                positionRestored = true
             }
         } else if !positionRestored {
             // EP121: a worksheet opens where it was left, in this launch or an earlier one.
@@ -562,8 +569,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         // EP126: never on a page whose selected ink a drag holds lifted off it.
         if inkSelection.holdsLiftedInk { inkSelection.dismiss() }
         landInkEdits()
-        guard let undoManager = activeCanvas?.undoManager else { return }
-        stepPastEmptySteps(can: { undoManager.canUndo }, undoManager.undo)
+        if let undoManager = activeCanvas?.undoManager, undoManager.canUndo {
+            stepPastEmptySteps(can: { undoManager.canUndo }, undoManager.undo)
+            return
+        }
+        // EP153: below every ink step, the Teach that opened these pages. A page edit starts the undo history afresh,
+        // so it is always the first step taken, and it never sits among the ink steps a landing pops and drops.
+        if let pageUndo, let active = activeCanvas, canvases[pageUndo.page] === active, pageUndo.perform() { self.pageUndo = nil }
     }
     func redo() {
         guard !readOnly else { return }
@@ -803,6 +815,28 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if !readOnly, let activeCanvas { activeCanvas.becomeFirstResponder() }
     }
 
+    // MARK: Teach (EP153)
+
+    /// Whether Teach is offered for `lasso` (drawing space) on `page`: on a Student copy that is being edited, when the
+    /// lasso holds some of the worksheet's printed content. A Teacher copy never offers it, so no answer can reach a
+    /// page the class sees through Teach.
+    func canTeach(page: Int, lasso: [CGPoint]) -> Bool {
+        guard onTeach != nil, !readOnly, session.record.role == .student, !session.isRetired,
+              let entry = session.page(at: page), let pdfPage = session.pdf.page(at: page) else { return false }
+        return TeachPage.holdsPrintedContent(lasso: lasso, entry: entry, page: pdfPage) { [session] index in
+            session.pages.pages.firstIndex { $0.isOriginal && $0.pdfPage == index }.flatMap { session.pdf.page(at: $0) }
+        }
+    }
+
+    /// Asks the editor for a Teach page after `page`: what is inside `lasso` there, with `strokes` (the selected ink,
+    /// as shown) carried onto it. The page itself is left as it is.
+    func teach(page: Int, lasso: [CGPoint], strokes: [PKStroke]) {
+        guard canTeach(page: page, lasso: lasso), let entry = session.page(at: page), let pdfPage = session.pdf.page(at: page),
+              let made = TeachPage.excerpt(lasso: lasso, entry: entry, page: pdfPage) else { return }
+        onTeach?(TeachRequest(sourcePage: page, template: TeachPage.paper, excerpt: made.excerpt,
+                              ink: TeachPage.ink(strokes, by: made.ink)))
+    }
+
     // MARK: Search (EP63)
 
     /// The search highlights are PDFKit's own, drawn by the PDF view under the ink; they never reach the stored PDF,
@@ -862,9 +896,15 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         inkSelection.undoManagerOverride?.removeAllActions()
     }
 
-    func goToPage(_ index: Int) {
+    func goToPage(_ index: Int) { goToPage(index, leadIn: 0) }
+
+    /// Shows page `index` from its top, or from `leadIn` points of the view above it (EP153).
+    func goToPage(_ index: Int, leadIn: CGFloat) {
         guard let page = session.pdf.page(at: index) else { return }
         pdfView.go(to: page)
+        guard leadIn > 0, let scrollView = Self.firstScrollView(in: pdfView) else { return }
+        pdfView.layoutIfNeeded()
+        scrollView.contentOffset.y = max(-scrollView.adjustedContentInset.top, scrollView.contentOffset.y - leadIn)
     }
 
     private func pageChanged() {

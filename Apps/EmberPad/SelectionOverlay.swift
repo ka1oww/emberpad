@@ -6,7 +6,9 @@ import UniformTypeIdentifiers
 
 /// One page's selected ink: which strokes, the box round them, and the
 /// lasso drawn round them (in the box's own space, so it moves, scales and
-/// turns with the box).
+/// turns with the box). EP153: a lasso round printed worksheet content and
+/// no ink selects that area alone (no strokes, the box round the lasso),
+/// for Teach.
 struct InkSelection: Equatable {
     let page: Int
     var indices: [Int]
@@ -101,6 +103,8 @@ final class InkSelectionController {
     var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// The newest closed fountain-pen loop, while a long-press can still turn it into a selection.
     private var liftedLoop: LiftedLoop?
+    /// EP153: whether the selection, as it was, holds printed content to Teach from.
+    private var teachable: (selection: InkSelection, value: Bool)?
     /// The Paste menu a finger long-press on a page opens.
     private(set) lazy var pasteMenu = PasteMenu { [weak self] page, point in
         guard let self else { return }
@@ -171,12 +175,31 @@ final class InkSelectionController {
 
     // MARK: - Selecting
 
-    /// Selects the strokes on `page` at least half inside `lasso`. Returns
-    /// false, leaving nothing selected, when no stroke is inside.
+    /// Selects the strokes on `page` at least half inside `lasso`. With no
+    /// stroke inside, a lasso round the worksheet's printed content selects
+    /// that area for Teach (EP153). Returns false, leaving nothing selected,
+    /// when neither is inside.
     @discardableResult
     func select(page: Int, lasso: [CGPoint]) -> Bool {
-        guard let canvas = host?.canvases[page] else { return false }
-        return show(LassoGeometry.selectedIndices(in: canvas.drawing, lasso: lasso), page: page, outline: lasso)
+        guard let host, let canvas = host.canvases[page] else { return false }
+        let indices = LassoGeometry.selectedIndices(in: canvas.drawing, lasso: lasso)
+        if indices.isEmpty, host.canTeach(page: page, lasso: lasso) { return showArea(page: page, lasso: lasso) }
+        return show(indices, page: page, outline: lasso)
+    }
+
+    /// EP153: selects the area inside `lasso` on `page`, with no ink, as
+    /// GoodNotes' lasso does round a PDF's content. It shows the dashed
+    /// lasso; a tap inside opens a menu of Teach alone, and it does not move.
+    private func showArea(page: Int, lasso: [CGPoint]) -> Bool {
+        guard lasso.count >= 3, let canvas = host?.canvases[page], let bounds = LassoGeometry.bounds(of: lasso) else {
+            dismiss()
+            return false
+        }
+        dismiss()
+        let box = SelectionBox(rect: bounds)
+        selection = InkSelection(page: page, indices: [], box: box, outline: lasso)
+        overlay.show(box, outline: lasso, on: canvas, movable: false)
+        return true
     }
 
     /// Selects `indices` on `page`, outlined by `outline` (drawing space), or
@@ -438,7 +461,8 @@ final class InkSelectionController {
     /// Makes the selected ink ready in its page's lift layer for a drag, with the page's drawing without it.
     private func readyLift() {
         forgetLift()
-        guard let host, let selection, let canvas = host.canvases[selection.page], let ink = pageInk(selection.page) else { return }
+        guard let host, let selection, !selection.indices.isEmpty, let canvas = host.canvases[selection.page],
+              let ink = pageInk(selection.page) else { return }
         let strokes = canvas.drawing.strokes
         let picked = Set(selection.indices)
         let generation = ink.prepareLift(selection.indices.filter(strokes.indices.contains).map { strokes[$0] })
@@ -499,8 +523,42 @@ final class InkSelectionController {
     // MARK: - Cut, Copy, Delete, Duplicate, Resize, Color, Paste
 
     /// The edit menu, in GoodNotes' order. GoodNotes' overflow (Take
-    /// Screenshot, Add Element, Convert) is not offered yet.
+    /// Screenshot, Add Element, Convert) is not offered yet; Teach (EP153)
+    /// takes Take Screenshot's place at the end, when the lasso holds the
+    /// worksheet's printed content, and is the whole menu of an area with no ink.
     private func menuActions() -> [SelectionAction] {
+        guard let selection else { return [] }
+        let teach = isTeachable(selection) ? [
+            SelectionAction(title: "Teach", symbol: "graduationcap") { [weak self] in self?.teachSelection() }
+        ] : []
+        return selection.indices.isEmpty ? teach : inkActions() + teach
+    }
+
+    /// Whether the lasso, where it is now, holds printed content to Teach from. Kept for the selection as it is, since
+    /// the menu and accessibility ask for the actions often.
+    private func isTeachable(_ selection: InkSelection) -> Bool {
+        if let known = teachable, known.selection == selection { return known.value }
+        let lasso = selection.outline.map { $0.applying(selection.box.transform) }
+        let value = host?.canTeach(page: selection.page, lasso: lasso) ?? false
+        teachable = (selection, value)
+        return value
+    }
+
+    /// EP153: Teach. The worksheet inside the lasso, and the ink selected with it, go onto a new A3 squared page after
+    /// this one (`PDFOverlayPageController.teach`). The selection and its page are left as they are, and closed.
+    func teachSelection() {
+        guard let host else { return }
+        // Ink still waiting to land goes first, so the strokes read are the page's own.
+        host.landInkEdits()
+        guard let selection, let canvas = host.canvases[selection.page] else { return }
+        let strokes = SelectionEdit.strokes(of: canvas.drawing, at: selection.indices)
+        let lasso = selection.outline.map { $0.applying(selection.box.transform) }
+        dismiss()
+        host.teach(page: selection.page, lasso: lasso, strokes: strokes)
+    }
+
+    /// Cut, Copy, Delete, Duplicate, Resize and Color, for selected ink.
+    private func inkActions() -> [SelectionAction] {
         [
             SelectionAction(title: "Cut", symbol: "scissors") { [weak self] in
                 guard let self, let page = self.selection?.page else { return }
@@ -714,6 +772,8 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
     private(set) var outlinePoints: [CGPoint] = []
     /// Resize mode: the box, its handle and its × show instead of the lasso.
     private(set) var isResizing = false
+    /// A drag inside moves the selection; an area with no ink (EP153) stays put.
+    private(set) var isMovable = true
     /// The live gesture's change, shown before it is committed.
     private(set) var liveDelta = CGAffineTransform.identity
     private var drag: SelectionDrag?
@@ -771,18 +831,24 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
         addInteraction(editMenu)
         isAccessibilityElement = true
         accessibilityLabel = "Selected ink"
-        accessibilityHint = "Cut, Copy, Delete, Duplicate, Resize or Color from the actions."
+        accessibilityHint = Self.inkHint
     }
+
+    private static let inkHint = "Cut, Copy, Delete, Duplicate, Resize or Color from the actions."
 
     required init?(coder: NSCoder) { nil }
 
     /// Shows `box` with its lasso `outline` (in the box's own space) over
     /// `canvas`, in Resize mode when `resizing`. The menu waits for a tap.
-    func show(_ box: SelectionBox, outline: [CGPoint], on canvas: PKCanvasView, resizing: Bool = false) {
+    /// An area with no ink (EP153) is not `movable`: a drag inside it does nothing.
+    func show(_ box: SelectionBox, outline: [CGPoint], on canvas: PKCanvasView, resizing: Bool = false, movable: Bool = true) {
         self.box = box
         self.canvas = canvas
         outlinePoints = outline
         isResizing = resizing
+        isMovable = movable
+        accessibilityLabel = movable ? "Selected ink" : "Selected area"
+        accessibilityHint = movable ? Self.inkHint : "Teach from the actions."
         liveDelta = .identity
         drag = nil
         isHidden = false
@@ -979,7 +1045,7 @@ final class SelectionOverlayView: UIView, @preconcurrency UIEditMenuInteractionD
     /// `location`. Returns what it drags, or nil when `start` misses the selection.
     @discardableResult
     func beginDrag(at start: CGPoint, to location: CGPoint) -> SelectionDrag? {
-        guard let box, let target = target(at: start) else { return nil }
+        guard let box, isMovable, let target = target(at: start) else { return nil }
         drag = target
         dragStart = onCanvas(start)
         editMenu.dismissMenu()
