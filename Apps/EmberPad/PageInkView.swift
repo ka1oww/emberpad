@@ -906,7 +906,8 @@ final class PageInkView: UIView {
     /// a highlight, which has no live layer to fall back on, vanished for half a second while the next stroke was
     /// written. So the strokes a landing sets again with no live layer are watched until PencilKit reports the page
     /// drawn and its tiles show them: whenever the tiles lose one the page has shown and still holds, a cover layer
-    /// draws it until they show it again. The tiles are looked at only once PencilKit has drawn the landing.
+    /// draws it until they show it again. The tiles are looked at only once PencilKit has drawn the landing, or has a
+    /// stroke down (EP144, `checkLandingGuard`).
     private struct LandingGuard {
         /// Each stroke, where it is checked, and the tiles when it landed.
         var strokes: [(id: InkStrokeID, stroke: PKStroke, points: [CGPoint], since: [ObjectIdentifier: UInt64])]
@@ -915,6 +916,10 @@ final class PageInkView: UIView {
         /// some other way, as just after its commit.
         var seen: Set<InkStrokeID> = []
         var covered: Set<InkStrokeID> = []
+        /// Where the cover shows, in page points.
+        var reach: [CGRect] = []
+        /// The cover was raised while PencilKit had a stroke down (EP144), and is still up.
+        var underHold = false
         var reported = false
         let since: CFTimeInterval
     }
@@ -930,6 +935,18 @@ final class PageInkView: UIView {
         return watch.strokes.filter { watch.covered.contains($0.id) }.map(\.stroke)
     }
 
+    /// Where the cover shows now, in page points (for tests).
+    var landingCoverReach: [CGRect] {
+        guard let watch = landingGuard, landingCover?.isHidden == false else { return [] }
+        return watch.reach
+    }
+
+    /// Whether PencilKit has a stroke of ink down on the page's canvas: from its report that it began one until its
+    /// report that the stroke ended (the controller's to say). EP144: PencilKit leaves the page's tiles exactly as
+    /// they are for as long as it has, whatever it was drawing when the stroke began. An eraser's stroke does not
+    /// count: the page is redrawn as it erases, and ink it has just erased must not be covered.
+    var pageStrokeIsDown: (() -> Bool)?
+
     /// Strokes `strokes`, with no live layer, have just been set on the page again by a landing: watched until the page
     /// has drawn them. Those still watched from an earlier landing stay watched.
     func guardLanding(_ strokes: [PKStroke]) {
@@ -944,6 +961,7 @@ final class PageInkView: UIView {
         }
         guard !entries.isEmpty else { return }
         landingGuard = LandingGuard(strokes: entries, seen: landingGuard?.seen ?? [], covered: landingGuard?.covered ?? [],
+                                    reach: landingGuard?.reach ?? [], underHold: landingGuard?.underHold ?? false,
                                     since: CACurrentMediaTime())
         // Drawn now, hidden, so it shows the moment it is needed: PencilKit takes a few frames to draw a drawing.
         (landingCover ?? makeLandingCover()).drawing = PKDrawing(strokes: entries.map(\.stroke))
@@ -953,42 +971,81 @@ final class PageInkView: UIView {
     private func checkLandingGuard(_ tiles: [Tile]) {
         guard var watch = landingGuard else { return }
         guard CACurrentMediaTime() - watch.since < Self.landingGuardPatience else { return endLandingGuard() }
+        // EP144: while PencilKit has a stroke down it leaves the tiles as they are and draws the page in its own view
+        // from their textures. A landing pops the strokes it sets again, and PencilKit draws the page without them
+        // first: when the next stroke began between that and its draw of the landed page (the highlighter, then the
+        // pen 150 ms later), the tiles stayed without the highlight for the whole of that stroke. On the iPad it was
+        // gone for the 400 ms of `landingDrawPatience`, until this guard first looked; on the simulator for the half
+        // second the stroke took.
+        let held = pageStrokeIsDown?() == true
         // Nothing is read while PencilKit draws the landing (until it reports the page drawn, or `landingDrawPatience`).
         // It empties each tile it redraws for a frame or two, a blink of its own that a cover only lengthened, and on
         // the simulator reading the tiles it was drawing into slowed that redraw, so more highlights blinked for longer.
-        guard watch.reported || CACurrentMediaTime() - watch.since >= Self.landingDrawPatience else { return }
+        // With a stroke down PencilKit draws no tile, so the tiles are read at once; and a cover raised then stays read
+        // until the tiles show its strokes again.
+        guard watch.reported || held || watch.underHold
+                || CACurrentMediaTime() - watch.since >= Self.landingDrawPatience else { return }
         var lost: Set<InkStrokeID> = []
+        var reach: [CGRect] = []
         for entry in watch.strokes {
+            // Each tile under the stroke that PencilKit has drawn since the landing without its ink there, whether
+            // any of the stroke lies on no tile at all, and whether every tile under it has been drawn since.
             // A tile not redrawn since the landing is not read: it still shows the stroke, which was on the page before.
-            let shows = entry.points.allSatisfy { point in
-                tiles.contains { tile in
-                    tile.frame.contains(point)
-                        && (entry.since[ObjectIdentifier(tile.layer)] == tile.seed || (showsInk(at: point, in: tile) ?? true))
-                }
-            }
-            if shows {
-                watch.seen.insert(entry.id)
-            } else if watch.seen.contains(entry.id) || entry.points.allSatisfy({ point in
+            var without: [CGRect] = []
+            var bare = false
+            var allRedrawn = true
+            for point in entry.points {
                 let over = tiles.filter { $0.frame.contains(point) }
-                return !over.isEmpty && over.allSatisfy { tile in entry.since[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? true }
-            }) {
-                lost.insert(entry.id)
+                if over.isEmpty {
+                    bare = true
+                    allRedrawn = false
+                    continue
+                }
+                if over.contains(where: { entry.since[ObjectIdentifier($0.layer)] == $0.seed }) { allRedrawn = false }
+                if over.contains(where: { tile in
+                    entry.since[ObjectIdentifier(tile.layer)] == tile.seed || (showsInk(at: point, in: tile) ?? true)
+                }) { continue }
+                for tile in over where !without.contains(tile.frame) { without.append(tile.frame) }
             }
+            if without.isEmpty, !bare {
+                watch.seen.insert(entry.id)
+                continue
+            }
+            let bounds = entry.stroke.renderBounds.insetBy(dx: -2, dy: -2)
+            // With a stroke down, a tile drawn without the stroke stays so until the Pencil lifts, however little of
+            // the stroke the page has shown. Otherwise as before: only a stroke the tiles have shown and lost, or one
+            // every tile under it has been drawn without (or one covered while a stroke was down, until they show it).
+            guard held ? !without.isEmpty
+                       : watch.seen.contains(entry.id) || allRedrawn || watch.covered.contains(entry.id) else { continue }
+            // A cover raised with a stroke down shows only over the tiles drawn without the stroke: the others still
+            // draw it, for as long as the stroke is down, and a highlight drawn twice would darken. With no stroke
+            // down PencilKit is redrawing, or has dropped a tile, and the cover shows the whole stroke, as before.
+            let whole = !(held || watch.underHold) || (bare && !held)
+            let parts = whole ? [bounds] : without.map { $0.intersection(bounds) }.filter { !$0.isNull && !$0.isEmpty }
+            guard !parts.isEmpty else { continue }
+            lost.insert(entry.id)
+            reach += parts
         }
         if !lost.isEmpty {
             // Erased or undone since, it stays off.
             let onPage = Set(canvas.drawing.strokes.map(InkStrokeID.init))
             watch.strokes.removeAll { !onPage.contains($0.id) }
-            lost.formIntersection(onPage)
+            if !lost.isSubset(of: onPage) {
+                lost.formIntersection(onPage)
+                reach = lost.isEmpty ? [] : reach.filter { part in
+                    watch.strokes.contains { lost.contains($0.id) && $0.stroke.renderBounds.insetBy(dx: -2, dy: -2).intersects(part) }
+                }
+            }
         }
-        if lost != watch.covered {
+        if lost.isEmpty { watch.underHold = false } else if held { watch.underHold = true }
+        if lost != watch.covered || reach != watch.reach {
             watch.covered = lost
+            watch.reach = reach
             let cover = landingCover ?? makeLandingCover()
             if lost.isEmpty {
                 cover.isHidden = true
             } else {
                 // The cover draws every stroke watched; it shows only where those lost are.
-                let reach = watch.strokes.filter { lost.contains($0.id) }.map { $0.stroke.renderBounds.insetBy(dx: -2, dy: -2) }
                 mask(cover, to: reach)
                 cover.isHidden = false
             }

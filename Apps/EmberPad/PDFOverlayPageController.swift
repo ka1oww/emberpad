@@ -76,6 +76,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// change a page's drawing. Internal for tests.
     var inkFlights = InkFlights()
     weak var pencilTouch: UITouch?
+    /// The canvases PencilKit has a stroke of ink down on: from its report that it began one to its report that it
+    /// ended (EP144). It leaves a page's tiles as they are for as long, so the landing guard reads them then. Never
+    /// an eraser's stroke: PencilKit redraws the page as that erases.
+    private var strokesDown: Set<ObjectIdentifier> = []
     private(set) var pendingInkEdits: [PendingInkEdit] = []
     /// Pen strokes PencilKit threw away, whose live pen copies go on the page when the edits land.
     private(set) var recoveredInk: [RecoveredInk] = []
@@ -358,6 +362,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         pageView.landedStrokeIsOnPage = { [weak self, weak canvas] id, bounds in
             self?.landedStrokeIsOnPage(id, at: bounds, canvas: canvas) ?? false
         }
+        pageView.pageStrokeIsDown = { [weak self, weak canvas] in
+            canvas.map { self?.strokesDown.contains(ObjectIdentifier($0)) ?? false } ?? false
+        }
         canvases[index] = canvas
         pageViews[index] = pageView
         pdfView.visibleCanvases = Array(canvases.values)
@@ -375,6 +382,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         let index = session.pdf.index(for: page)
         if canvases[index] === canvas { landInkEdits() }
         inkFlights.remove(canvas: ObjectIdentifier(canvas))
+        strokesDown.remove(ObjectIdentifier(canvas))
         if highlighterErase?.canvas === canvas { finishHighlighterErase() }
         if wholeStrokeErase?.canvas === canvas { finishWholeStrokeErase() }
         inkSelection.canvasWillLeave(canvas)
@@ -572,7 +580,12 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         // lands in its own time, as writing does (EP94). Landed here, in the middle of writing, the drawing was set
         // within a frame of PencilKit's commits, and PencilKit threw away the strokes begun just after; put back
         // later, they went on the page out of the order they were written.
-        if !Self.keepsPen(from: canvases.values.first?.tool, to: tool) { landInkEdits() }
+        // EP144: nor does a change between any two tools that write (pen, highlighter, shape). Landing makes drawings
+        // and sets the page's on the main thread, and each of those waits while PencilKit saves its replica record
+        // (EP114): late in the stress test on the iPad Air, choosing the highlighter just after writing froze the page
+        // for 112 to 121 ms, with the next stroke beginning in the same moment. The eraser, the lasso and the laser
+        // still land everything first: they act on the page as it is.
+        if !Self.keepsWriting(from: canvases.values.first?.tool, to: tool) { landInkEdits() }
         finishHighlighterErase()
         clearScribblePreview()
         inkSelection.dismiss()
@@ -581,11 +594,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         updateCanvasInput()
     }
 
-    /// Whether a change from PencilKit tool `old` to `new` is the pen's own colour or width: both are the live pen's
-    /// clear ink (`PenFeel.liveTool`).
-    static func keepsPen(from old: (any PKTool)?, to new: any PKTool) -> Bool {
-        guard let old = old as? PKInkingTool, let new = new as? PKInkingTool else { return false }
-        return old.inkType == PenFeel.liveInkType && new.inkType == PenFeel.liveInkType
+    /// Whether a change from PencilKit tool `old` to `new` goes on writing: both draw ink (the pen in a new colour or
+    /// width, the highlighter, the Shape tool), so the edits waiting to land keep waiting. Each holds the ink it was
+    /// written in, and none of these tools reads the page.
+    static func keepsWriting(from old: (any PKTool)?, to new: any PKTool) -> Bool {
+        old is PKInkingTool && new is PKInkingTool
     }
 
     /// Only the focused page takes Pencil input. The toolbar lasso is
@@ -618,6 +631,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// this, when the Pencil touched down (`eraserStrokeTarget`): swapping the canvas's drawing now would cancel the
     /// eraser for the whole stroke, which is how it erased nothing before EP71.
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+        if canvasView.tool is PKInkingTool { strokesDown.insert(ObjectIdentifier(canvasView)) }
         if let erase = highlighterErase, erase.canvas === canvasView { erase.toolBegan = true }
         // EP94: an inking stroke PencilKit will commit; nothing may change this page's drawing until it has.
         if canvasView.tool is PKInkingTool, let page = canvases.first(where: { $0.value === canvasView })?.key {
@@ -636,6 +650,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// bounds a wait for a commit that never comes, and counts only time the app was running (`ResponsiveDeadline`),
     /// so a stall right after the lift cannot use it up before PencilKit's commit lands (EP89).
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+        strokesDown.remove(ObjectIdentifier(canvasView))
         inkFlights.ended(canvas: ObjectIdentifier(canvasView), cancelled: pencilTouch?.phase == .cancelled)
         inkTiming.lastLift = CACurrentMediaTime()
         // A stroke PencilKit never commits is found by checking again while nothing else happens.
