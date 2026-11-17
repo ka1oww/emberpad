@@ -5,8 +5,9 @@
 xcodebuild fails a test that runs past its time limit and names it, but on a Simulator the stack it saves for the
 test is empty ("No samples"), so the log says which test hung and never where. This watches the log while the
 tests run. When the test that started last has finished nothing and the log has been quiet for QUIET seconds, it
-takes a three-second `sample` of each of the app's processes on the Simulator and prints their call graphs, once
-for that test. It changes nothing about the tests: it only reads the log and the processes. It ends when the
+takes a three-second `sample` of each of the app's processes on the Simulator and prints where every thread is,
+once for that test. Threads stuck in the same place are printed once, with how many there are and their names, so
+a pile of threads waiting on the same lock reads as one stack and a count instead of thousands of lines. It changes nothing about the tests: it only reads the log and the processes. It ends when the
 shell that started it does.
 """
 import os
@@ -20,10 +21,13 @@ import time
 QUIET = 150
 # The app under test, which also hosts the unit tests, and the UI tests' runner.
 PROCESSES = ("/EmberPad.app/EmberPad", "/EmberPadUITests-Runner.app/EmberPadUITests-Runner")
-MOST_LINES = 500
 
 STARTED = re.compile(r"Test Case '(-\[[^']+\])' started\.")
 ENDED = re.compile(r"Test Case '(-\[[^']+\])' (?:passed|failed|skipped|exceeded)")
+# In `sample`'s call graph a thread starts at four spaces and its sample count; its frames follow, each led by the
+# tree's marks (+ ! : |) and its own sample count.
+THREAD = re.compile(r"^    \d+ (Thread_.*)$")
+FRAME = re.compile(r"^([ +!:|]*)\d+ (.*)$")
 
 
 def running_test(log):
@@ -36,14 +40,35 @@ def running_test(log):
 
 
 def call_graph(sample):
-    """The part of `sample`'s report that says where each thread is: from "Call graph" to the list of binaries."""
+    """The part of `sample`'s report that says where each thread is, from "Call graph" to the list of binaries, with
+    threads whose frames are the same printed once: "<n> threads: <their names>" over the first one's frames. The main
+    thread comes first, then the largest groups. Nothing is left out."""
     lines = sample.splitlines()
-    start = next((n for n, line in enumerate(lines) if line.startswith("Call graph")), 0)
+    start = next((n for n, line in enumerate(lines) if line.startswith("Call graph")), None)
+    if start is None:
+        return ""
     end = next((n for n, line in enumerate(lines) if line.startswith("Binary Images")), len(lines))
-    graph = lines[start:end]
-    if len(graph) > MOST_LINES:
-        graph = graph[:MOST_LINES] + ["... %d more lines" % (len(graph) - MOST_LINES)]
-    return "\n".join(graph).rstrip()
+    threads = []
+    rest = start + 1
+    while rest < end and lines[rest].strip():
+        thread = THREAD.match(lines[rest])
+        if thread:
+            threads.append((thread.group(1), []))
+        elif threads:
+            threads[-1][1].append(lines[rest])
+        rest += 1
+    groups = {}
+    for name, frames in threads:
+        same = tuple(FRAME.sub(r"\1\2", frame) for frame in frames)
+        groups.setdefault(same, ([], frames))[0].append(name)
+    order = sorted(groups.values(), key=lambda group: (not any("main-thread" in name for name in group[0]),
+                                                       -len(group[0])))
+    out = ["Call graph: %d threads, %d different stacks" % (len(threads), len(order))]
+    for names, frames in order:
+        out.append("    %d thread%s: %s" % (len(names), "" if len(names) == 1 else "s", "; ".join(names)))
+        out.extend(frames)
+    out.extend(lines[rest:end])
+    return "\n".join(out).rstrip()
 
 
 def due(log, quiet_for, reported):
