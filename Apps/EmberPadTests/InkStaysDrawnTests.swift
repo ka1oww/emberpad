@@ -199,7 +199,7 @@ final class InkStaysDrawnTests: XCTestCase {
         CATransaction.setDisableActions(true)
         emptied.forEach { $0.contents = nil }
         CATransaction.commit()
-        Self.wait(until: { inkView.livePenLayer(id: landed.id)?.view.isHidden == false }, timeout: 2)
+        HoldPage.turn(0.05)
         XCTAssertEqual(inkView.livePenLayer(id: landed.id)?.view.isHidden, false, "the stroke's own layer shows it again")
         XCTAssertNotNil(controller.livePen.stroke(id: landed.id), "and keeps it until the page shows it once more")
     }
