@@ -4,12 +4,30 @@ import EmberSyncKit
 // `PresentedView` itself lives in EmberSyncKit (EP93), so the Mac Companion decodes the same type Present sends.
 
 extension StudentDisplayModel {
-    /// The current presentation, described exactly as `StudentDisplayView` draws it.
+    /// The current presentation, described exactly as `StudentDisplayView` draws it: the frozen picture while the
+    /// class view is frozen (EP152).
+    var presented: PresentedView { shown.presented }
+
+    /// `presented` with its strokes in progress beside it instead of in it (EP142). See `StudentPicture.presentedParts`.
+    var presentedParts: (view: PresentedView, live: [LiveInkStrokes.Stroke]) { shown.presentedParts }
+
+    /// sRGB red, green, blue and alpha, each 0 to 1, as Present sends a stroke's colour.
+    static func rgba(_ color: UIColor) -> [CGFloat] {
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        return [red, green, blue, alpha]
+    }
+}
+
+@MainActor
+extension StudentPicture {
+    /// This picture, described exactly as `StudentDisplayView` draws it.
     var presented: PresentedView {
         let (view, strokes) = presentedParts
         guard case .page(var page) = view.screen else { return view }
         page.liveStrokes = strokes.map {
-            .init(pageIndex: $0.pageIndex, points: $0.displayPoints, rgba: Self.rgba($0.style.color), width: $0.style.width)
+            .init(pageIndex: $0.pageIndex, points: $0.displayPoints, rgba: StudentDisplayModel.rgba($0.style.color),
+                  width: $0.style.width)
         }
         return PresentedView(screen: .page(page))
     }
@@ -51,12 +69,5 @@ extension StudentDisplayModel {
                     .init(pageIndex: $0.place, from: $0.from, to: $0.to, opacity: $0.opacity)
                 }))), strokes.filter { shown.contains($0.pageIndex) })
         }
-    }
-
-    /// sRGB red, green, blue and alpha, each 0 to 1, as Present sends a stroke's colour.
-    static func rgba(_ color: UIColor) -> [CGFloat] {
-        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
-        color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        return [red, green, blue, alpha]
     }
 }

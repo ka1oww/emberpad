@@ -224,6 +224,49 @@ import Testing
         print("EP141 heartbeat payload with its time: \(bytes) bytes")
         #expect(bytes < 100)
     }
+
+    /// EP152: when the class view unfreezes, the iPad's next update is a whole snapshot without the paper the Mac
+    /// holds, and the Mac shows it as a cut: it never moves from the frozen frame to the new one, even on the same page.
+    @Test func anUnfreezeIsACutNotAMove() throws {
+        let doc = Doc()
+        var encoder = PresentEncoder()
+        encoder.resnapshot(heldAssets: [])
+        var scene = PresentScene()
+        scene.linkOpened()
+        var playback = PresentPlayback()
+        // Frozen at the top of page 1, the iPad scrolled 300 points down the same page meanwhile.
+        var frozen = doc.input(y: 0)
+        frozen.time = 1
+        #expect(scene.apply(try next(&encoder, frozen, now: 1), arrival: 10.01) == .applied)
+        _ = playback.shown(for: scene, at: 10.2)
+        var now = doc.input(y: 300)
+        now.time = 4.95
+
+        encoder.snapshotNext()
+        let unfrozen = try next(&encoder, now, now: 5)
+        #expect(unfrozen.reset)
+        #expect(unfrozen.assets.isEmpty, "the paper the Mac holds is not sent again")
+        #expect(scene.apply(unfrozen, arrival: 14.01) == .applied)
+        #expect(scene.motion.samples.count == 1)
+        #expect(scene.motion.floor == 4.95)
+        // Drawn from the moment it lands, and every refresh after: the unfrozen frame, never one between.
+        for mac in stride(from: 14.01, through: 14.3, by: 1.0 / 120) {
+            let shown = playback.shown(for: scene, at: mac)
+            #expect(doc.position(shown.frame) == 300)
+            #expect(!shown.moving)
+        }
+
+        // The same move as a plain update (no unfreeze) is played back as a move from the frozen frame.
+        var plainEncoder = PresentEncoder()
+        plainEncoder.resnapshot(heldAssets: [])
+        var plain = PresentScene()
+        plain.linkOpened()
+        #expect(plain.apply(try next(&plainEncoder, frozen, now: 1), arrival: 10.01) == .applied)
+        let moved = try next(&plainEncoder, now, now: 5)
+        #expect(!moved.reset)
+        #expect(plain.apply(moved, arrival: 14.01) == .applied)
+        #expect(plain.motion.samples.count == 2)
+    }
 }
 
 // MARK: - Fixtures

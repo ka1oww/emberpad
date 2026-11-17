@@ -705,8 +705,8 @@ extension EditorScreen {
     }
 
     /// The Ember title bar (EP54 layout, EP57 colours): back, library sidebar, pages, search and export on the
-    /// left; the title with its menu in the centre; undo, redo, Teacher copy, bookmark, Add Page, read-only, the
-    /// student view and More on the right. Read-only greys the bar and drops undo and redo (EP63).
+    /// left; the title with its menu in the centre; undo, redo, Teacher copy, bookmark, Add Page, read-only, while
+    /// presenting the class-copy swap and Freeze (EP130, EP152), the student view and More on the right. Read-only greys the bar and drops undo and redo (EP63).
     private var header: some View {
         HeaderBarLayout {
             HStack(spacing: WorksheetHeaderMetrics.iconSpacing) { leadingActions }
@@ -804,9 +804,12 @@ extension EditorScreen {
         // EP130: while presenting, swaps what the class sees between the Student copy and the Teacher copy.
         ClassCopySwapControl(presentation: presentation, present: presentation.present,
                              indicator: presentation.student.classCopy, worksheet: session?.record, short: shortPill)
+        // EP152: while presenting, freezes what the class sees, or unfreezes it, in one tap.
+        ClassViewFreezeControl(presentation: presentation, present: presentation.present, freeze: presentation.student.freeze)
         Menu {
             WorksheetSharingRows(framing: $presentation.studentFraming)
             PresentOnMacRows(present: presentation.present)
+            ClassViewFreezeRows(presentation: presentation, present: presentation.present, freeze: presentation.student.freeze)
         } label: {
             HStack(spacing: 2) {
                 if pillState.showsHeaderPill {
@@ -824,6 +827,7 @@ extension EditorScreen {
             pageRows
             WorksheetSharingRows(framing: $presentation.studentFraming)
             PresentOnMacRows(present: presentation.present)
+            ClassViewFreezeRows(presentation: presentation, present: presentation.present, freeze: presentation.student.freeze)
             exportRows
         } label: {
             HeaderIcon(symbol: "ellipsis")

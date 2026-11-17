@@ -90,8 +90,8 @@ struct LibraryView: View {
         }
         .background(DocumentTransitionWindowReader(cover: navigator.cover))
         .tint(Theme.tint)
-        // EP129: the Mac's lesson recording, over every screen.
-        .modifier(PresentLessonChrome(present: presentation.present))
+        // EP129: the Mac's lesson recording, and EP152's Frozen badge, over every screen.
+        .modifier(PresentLessonChrome(present: presentation.present, presentation: presentation))
         .sheet(isPresented: $showImport) { ImportWorksheetView(library: library, isPresented: $showImport) }
         .sheet(isPresented: $showPairing) { PairingScannerSheet(pairing: pairing, presentation: presentation) }
         .modifier(StudentBackdropPicker(backdrop: presentation.backdrop, isPresented: $showBackdropPicker))

@@ -16,6 +16,12 @@ import EmberSyncKit
 /// Lesson recording (EP129): when the Mac's Companion records lessons (protocol version 5), the same link carries the
 /// teacher's Start lesson and End lesson to it, the open document's name and role for the lesson's record, and back
 /// from it the recording's status, which the iPad shows. The Mac records; nothing is recorded on the iPad.
+///
+/// Freezing the class view (EP152): while `StudentDisplayModel` holds a frozen picture, that picture is what is read
+/// and sent, so nothing the teacher does meanwhile reaches the Mac, which keeps showing (and recording) the frozen
+/// frame. Lesson commands still go. On unfreeze the next update is a whole snapshot, which the Mac shows at once, as a
+/// cut, rather than moving smoothly from the frozen frame. A dropped link, the iPad leaving the screen, and Present
+/// turning on or off all unfreeze.
 @MainActor
 final class PresentController: ObservableObject {
     /// The small light by the Present control.
@@ -92,6 +98,8 @@ final class PresentController: ObservableObject {
     private var suspended = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var suspendWork: Task<Void, Never>?
+    /// The class view was frozen at the last frame (EP152), so an unfreeze is noticed at the next one.
+    private var sentFrozen = false
 
     init(student: StudentDisplayModel) {
         self.student = student
@@ -125,6 +133,9 @@ final class PresentController: ObservableObject {
                                        Task { @MainActor in self?.lessonChanged(status) }
                                    })
         self.sender = sender
+        // EP152: a presentation never starts frozen.
+        student.unfreezeClassView()
+        sentFrozen = false
         isOn = true
         light = .connecting
         suspended = false
@@ -134,6 +145,7 @@ final class PresentController: ObservableObject {
 
     func stop() {
         guard isOn else { return }
+        student.unfreezeClassView()
         isOn = false
         light = .off
         lesson = nil
@@ -160,6 +172,8 @@ final class PresentController: ObservableObject {
     /// seconds later anyway.
     func enteredBackground() {
         guard isOn, !suspended else { return }
+        // EP152: the link closes, so the class view unfreezes and the Mac is sent Paused as before.
+        student.unfreezeClassView()
         tick()
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Present on Mac") { [weak self] in
             self?.endBackgroundTask()
@@ -199,6 +213,8 @@ final class PresentController: ObservableObject {
 
     private func linkChanged(_ state: PresentLink.State) {
         guard isOn else { return }
+        // EP152: a link that drops unfreezes the class view; the new link's snapshot shows the iPad as it is then.
+        if state == .reconnecting || state == .unsupported || (state == .off && suspended) { student.unfreezeClassView() }
         switch state {
         case .connecting: light = .connecting
         case .connected:
@@ -236,18 +252,24 @@ final class PresentController: ObservableObject {
             pendingLesson = nil
             lessonProblem = "Your Mac did not answer. Check Ember Companion on the Mac."
         }
+        // EP152: just unfrozen, so the Mac cuts straight to the iPad as it is now, with nothing moved through on the way.
+        let frozen = student.isFrozen
+        if sentFrozen, !frozen { sender.snapshotNext() }
+        sentFrozen = frozen
         sender.tick(now: now) { input() }
     }
 
-    /// What the student view shows now, with paper and ink for each shown page. A page whose paper is still being
-    /// prepared is left out until it is ready, a frame or two later. To a Mac that records lessons it also names the
-    /// open document and carries a pending Start or End lesson.
+    /// What the student view shows now (the frozen picture while the class view is frozen, EP152), with paper and ink
+    /// for each shown page. A page whose paper is still being prepared is left out until it is ready, a frame or two
+    /// later. To a Mac that records lessons it also names the shown picture's document and carries a pending Start or
+    /// End lesson, which goes even while frozen.
     func input() -> PresentInput {
-        var input = Self.input(from: student, paper: paper, ink: ink)
+        let picture = student.shown
+        var input = Self.input(from: picture, paper: paper, ink: ink)
         // When the shown frame was captured, on the clock `tick` runs by (EP141).
-        input.time = student.contentTime
+        input.time = picture.contentTime
         if sender?.link.supportsLesson == true {
-            input.document = student.openDocument
+            input.document = picture.openDocument
             input.lessonCommand = pendingLesson
         }
         return input
@@ -299,6 +321,10 @@ final class PresentController: ObservableObject {
     }
 
     static func input(from student: StudentDisplayModel, paper: PresentPaperCache, ink: PresentInkCache) -> PresentInput {
+        input(from: student.shown, paper: paper, ink: ink)
+    }
+
+    static func input(from student: StudentPicture, paper: PresentPaperCache, ink: PresentInkCache) -> PresentInput {
         // EP142: the strokes in progress come beside the view, so a frame never copies or compares a whole stroke.
         let (view, strokes) = student.presentedParts
         // EP130: the Teacher copy the teacher chose to show has paper but no ink, under its own session, so the Mac
@@ -565,18 +591,26 @@ enum PresentLessonText {
 
 /// Over every screen of the iPad's main scene while the Mac records (EP129): a red REC badge with the time, amber
 /// with the warning while the microphone is silent or disconnected; the question when the BOYA is missing; and the
-/// question when Present is turned off during a recording. Never on the student view or the Mac's picture.
+/// question when Present is turned off during a recording. Never on the student view or the Mac's picture. Beside the
+/// REC badge, while the class view is frozen, the Frozen badge (EP152).
 struct PresentLessonChrome: ViewModifier {
     @ObservedObject var present: PresentController
+    /// EP152: the class view's freeze, for the Frozen badge; nil draws none.
+    var presentation: PresentationState?
 
     func body(content: Content) -> some View {
         content
             .overlay(alignment: .bottomLeading) {
-                if present.isRecordingLesson, let lesson = present.lesson {
-                    PresentLessonBadge(present: present, lesson: lesson)
-                        .padding(.leading, 16)
-                        .padding(.bottom, 16)
+                HStack(spacing: 8) {
+                    if present.isRecordingLesson, let lesson = present.lesson {
+                        PresentLessonBadge(present: present, lesson: lesson)
+                    }
+                    if let presentation {
+                        ClassViewFrozenBadge(freeze: presentation.student.freeze) { presentation.setFrozen(false) }
+                    }
                 }
+                .padding(.leading, 16)
+                .padding(.bottom, 16)
             }
             .alert("BOYA microphone not connected", isPresented: Binding(get: { present.asksForMicChoice }, set: { _ in })) {
                 Button("Record with built-in mic anyway") { present.startLessonWithBuiltInMic() }

@@ -392,6 +392,14 @@ public final class PresentSender: @unchecked Sendable {
         return readyFor == nil ? nil : try? encoder.stop(now: now).encode()
     }
 
+    /// The next update on this link is a whole snapshot, which the Mac shows at once (EP152: the class view unfroze).
+    /// Before the Mac is ready it changes nothing: a link's first update is a snapshot anyway.
+    public func snapshotNext() {
+        lock.lock()
+        defer { lock.unlock() }
+        encoder.snapshotNext()
+    }
+
     /// Once per display frame. `input` is read only when an update may go out.
     public func tick(now: TimeInterval, input: () -> PresentInput) {
         let generation = link.generation

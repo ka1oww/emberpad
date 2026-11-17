@@ -168,6 +168,12 @@ public struct PresentEncoder: Sendable {
         macAssets = Set(heldAssets)
     }
 
+    /// The next update is a whole snapshot, so the Mac shows it at once as a cut instead of moving to it smoothly
+    /// (EP152: the class view unfroze). The paper the Mac holds is not sent again.
+    public mutating func snapshotNext() {
+        needsReset = true
+    }
+
     /// The update that brings the Mac to `input`, or nil when nothing changed and no heartbeat is due.
     public mutating func update(_ input: PresentInput, now: TimeInterval) -> PresentOutgoing? {
         var out = PresentOutgoing(update: PresentUpdate(seq: 0))

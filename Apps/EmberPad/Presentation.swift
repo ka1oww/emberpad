@@ -238,6 +238,36 @@ enum StudentDisplayContent {
     var snapshot: StudentPageSnapshot? { if case .page(let snapshot) = self { snapshot } else { nil } }
 }
 
+/// Everything the class's picture is drawn from at one moment: the student view draws it, and Present on Mac sends it.
+/// The live picture is read from `StudentDisplayModel`'s own state; while the teacher freezes the class view (EP152)
+/// the picture taken at the freeze is drawn and sent instead. Every part was made through the same role gates as the
+/// live model's (`StudentPageSnapshot`, `StudentLiveInk`, `TeacherCopyFrame`), so a frozen picture can only ever hold
+/// what the class was already shown.
+struct StudentPicture {
+    var paused: Bool
+    var content: StudentDisplayContent
+    var framing: StudentFraming
+    var liveInk: StudentLiveInk?
+    var laser: StudentLaserPointer?
+    var laserTrail: StudentLaserTrail?
+    /// EP130: the Teacher copy the class sees in place of the Student page; nil shows the Student page.
+    var teacherFrame: TeacherCopyFrame?
+    var backdrop: CGImage?
+    /// The open document, named to a Mac that records lessons (EP129). It goes with the frame that shows it.
+    var openDocument: PresentLessonDocument?
+    /// When `content` last changed, for Present's frame stamps (EP141).
+    var contentTime: TimeInterval?
+
+    var snapshot: StudentPageSnapshot? { content.snapshot }
+}
+
+/// Whether the class view is frozen (EP152), as its own small observable, so the iPad's Freeze control and Frozen badge
+/// follow it without observing the student model's 30 Hz viewport updates.
+@MainActor
+final class ClassViewFreeze: ObservableObject {
+    @Published fileprivate(set) var isFrozen = false
+}
+
 @MainActor
 final class StudentDisplayModel: ObservableObject {
     @Published private(set) var content: StudentDisplayContent = .none {
@@ -276,17 +306,50 @@ final class StudentDisplayModel: ObservableObject {
     @Published var backdrop: CGImage?
     /// Which copy the class sees, for the iPad's chrome.
     let classCopy = ClassCopyIndicator()
+    /// Whether the class view is frozen, for the iPad's chrome (EP152).
+    let freeze = ClassViewFreeze()
+    /// EP152: while the teacher freezes the class view, the picture the class saw at that moment. The student view
+    /// draws it and Present on Mac sends it, while everything above keeps following the iPad, so an unfreeze shows the
+    /// iPad as it is then, at once, and nothing that happened meanwhile.
+    @Published private(set) var frozen: StudentPicture? {
+        didSet {
+            let isFrozen = frozen != nil
+            if freeze.isFrozen != isFrozen { freeze.isFrozen = isFrozen }
+            refreshClassCopy()
+        }
+    }
     var snapshot: StudentPageSnapshot? { content.snapshot }
+    /// The class's picture as the iPad is now, frozen or not.
+    var live: StudentPicture {
+        StudentPicture(paused: paused, content: content, framing: framing, liveInk: liveInk, laser: laser,
+                       laserTrail: laserTrail, teacherFrame: teacherFrame, backdrop: backdrop, openDocument: openDocument,
+                       contentTime: contentTime)
+    }
+    /// What the class sees: the frozen picture while the class view is frozen, else the live one.
+    var shown: StudentPicture { frozen ?? live }
+    var isFrozen: Bool { frozen != nil }
+
+    /// Holds the class's picture as it is now until `unfreezeClassView`. Freezing again while frozen keeps the first.
+    func freezeClassView() {
+        guard frozen == nil else { return }
+        frozen = live
+    }
+
+    /// The class sees the iPad as it is now again.
+    func unfreezeClassView() {
+        if frozen != nil { frozen = nil }
+    }
     /// What the class sees in place of the Student page while the Teacher copy is shown; nil shows the Student page.
     var teacherFrame: TeacherCopyFrame? {
         guard let teacherReveal, let snapshot = content.snapshot else { return nil }
         return TeacherCopyFrame(reveal: teacherReveal, snapshot: snapshot, framing: framing)
     }
     /// The indicator follows what the class actually sees: the Teacher copy only while a reveal is on and the focused
-    /// page has an answer page.
+    /// page has an answer page, or, while the class view is frozen (EP152), only while the frozen picture shows it.
     private func refreshClassCopy() {
         let revealing = teacherReveal != nil
-        let shown: ClassCopy = teacherFrame == nil ? .student : .teacher
+        let seen = if let frozen { frozen.teacherFrame } else { teacherFrame }
+        let shown: ClassCopy = seen == nil ? .student : .teacher
         if classCopy.revealing != revealing { classCopy.revealing = revealing }
         if classCopy.shown != shown { classCopy.shown = shown }
     }
@@ -582,9 +645,28 @@ final class PresentationState: ObservableObject {
     }
 
     /// Presenting started or stopped: either way the class is back on the Student copy, so every presentation starts
-    /// on it, as before EP130.
+    /// on it, as before EP130, and unfrozen (EP152), so a projector that joins never starts on a held picture.
     func presentingChanged() {
+        student.unfreezeClassView()
         student.concealTeacherCopy()
+    }
+
+    // MARK: Freezing the class view (EP152)
+
+    /// Whether the Freeze control is offered: only while the class has a student view.
+    var canFreeze: Bool { isPresenting }
+
+    /// Freezes the class view (the projector and Present on Mac keep the picture they show now), or unfreezes it. Only
+    /// while presenting; unfreezing always works.
+    func setFrozen(_ on: Bool) {
+        if on, canFreeze { student.freezeClassView() } else if !on { student.unfreezeClassView() }
+    }
+
+    /// EmberPad left the screen: the class view unfreezes, so the student view shows Paused as before, and Present on
+    /// Mac sends that and closes its link.
+    func enteredBackground() {
+        student.unfreezeClassView()
+        present.enteredBackground()
     }
 
     /// The Teacher copy's pages, kept for the worksheet so swapping back and forth does not reopen the file.
@@ -605,19 +687,21 @@ final class PresentationState: ObservableObject {
 struct StudentDisplayView: View {
     @ObservedObject var model: StudentDisplayModel
     var body: some View {
+        // EP152: the frozen picture while the class view is frozen.
+        let picture = model.shown
         ZStack {
             Color.black
-            if model.paused {
-                if let backdrop = model.backdrop { StudentBackdropScreen(image: backdrop, badge: "Paused") }
+            if picture.paused {
+                if let backdrop = picture.backdrop { StudentBackdropScreen(image: backdrop, badge: "Paused") }
                 else { Text("Paused").font(.largeTitle).foregroundStyle(.white) }
             } else {
-                switch model.content {
+                switch picture.content {
                 case .page(let snapshot):
-                    StudentPageSurface(snapshot: snapshot, framing: model.framing, liveInk: model.liveInk, laser: model.laser,
-                                       laserTrail: model.laserTrail, teacher: model.teacherFrame)
+                    StudentPageSurface(snapshot: snapshot, framing: picture.framing, liveInk: picture.liveInk,
+                                       laser: picture.laser, laserTrail: picture.laserTrail, teacher: picture.teacherFrame)
                 case .teacherCopyPrivate: Text("Teacher copy · private").font(.largeTitle).foregroundStyle(.white)
                 case .none:
-                    if let backdrop = model.backdrop { StudentBackdropScreen(image: backdrop) } else { StudentIdleMark() }
+                    if let backdrop = picture.backdrop { StudentBackdropScreen(image: backdrop) } else { StudentIdleMark() }
                 }
             }
         }.ignoresSafeArea()
@@ -722,6 +806,9 @@ final class StudentPageDrawingView: UIView {
 
     /// The live stroke layers currently drawn, for tests.
     var visibleLiveStrokeLayers: [CAShapeLayer] { liveStrokeLayers.filter { !$0.isHidden } }
+
+    /// The pages laid out now, in page order, for tests.
+    var shownPageIndexes: [Int] { placedPages.keys.sorted() }
 
     /// The laser dot's centre and diameter in this view's coordinates while it is drawn, for tests.
     var visibleLaserDot: (center: CGPoint, diameter: CGFloat)? {
