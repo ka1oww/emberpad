@@ -26,6 +26,8 @@ final class PresentFrameRenderer: @unchecked Sendable {
         case failed
     }
 
+    /// Test seam: the completion runs this long after the GPU finishes, as on a slow GPU. Nil in production.
+    var completionDelay: TimeInterval?
     let width: Int
     let height: Int
     private let queue: MTLCommandQueue
@@ -109,10 +111,15 @@ final class PresentFrameRenderer: @unchecked Sendable {
             release()
             return .failed
         }
+        // Only the recorder's timed frames are slowed; `drawAndWait` (before the recording) is not.
+        let delay = waitForATarget ? nil : completionDelay
         done.addCompletedHandler { [self] _ in
-            let ok = buffer.map { copy(slot.target, into: $0) } ?? true
-            release()
-            completion(ok)
+            let finish = { [self] in
+                let ok = buffer.map { copy(slot.target, into: $0) } ?? true
+                release()
+                completion(ok)
+            }
+            if let delay { DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: finish) } else { finish() }
         }
         done.commit()
         return .drawing

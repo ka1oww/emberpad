@@ -324,6 +324,10 @@ final class CompanionLessonModel: ObservableObject {
         /// Ask for microphone access at launch if macOS never asked (EP137); never in a test run.
         var asksAtLaunch = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
         var watchSleep = true
+        /// Test seam: how long the GPU's frames take to land, as on a slow GPU. Nil in production.
+        var frameCompletionDelay: TimeInterval?
+        /// How long ending a file waits for the frames still on the GPU before dropping them.
+        var frameDrainLimit: TimeInterval = 1
     }
 
     /// The recording as the iPad and the menu show it.
@@ -363,6 +367,22 @@ final class CompanionLessonModel: ObservableObject {
     /// Every file tried this lesson, kept or not, for tests: a failing encoder must not spin a new file each second.
     private(set) var fileAttempts = 0
 
+    /// The frames of one file that are on the GPU and not yet appended. Ending the file waits for them, off the main thread.
+    private final class FramesInFlight: @unchecked Sendable {
+        private let group = DispatchGroup()
+        func enter() { group.enter() }
+        func leave() { group.leave() }
+        /// Returns once every frame has landed, or after `limit`, when the rest are dropped.
+        func drained(within limit: TimeInterval) async {
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().async { [group] in
+                    _ = group.wait(timeout: .now() + limit)
+                    done.resume()
+                }
+            }
+        }
+    }
+
     /// Everything one lesson holds while it records.
     private final class Recording {
         let folder: URL
@@ -373,6 +393,8 @@ final class CompanionLessonModel: ObservableObject {
         var settings: LessonSegmentWriter.Settings
         var log: LessonLog
         var writer: LessonSegmentWriter?
+        /// The frames of `writer` still on the GPU; a new one for each file.
+        var flight = FramesInFlight()
         var segment = 0
         /// The current file: where it starts, its bytes on disk, when they last grew, and whether it has proved itself.
         var segmentStart: CMTime
@@ -420,7 +442,8 @@ final class CompanionLessonModel: ObservableObject {
         var noAccess: String?
 
         init(folder: URL, hostStart: CMTime, dateStart: Date, candidate: LessonMicrophone.Candidate, channels: Int,
-             settings: LessonSegmentWriter.Settings, log: LessonLog, health: LessonAudioHealth) {
+             settings: LessonSegmentWriter.Settings, log: LessonLog, health: LessonAudioHealth,
+             completionDelay: TimeInterval? = nil) {
             self.folder = folder
             self.hostStart = hostStart
             self.dateStart = dateStart
@@ -438,6 +461,7 @@ final class CompanionLessonModel: ObservableObject {
             // Scrolling plays back as on the projector, so the recording keeps what the class saw (EP141).
             canvas.smoothsMotion = true
             renderer = canvas.layer.flatMap { PresentFrameRenderer(layer: $0, width: settings.width, height: settings.height) }
+            renderer?.completionDelay = completionDelay
         }
 
         var episodes: [LessonAudioHealth.Episode] { earlierEpisodes + writeFailures + health.episodes }
@@ -620,7 +644,8 @@ final class CompanionLessonModel: ObservableObject {
                                          bitRate: settings.audioBitRate))
         let recording = Recording(folder: folder, hostStart: hostStart, dateStart: dateStart, candidate: candidate,
                                   channels: settings.channels, settings: settings, log: log,
-                                  health: LessonAudioHealth(start: 0, warnAfter: options.warnAfter, startupLimit: options.startupLimit))
+                                  health: LessonAudioHealth(start: 0, warnAfter: options.warnAfter, startupLimit: options.startupLimit),
+                                  completionDelay: options.frameCompletionDelay)
         do {
             // The record first, so even a lesson that stops while its encoder starts says what it is.
             try recording.log.record.write(to: folder)
@@ -675,6 +700,7 @@ final class CompanionLessonModel: ObservableObject {
         }
         recording.segment = number
         recording.writer = writer
+        recording.flight = FramesInFlight()
         recording.sink.use(writer)
         recording.log.startFile(name, at: date(time, in: recording))
         recording.segmentStart = time
@@ -768,7 +794,11 @@ final class CompanionLessonModel: ObservableObject {
         } else {
             recording.log.endFile(at: date(bytes == 0 ? now : recording.segmentGrewAt, in: recording))
         }
-        Task { _ = await writer.finish() }
+        let flight = recording.flight
+        Task {
+            await flight.drained(within: options.frameDrainLimit)
+            _ = await writer.finish()
+        }
         notRecording(recording, from: bytes == 0 ? recording.segmentStart : recording.segmentGrewAt, at: now)
         // The encoder failed on an empty file before any file of the lesson saved media: try the next with a rate it always takes.
         if !recording.anyProven, dead, bytes == 0, let safe = options.safeAudioBitRate, recording.settings.audioBitRate != safe {
@@ -922,10 +952,8 @@ final class CompanionLessonModel: ObservableObject {
             let (shown, changed) = recordedScene(recording)
             if changed || buffer == nil {
                 switch draw(shown, at: now, recording: recording, writer: writer, parts: &parts) {
-                case .saved(let fresh):
-                    // On the GPU: it appends the frame itself when it is drawn, and this tick does not wait for it.
-                    recording.lastFrame = fresh
-                    recording.lastFrameTime = now
+                case .saved:
+                    // On the GPU: it appends the frame itself when it is drawn (and sets `lastFrame` then), and this tick does not wait for it.
                     recording.moving = recording.canvas.isRefreshing
                     return
                 case .drawn(let fresh):
@@ -951,6 +979,13 @@ final class CompanionLessonModel: ObservableObject {
         recording.lastFrameTime = now
     }
 
+    /// A frame the GPU drew has been appended: it is the one the keep-alive repeats, while its file is still the current one.
+    private func landed(_ frame: CVPixelBuffer, at time: CMTime, writer: LessonSegmentWriter) {
+        guard let recording, recording.writer === writer, recording.lastFrameTime.map({ $0 < time }) ?? true else { return }
+        recording.lastFrame = frame
+        recording.lastFrameTime = time
+    }
+
     /// What one recorder frame spent its time on (seconds), for `longestFrameBreakdown`.
     private struct FrameParts {
         var canvas = 0.0, buffer = 0.0, gpu = 0.0, append = 0.0
@@ -963,7 +998,7 @@ final class CompanionLessonModel: ObservableObject {
 
     private enum Drawn {
         /// Handed to the GPU, which appends it at the time given when it is drawn.
-        case saved(CVPixelBuffer)
+        case saved
         /// Drawn on the CPU, to be appended.
         case drawn(CVPixelBuffer)
         case busy
@@ -983,12 +1018,18 @@ final class CompanionLessonModel: ObservableObject {
         if let renderer = recording.renderer {
             // The completion belongs to this writer alone: a writer that has finished, or been replaced, drops the frame.
             nonisolated(unsafe) let frame = buffer
-            let submitted = renderer.submit(into: buffer) { [writer] ok in
-                if ok { writer.appendVideo(frame, at: time) }
+            let flight = recording.flight
+            flight.enter()
+            let submitted = renderer.submit(into: buffer) { [weak self, writer] ok in
+                let landed = ok && writer.appendVideo(frame, at: time)
+                flight.leave()
+                // Only a frame that has landed may be kept alive: the buffer is no longer being written.
+                if landed { DispatchQueue.main.async { MainActor.assumeIsolated { self?.landed(frame, at: time, writer: writer) } } }
             }
+            if submitted != .drawing { flight.leave() }
             parts.gpu = lap()
             switch submitted {
-            case .drawing: return .saved(buffer)
+            case .drawing: return .saved
             case .busy: return .busy
             case .failed: break
             }
@@ -1077,7 +1118,11 @@ final class CompanionLessonModel: ObservableObject {
         checkpoint(recording)
         if let writer = recording.writer {
             recording.writer = nil
-            Task { _ = await writer.finish(at: now) }
+            let flight = recording.flight
+            Task {
+                await flight.drained(within: options.frameDrainLimit)
+                _ = await writer.finish(at: now)
+            }
         }
     }
 
@@ -1123,6 +1168,7 @@ final class CompanionLessonModel: ObservableObject {
         setStatus(.idle)
         if let writer = recording.writer {
             recording.writer = nil
+            await recording.flight.drained(within: options.frameDrainLimit)
             if await !writer.finish(at: now) {
                 lessonLog.error("\(writer.url.lastPathComponent, privacy: .public) did not finish: \(writer.failure ?? "unknown", privacy: .public)")
             }
