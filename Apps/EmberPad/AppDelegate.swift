@@ -87,7 +87,8 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
     func sceneDidEnterBackground(_ scene: UIScene) {
         environment?.library.flushForBackground()
-        environment?.presentation.present.enteredBackground()
+        // EP152: also unfreezes the class view, so the student view shows Paused as before.
+        environment?.presentation.enteredBackground()
     }
     func scene(_ scene: UIScene, openURLContexts contexts: Set<UIOpenURLContext>) { importURLs(contexts) }
     private func importURLs(_ contexts: Set<UIOpenURLContext>) {
