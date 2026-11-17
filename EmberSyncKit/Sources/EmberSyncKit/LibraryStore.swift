@@ -333,6 +333,10 @@ public actor LibraryStore {
         var manifest = try pageManifest(for: record)
         guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
         guard manifest.pages[index].template != nil else { throw LibraryError.pageKeepsItsPaper }
+        if let current = manifest.pages[index].template, manifest.pages[index].excerpt != nil,
+           current.size != template.size || current.orientation != template.orientation {
+            throw LibraryError.pageKeepsItsSize
+        }
         manifest.pages[index].template = template
         try commit(manifest, record: &record)
         return manifest

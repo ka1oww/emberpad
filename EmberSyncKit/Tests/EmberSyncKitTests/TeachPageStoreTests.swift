@@ -113,6 +113,28 @@ struct TeachPageStoreTests {
         #expect(try await store.pageManifest(documentID: teacher.id) == .original(pageCount: 2))
     }
 
+    @Test func changeTemplateKeepsATeachPagesSizeAndOnlyChangesItsKindAndColour() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (store, doc) = try await worksheet(pages: 2, in: root)
+        let added = try await store.insertPage(.a3Squared, excerpt: question, ink: Data("ink".utf8), at: 1, documentID: doc.id).pages[1]
+        let a5 = PaperTemplate(kind: .ruled, size: .a5)
+        await #expect(throws: LibraryError.pageKeepsItsSize) {
+            try await store.changeTemplate(added.id, to: a5, documentID: doc.id)
+        }
+        let landscape = PaperTemplate(kind: .squared, size: .a3, orientation: .landscape)
+        await #expect(throws: LibraryError.pageKeepsItsSize) {
+            try await store.changeTemplate(added.id, to: landscape, documentID: doc.id)
+        }
+        let unchanged = try await store.pageManifest(documentID: doc.id).pages[1]
+        #expect(unchanged.template == .a3Squared && unchanged.excerpt == question)
+        #expect(try await store.drawing(documentID: doc.id, pageID: added.id) == Data("ink".utf8))
+        let yellow = PaperTemplate(kind: .ruled, size: .a3, color: .yellow)
+        let changed = try await store.changeTemplate(added.id, to: yellow, documentID: doc.id).pages[1]
+        #expect(changed.template == yellow && changed.excerpt == question)
+        #expect(try await store.drawing(documentID: doc.id, pageID: added.id) == Data("ink".utf8))
+    }
+
     @Test func aDuplicatedTeachPageKeepsItsQuestion() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

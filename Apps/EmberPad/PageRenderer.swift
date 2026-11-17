@@ -870,7 +870,8 @@ extension EditorScreen {
         .popover(isPresented: $chrome.changeTemplateOpen, arrowEdge: .top) {
             if let template = currentEntry?.template {
                 NavigationStack {
-                    PaperTemplatePicker(initial: template, title: "Change Template") { changeTemplate($0) }
+                    PaperTemplatePicker(initial: template, title: "Change Template",
+                                        fixedSize: currentEntry?.excerpt != nil) { changeTemplate($0) }
                 }
                 .frame(width: 380, height: 440)
                 .tint(Theme.accent)
