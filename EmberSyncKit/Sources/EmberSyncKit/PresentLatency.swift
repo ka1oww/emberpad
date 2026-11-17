@@ -371,6 +371,7 @@ public final class PresentLatencyProbe: @unchecked Sendable {
             unmatched += pending.values.reduce(0) { $0 + $1.births.count }
             pending = [:]
             exchanges = []
+            used = nil
             self.generation = generation
         }
         var births: [TimeInterval] = []

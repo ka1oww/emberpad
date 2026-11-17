@@ -581,7 +581,7 @@ final class SyncConnection: @unchecked Sendable {
     private func feed(_ bytes: Data) {
         guard var session else { return }
         // EP148: when a presenting connection's bytes arrived, for a link that measures latency.
-        presentReceivedAt = presentLink == nil ? nil : PresentLatencyClock.now()
+        presentReceivedAt = PresentLatencyClock.now()
         lastReceived = .now
         var input = bytes
         repeat {
