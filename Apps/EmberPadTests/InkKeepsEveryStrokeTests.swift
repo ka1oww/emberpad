@@ -64,13 +64,16 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
     /// grows on (36 to 38 waited on CI). When the queue is full the next stroke waits for that frame instead (EP107).
     func testWritingThatNeverPausesLandsItsSwapsInBoundedBatches() throws {
         let page = try writingPage(baseStrokes: 150)
+        var mostWaiting = 0
         for n in 0..<80 {
             page.write(count: 1, gaps: [0.1])
+            mostWaiting = max(mostWaiting, page.controller.pendingInkEdits.count)
             guard page.controller.pendingInkEdits.count >= InkLandingTiming.mostWaiting else { continue }
             page.waitForASafeFrame()
             XCTAssertLessThan(page.controller.pendingInkEdits.count, InkLandingTiming.mostWaiting,
                               "the queue is bounded: a full queue lands at the first safe frame (stroke \(n + 1))")
         }
+        XCTAssertGreaterThanOrEqual(mostWaiting, 24, "short bursts still wait for the pause")
         page.assertEveryStrokeKept(80, "80 strokes with no pause")
     }
 

@@ -13,6 +13,10 @@ final class ToolbarDragTrackingUITests: XCTestCase {
     /// How much further, in points, than the finger's travel in the last frame the palette may ever be drawn from
     /// under the finger: none, but for rounding to the pixel.
     private let beyondOneFrame = 3.0
+    /// A sanity bound on how far it may be from the finger at all, at the test's speeds, on frames shown on time
+    /// (`maxErrorOnTime`). A loaded runner now and then shows a frame over 100 ms late (CI), by which time the finger
+    /// has moved up to 80 pt: on such a frame the palette is held to that frame's travel (`maxBeyondOneFrame`) (EP107).
+    private let tolerance = 40.0
     /// How many display frames after the finger has moved far enough to tell a drag from a tap the palette may first
     /// be drawn moved: at once, where waiting for the hold would take 18 at 60 Hz. Counted in frames, so a frame a
     /// loaded runner shows late does not make it look slow (it took 0.12 s on CI, one late frame) (EP107).
@@ -72,6 +76,7 @@ final class ToolbarDragTrackingUITests: XCTestCase {
         XCTAssertGreaterThan(palette.width, palette.height, "across the bottom")
         XCTAssertFalse(app.buttons["Eraser"].isSelected, "the tool the finger landed on was not chosen")
         XCTAssertGreaterThan(probe["frames"] ?? 0, 20, "the drag was sampled frame by frame: \(probe)")
+        XCTAssertLessThan(probe["maxErrorOnTime"] ?? .infinity, tolerance, "the palette stayed under the finger: \(probe)")
         XCTAssertLessThan(probe["maxBeyondOneFrame"] ?? .infinity, beyondOneFrame, "never more than a frame behind it: \(probe)")
         XCTAssertGreaterThanOrEqual(probe["pickupFrames"] ?? -1, 0, "it waited for the finger to move, not for a hold: \(probe)")
         XCTAssertLessThanOrEqual(probe["pickupFrames"] ?? .infinity, pickupFrames, "it moved with the finger at once: \(probe)")
@@ -89,11 +94,13 @@ final class ToolbarDragTrackingUITests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: corner, withVelocity: XCUIGestureVelocity(600), thenHoldForDuration: 0)
         sleep(1)
         var probe = try measured()
+        XCTAssertLessThan(probe["maxErrorOnTime"] ?? .infinity, tolerance, "it stayed under the finger down the page: \(probe)")
         XCTAssertLessThan(probe["maxBeyondOneFrame"] ?? .infinity, beyondOneFrame, "never more than a frame behind it: \(probe)")
         var palette = tools.frame
         XCTAssertTrue(palette.maxX < screen.midX || palette.minY > screen.midY, "dropped on the left or bottom: \(palette)")
         drag(app.buttons["Highlighter"], hold: 0.05, to: 0.97, 0.4, speed: 600)
         probe = try measured()
+        XCTAssertLessThan(probe["maxErrorOnTime"] ?? .infinity, tolerance, "and across it: \(probe)")
         XCTAssertLessThan(probe["maxBeyondOneFrame"] ?? .infinity, beyondOneFrame, "never more than a frame behind it: \(probe)")
         palette = tools.frame
         XCTAssertGreaterThan(palette.minX, screen.midX, "dropped on the right: \(palette)")
@@ -116,6 +123,7 @@ final class ToolbarDragTrackingUITests: XCTestCase {
         drag(app.buttons["Eraser"], hold: 0.8, to: 0.4, 0.95)
         let probe = try measured()
         XCTAssertGreaterThan(tools.frame.minY, window.frame.midY, "dropped at the bottom")
+        XCTAssertLessThan(probe["maxErrorOnTime"] ?? .infinity, tolerance, "the palette stayed under the finger: \(probe)")
         XCTAssertLessThan(probe["maxBeyondOneFrame"] ?? .infinity, beyondOneFrame, "never more than a frame behind it: \(probe)")
     }
 }
