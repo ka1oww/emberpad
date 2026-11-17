@@ -79,7 +79,7 @@ final class PresentFrameRenderer: @unchecked Sendable {
             var ok = false
         }
         let result = Result()
-        guard submit(into: buffer, waitForATarget: true, timed: false, completion: { result.ok = $0; result.done.signal() }) == .drawing
+        guard submit(into: buffer, waitForATarget: true, completion: { result.ok = $0; result.done.signal() }) == .drawing
         else { return false }
         result.done.wait()
         return result.ok
@@ -89,7 +89,7 @@ final class PresentFrameRenderer: @unchecked Sendable {
     /// timed frame): Core Animation's pass runs here, on the calling (main) thread, as it reads the layers, and the
     /// GPU's work and the copy into `buffer` finish on the GPU's own thread, where `completion` runs with whether
     /// `buffer` now holds the picture. Without a free target it draws nothing and says `.busy`.
-    func submit(into buffer: CVPixelBuffer?, waitForATarget: Bool = false, timed: Bool = true, completion: @escaping @Sendable (Bool) -> Void) -> Submitted {
+    func submit(into buffer: CVPixelBuffer?, waitForATarget: Bool = false, completion: @escaping @Sendable (Bool) -> Void) -> Submitted {
         if let buffer, CVPixelBufferGetWidth(buffer) != width || CVPixelBufferGetHeight(buffer) != height
             || CVPixelBufferGetPixelFormatType(buffer) != kCVPixelFormatType_32BGRA { return .failed }
         guard freeSlots.wait(timeout: waitForATarget ? .distantFuture : .now()) == .success else { return .busy }
@@ -111,8 +111,8 @@ final class PresentFrameRenderer: @unchecked Sendable {
             release()
             return .failed
         }
-        // Only the recorder's timed frames are slowed; the untimed preparation is not.
-        let delay = timed ? completionDelay : nil
+        // Only the recorder's timed frames are slowed; `drawAndWait` (before the recording) is not.
+        let delay = waitForATarget ? nil : completionDelay
         done.addCompletedHandler { [self] _ in
             let finish = { [self] in
                 let ok = buffer.map { copy(slot.target, into: $0) } ?? true

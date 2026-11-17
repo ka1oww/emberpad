@@ -430,11 +430,6 @@ final class CompanionLessonModel: ObservableObject {
         var preparedPapers: [String] = []
         /// The first pixel buffer and copy have been made (see `prepare`).
         var warmed = false
-        /// A preparation is under way (off the main thread, see `prepare`): `frame()` draws nothing until it lands, as
-        /// the papers it would draw are not ready. True from the start, until the first preparation lands.
-        var preparing = true
-        /// Numbers the preparations; one that is no longer the latest lands on nothing.
-        var preparation = 0
         /// A paper arrived since the last timed frame.
         var paperChanged = false
         /// The last frame drawn is still moving to where the iPad's picture is (EP141): the next is drawn afresh.
@@ -673,10 +668,12 @@ final class CompanionLessonModel: ObservableObject {
         recording.healthTimer = repeating(1) { [weak self] in self?.check() }
         setStatus(PresentLessonStatus(state: .recording, startedAt: dateStart, micName: candidate.name, micIsFallback: fallback,
                                       warning: recording.noAccess))
-        // Not inside start(): the first preparation (see `prepare`) follows start(). The first frame follows it.
+        // Not inside start(): preparing the papers (decoding, the GPU's first take) can take a second, and start() would
+        // hold the main thread, and the projector, for it. The first frame follows its preparation.
         Task { @MainActor [weak self, weak recording] in
             guard let self, let recording, recording === self.recording else { return }
             self.prepare(recording)
+            self.frame()
             self.checkpoint(recording)
         }
         lessonLog.info("Lesson started in \(folder.lastPathComponent, privacy: .public) from the \(origin.rawValue, privacy: .public): \(candidate.name, privacy: .public), \(settings.channels) ch \(Int(settings.sampleRate)) Hz, AAC \(settings.audioBitRate) bit/s")
@@ -897,83 +894,22 @@ final class CompanionLessonModel: ObservableObject {
         }
     }
 
-    /// When the scene shows papers the canvas has not drawn yet, prepares them untimed by `frame()` (which draws nothing
-    /// meanwhile): turning a page into a bitmap and the GPU's first take of it take far longer than a frame, and are
-    /// not to land in one, nor to hold the main thread, and the projector with it. The bitmaps are made off the main
-    /// thread; the main thread only lays them out and hands the GPU its first take without waiting for it, and the
-    /// first frame follows when the GPU is done. A preparation the papers have since replaced lands on nothing.
+    /// When the scene shows papers the canvas has not drawn yet, draws them now and untimed by `frame()`: turning a page
+    /// into a bitmap and the GPU's first take of it take far longer than a frame, and are not to land in one.
     private func prepare(_ recording: Recording) {
-        guard let renderer = recording.renderer else { recording.preparing = false; return }
+        guard let renderer = recording.renderer else { return }
         // The first buffer from the writer's pool and the first copy out of the renderer are one-time costs as well.
-        var warm: CVPixelBuffer?
         if !recording.warmed, let writer = recording.writer, let buffer = writer.makePixelBuffer() {
             recording.warmed = true
-            warm = buffer
+            _ = renderer.drawAndWait(into: buffer)
         }
-        var papers: [String]?
-        var missing: [PresentCanvasView.PaperRequest] = []
-        if presenting != .off, let scene {
-            let shown = scene.frame?.pages.map(\.asset) ?? []
-            if shown != recording.preparedPapers {
-                papers = shown
-                missing = recording.canvas.missingPapers(for: scene, status: .off)
-            }
-        }
-        guard warm != nil || papers != nil else {
-            if !recording.preparing { return }
-            // Nothing to prepare, and a preparation that was under way has been replaced by this one: it is complete.
-            recording.preparation += 1
-            recording.preparing = false
-            return
-        }
-        if let papers {
-            recording.preparedPapers = papers
-            recording.paperChanged = true
-        }
-        recording.preparation += 1
-        let number = recording.preparation
-        recording.preparing = true
-        nonisolated(unsafe) let buffer = warm
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak recording] in
-            let made = PresentCanvasView.rasterise(missing)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, let recording, recording === self.recording, recording.preparation == number else { return }
-                    recording.canvas.adopt(made)
-                    if papers != nil, self.presenting != .off, let scene = self.scene {
-                        recording.canvas.layOutLatest(scene, status: .off)
-                    }
-                    self.takeFirstDraw(recording, renderer: renderer, into: buffer, number: number)
-                }
-            }
-        }
-    }
-
-    /// The GPU's first take of the laid-out pages, into the first buffer if one is to be warmed; the first frame follows
-    /// when it is done. Does not wait for the GPU, nor for a free target: while every target is busy, tries again.
-    private func takeFirstDraw(_ recording: Recording, renderer: PresentFrameRenderer, into buffer: CVPixelBuffer?, number: Int) {
-        nonisolated(unsafe) let buffer = buffer
-        let submitted = renderer.submit(into: buffer, timed: false) { [weak self, weak recording] _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, let recording, recording === self.recording, recording.preparation == number else { return }
-                    recording.preparing = false
-                    self.frame()
-                }
-            }
-        }
-        switch submitted {
-        case .drawing: break
-        case .busy:
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self, weak recording] in
-                MainActor.assumeIsolated {
-                    guard let self, let recording, recording === self.recording, recording.preparation == number else { return }
-                    self.takeFirstDraw(recording, renderer: renderer, into: buffer, number: number)
-                }
-            }
-        case .failed:
-            recording.preparing = false
-        }
+        guard presenting != .off, let scene else { return }
+        let papers = scene.frame?.pages.map(\.asset) ?? []
+        guard papers != recording.preparedPapers else { return }
+        recording.preparedPapers = papers
+        recording.paperChanged = true
+        recording.canvas.layOutLatest(scene, status: .off)
+        renderer.prepare()
     }
 
     /// The document the class sees, for `lesson.json`: the one the iPad named, or, while the teacher has swapped the
@@ -1000,7 +936,7 @@ final class CompanionLessonModel: ObservableObject {
     /// on the projector, EP141), else the last frame again once every `keepAlive`. Each frame is drawn as the picture is
     /// at the time it is saved at, so the sound stays with what the class saw.
     private func frame() {
-        guard let recording, !recording.sleeping, !recording.preparing, let writer = recording.writer else { return }
+        guard let recording, !recording.sleeping, let writer = recording.writer else { return }
         let now = CMClockGetTime(hostClock)
         let began = CACurrentMediaTime()
         var parts = FrameParts()
