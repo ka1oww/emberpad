@@ -865,7 +865,7 @@ final class CompanionLessonModel: ObservableObject {
         // The first buffer from the writer's pool and the first copy out of the renderer are one-time costs as well.
         if !recording.warmed, let writer = recording.writer, let buffer = writer.makePixelBuffer() {
             recording.warmed = true
-            _ = renderer.draw(into: buffer)
+            _ = renderer.drawAndWait(into: buffer)
         }
         guard presenting != .off, let scene else { return }
         let papers = scene.frame?.pages.map(\.asset) ?? []
@@ -920,9 +920,25 @@ final class CompanionLessonModel: ObservableObject {
             recording.dirty = false
             recording.moving = false
             let (shown, changed) = recordedScene(recording)
-            if changed || buffer == nil, let fresh = draw(shown, at: now, recording: recording, writer: writer, parts: &parts) {
-                buffer = fresh
-                recording.moving = recording.canvas.isRefreshing
+            if changed || buffer == nil {
+                switch draw(shown, at: now, recording: recording, writer: writer, parts: &parts) {
+                case .saved(let fresh):
+                    // On the GPU: it appends the frame itself when it is drawn, and this tick does not wait for it.
+                    recording.lastFrame = fresh
+                    recording.lastFrameTime = now
+                    recording.moving = recording.canvas.isRefreshing
+                    return
+                case .drawn(let fresh):
+                    buffer = fresh
+                    recording.moving = recording.canvas.isRefreshing
+                case .busy:
+                    // Every target is still on the GPU: no frame this tick, and the next draws afresh.
+                    recording.dirty = true
+                    recording.lastChoice = nil
+                    return
+                case .failed:
+                    break
+                }
             }
         } else if let last = recording.lastFrameTime, (now - last).seconds < options.keepAlive {
             return
@@ -940,13 +956,22 @@ final class CompanionLessonModel: ObservableObject {
         var canvas = 0.0, buffer = 0.0, gpu = 0.0, append = 0.0
         var first = false, afterPaper = false
         func text(total: TimeInterval) -> String {
-            String(format: "total %.0f ms: canvas.render %.0f, pixel buffer %.0f, GPU draw+copy %.0f, appendVideo %.0f; first frame %@, after paper change %@",
+            String(format: "total %.0f ms: canvas.render %.0f, pixel buffer %.0f, GPU submit %.0f, appendVideo %.0f; first frame %@, after paper change %@",
                    total * 1_000, canvas * 1_000, buffer * 1_000, gpu * 1_000, append * 1_000, first ? "yes" : "no", afterPaper ? "yes" : "no")
         }
     }
 
+    private enum Drawn {
+        /// Handed to the GPU, which appends it at the time given when it is drawn.
+        case saved(CVPixelBuffer)
+        /// Drawn on the CPU, to be appended.
+        case drawn(CVPixelBuffer)
+        case busy
+        case failed
+    }
+
     private func draw(_ scene: PresentScene?, at time: CMTime, recording: Recording, writer: LessonSegmentWriter,
-                      parts: inout FrameParts) -> CVPixelBuffer? {
+                      parts: inout FrameParts) -> Drawn {
         // The host clock is the one the link stamps arrivals by (`CACurrentMediaTime`).
         var mark = CACurrentMediaTime()
         func lap() -> TimeInterval { defer { mark = CACurrentMediaTime() }; return mark.distance(to: CACurrentMediaTime()) }
@@ -954,11 +979,19 @@ final class CompanionLessonModel: ObservableObject {
         parts.canvas = lap()
         let made = writer.makePixelBuffer()
         parts.buffer = lap()
-        guard let buffer = made else { return nil }
+        guard let buffer = made else { return .failed }
         if let renderer = recording.renderer {
-            let drawn = renderer.draw(into: buffer)
+            // The completion belongs to this writer alone: a writer that has finished, or been replaced, drops the frame.
+            nonisolated(unsafe) let frame = buffer
+            let submitted = renderer.submit(into: buffer) { [writer] ok in
+                if ok { writer.appendVideo(frame, at: time) }
+            }
             parts.gpu = lap()
-            if drawn { return buffer }
+            switch submitted {
+            case .drawing: return .saved(buffer)
+            case .busy: return .busy
+            case .failed: break
+            }
         }
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
@@ -966,11 +999,11 @@ final class CompanionLessonModel: ObservableObject {
                                       height: CVPixelBufferGetHeight(buffer), bitsPerComponent: 8,
                                       bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-        else { return nil }
+        else { return .failed }
         context.setFillColor(NSColor.black.cgColor)
         context.fill(CGRect(x: 0, y: 0, width: context.width, height: context.height))
         recording.canvas.draw(into: context, scale: CGFloat(context.width) / recording.canvas.bounds.width)
-        return buffer
+        return .drawn(buffer)
     }
 
     // MARK: Health and checkpoints
