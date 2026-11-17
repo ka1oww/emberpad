@@ -357,13 +357,14 @@ final class StudentBackdropTests: XCTestCase {
         // Every sampled pixel is the picture's: no star, no badge, no text.
         let image = try capture(window)
         let size = window.bounds.size
-        for x in stride(from: 500.0, through: 1_900.0, by: 100.0) {
-            for y in stride(from: 300.0, through: 1_060.0, by: 40.0) {
-                let p = try pixel(image, at: CGPoint(x: x, y: y), in: size)
-                XCTAssertTrue(isGreen(p), "the picture alone at \(x), \(y): \(p)")
+        // Sampled as fractions of the window, so the check holds whatever size the scene gives it.
+        for fx in stride(from: 0.26, through: 0.99, by: 0.05) {
+            for fy in stride(from: 0.28, through: 0.98, by: 0.04) {
+                let p = try pixel(image, at: CGPoint(x: fx * size.width, y: fy * size.height), in: size)
+                XCTAssertTrue(isGreen(p), "the picture alone at \(fx), \(fy): \(p)")
             }
         }
-        let bottomLeft = try pixel(image, at: CGPoint(x: 90, y: 1_020), in: size)
+        let bottomLeft = try pixel(image, at: CGPoint(x: 0.047 * size.width, y: 0.944 * size.height), in: size)
         XCTAssertTrue(isGreen(bottomLeft), "no Paused badge: \(bottomLeft)")
     }
 
