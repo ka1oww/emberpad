@@ -486,6 +486,7 @@
 			"buildSettings" = {
 				"BUNDLE_LOADER" = "$(TEST_HOST)";
 				"GENERATE_INFOPLIST_FILE" = "YES";
+				"INFOPLIST_KEY_NSPrincipalClass" = "EmberPadTestsSetUp";
 				"IPHONEOS_DEPLOYMENT_TARGET" = "17.5";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
@@ -508,6 +509,7 @@
 			"buildSettings" = {
 				"BUNDLE_LOADER" = "$(TEST_HOST)";
 				"GENERATE_INFOPLIST_FILE" = "YES";
+				"INFOPLIST_KEY_NSPrincipalClass" = "EmberPadTestsSetUp";
 				"IPHONEOS_DEPLOYMENT_TARGET" = "17.5";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
