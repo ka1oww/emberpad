@@ -27,15 +27,13 @@ final class PresentLatencyTests: XCTestCase {
     /// The same while the Mac records a lesson, as it does in class: the recording draws its own frames on the Mac's
     /// main thread, which the presented frame shares.
     ///
-    /// Known to miss its bounds until EP141 lands: the recording draws each 1080p frame on the CPU, on the main thread
-    /// (about 90 ms a frame on the captain's Mac, 2026-11-17), so the presented frame waits behind it: 40 ms at the
-    /// median and 86 ms at the 95th percentile, against about 1 and 2 ms without a recording. EP141 moves that draw to
-    /// the GPU. The run is still made and its numbers printed; take the expectation away once EP141 is in.
+    /// Before EP141 the recording drew each 1080p frame on the CPU, on the main thread (about 90 ms a frame on the
+    /// captain's Mac, 2026-11-17), so the presented frame waited behind it: 41 ms at the median and 89 ms at the 95th
+    /// percentile. EP141 moved that draw to the GPU, and the run now meets the same bounds as one without a recording.
     func testPenToProjectorLatencyWhileRecordingALessonStaysWithinItsBounds() async throws {
         let run = try await PresentLatencyRig.run(script: .writing, recording: true)
         XCTAssertGreaterThan(run.recordedVideoBytes, 100_000, "the lesson was really recorded")
-        try check(run, name: "present-latency-loopback-recording", title: "EP148 present latency over TLS-PSK loopback, recording a lesson",
-                  knownSlow: "EP141: the lesson recording draws each frame on the CPU on the Mac's main thread")
+        try check(run, name: "present-latency-loopback-recording", title: "EP148 present latency over TLS-PSK loopback, recording a lesson")
     }
 
     /// The Mac end of a run on a real iPad (`scripts/device-present-latency.sh`): the debug latency host writes a
@@ -87,7 +85,7 @@ final class PresentLatencyTests: XCTestCase {
         XCTAssertNotEqual(host.present.lesson.options.root, LessonFolder.defaultRoot)
     }
 
-    private func check(_ run: PresentLatencyRun, name: String, title: String, knownSlow: String? = nil) throws {
+    private func check(_ run: PresentLatencyRun, name: String, title: String) throws {
         let summary = run.summary
         print("\(title) (ms), canvas \(Int(run.canvas.width)) x \(Int(run.canvas.height)) at \(run.scale)x:\n\(summary.table)")
         try PresentLatencyRig.save(summary, samples: run.samples, name: name)
@@ -107,22 +105,14 @@ final class PresentLatencyTests: XCTestCase {
                                         "no part runs backwards beyond the clock offset's error")
         }
 
-        func bounds() {
-            XCTAssertLessThan(summary.macFrame.p95, PresentLatencyBounds.macFrameP95,
-                              "the Mac's frame (wait, render, present) at the 95th percentile")
-            XCTAssertLessThan(summary.macFrame.p50, PresentLatencyBounds.macFrameP50, "the Mac's frame at the median")
-            XCTAssertLessThan(summary.loopToProjector.p95, PresentLatencyBounds.loopToProjectorP95,
-                              "present loop to projector at the 95th percentile")
-            XCTAssertLessThan(summary.loopToProjector.p50, PresentLatencyBounds.loopToProjectorP50,
-                              "present loop to projector at the median")
-            XCTAssertLessThan(summary.loopToProjector.max, PresentLatencyBounds.loopToProjectorMax, "the slowest sample")
-        }
-        if let knownSlow {
-            // Not strict: a much faster Mac than the captain's may meet the bounds even so.
-            XCTExpectFailure(knownSlow, strict: false) { bounds() }
-        } else {
-            bounds()
-        }
+        XCTAssertLessThan(summary.macFrame.p95, PresentLatencyBounds.macFrameP95,
+                          "the Mac's frame (wait, render, present) at the 95th percentile")
+        XCTAssertLessThan(summary.macFrame.p50, PresentLatencyBounds.macFrameP50, "the Mac's frame at the median")
+        XCTAssertLessThan(summary.loopToProjector.p95, PresentLatencyBounds.loopToProjectorP95,
+                          "present loop to projector at the 95th percentile")
+        XCTAssertLessThan(summary.loopToProjector.p50, PresentLatencyBounds.loopToProjectorP50,
+                          "present loop to projector at the median")
+        XCTAssertLessThan(summary.loopToProjector.max, PresentLatencyBounds.loopToProjectorMax, "the slowest sample")
     }
 }
 
