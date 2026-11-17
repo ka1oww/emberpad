@@ -7,6 +7,31 @@ import QuartzCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// When the frame the main thread just drew leaves the app (EP148, latency measurement only).
+@MainActor
+enum PresentFrameCommit {
+    /// Core Animation commits the run loop turn's layer changes from an observer of this order.
+    private static let coreAnimationCommitOrder: CFIndex = 2_000_000
+
+    /// Calls `body` once, on the main thread, after Core Animation has committed this turn of the run loop.
+    static func afterCommit(_ body: @escaping @MainActor () -> Void) {
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue | CFRunLoopActivity.exit.rawValue,
+                                                          false, coreAnimationCommitOrder + 1) { _, _ in
+            MainActor.assumeIsolated { body() }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+    }
+
+    /// The display's next refresh after `time` (on `PresentLatencyClock`, the clock the display's own times are on),
+    /// by its last refresh and its refresh interval; nil when the display does not say.
+    static func nextRefresh(of screen: NSScreen, after time: TimeInterval) -> TimeInterval? {
+        let last = screen.lastDisplayUpdateTimestamp
+        let interval = screen.minimumRefreshInterval
+        guard last > 0, interval > 0, time >= last else { return nil }
+        return last + ((time - last) / interval).rounded(.up) * interval
+    }
+}
+
 /// Present on Mac, the Mac side (EP93). The sync server hands every PRESENT frame to `host`; this model shows what
 /// it holds in a presentation window: full screen on the projector (the first display that is not the Mac's own,
 /// unless another is chosen), or a normal window when the Mac has no other display. The window opens when the iPad
@@ -128,6 +153,8 @@ final class CompanionPresentModel: ObservableObject {
 
     private func drain() {
         guard let (scene, status) = mailbox.take() else { return }
+        // EP148: the frame's times, only while the presenting iPad measures latency.
+        let began = host.isTimed ? PresentLatencyClock.now() : nil
         lesson.present(scene, status: status)
         let started = self.status == .off && status != .off
         self.status = status
@@ -141,6 +168,20 @@ final class CompanionPresentModel: ObservableObject {
         guard !hidden else { return }
         if !window.isShown { showWindow() }
         window.render(scene, status: status)
+        if let began, let seq = scene.lastSeq { reportFrame(seq: seq, began: began) }
+    }
+
+    /// Tells the measuring iPad when this frame was begun, drawn and handed to the system to show (EP148). The last
+    /// is when Core Animation has committed the frame's layers, which it does as this turn of the run loop ends.
+    private func reportFrame(seq: UInt64, began: TimeInterval) {
+        let rendered = PresentLatencyClock.now()
+        let host = host
+        let screen = window.window?.screen
+        PresentFrameCommit.afterCommit {
+            let presented = PresentLatencyClock.now()
+            host.showed(PresentLatencyFrame(seq: seq, began: began, rendered: rendered, presented: presented,
+                                            refresh: screen.flatMap { PresentFrameCommit.nextRefresh(of: $0, after: presented) }))
+        }
     }
 
     private func showWindow() {

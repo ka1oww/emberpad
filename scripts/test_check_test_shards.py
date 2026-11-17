@@ -12,7 +12,8 @@ check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
 CLASSES = {"EmberPadTests/AlphaTests", "EmberPadTests/BetaTests", "EmberPadTests/GammaTests",
-           "EmberPadTests/DeviceDrawingStressTests", "EmberPadUITests/DragUITests", "EmberPadUITests/TabsUITests"}
+           "EmberPadTests/DeviceDrawingStressTests", "EmberPadTests/DevicePresentLatencyTests",
+           "EmberPadUITests/DragUITests", "EmberPadUITests/TabsUITests"}
 
 
 def workflow(one, two, three):
@@ -28,7 +29,8 @@ def workflow(one, two, three):
 GOOD = workflow(["-only-testing:EmberPadTests/AlphaTests"],
                 ["-only-testing:EmberPadUITests/DragUITests"],
                 ["-skip-testing:EmberPadTests/AlphaTests", "-skip-testing:EmberPadUITests/DragUITests",
-                 "-skip-testing:EmberPadTests/DeviceDrawingStressTests"])
+                 "-skip-testing:EmberPadTests/DeviceDrawingStressTests",
+                 "-skip-testing:EmberPadTests/DevicePresentLatencyTests"])
 
 
 class CheckTestShardsTests(unittest.TestCase):
@@ -40,7 +42,8 @@ class CheckTestShardsTests(unittest.TestCase):
             "1": [("only", "EmberPadTests/AlphaTests")],
             "2": [("only", "EmberPadUITests/DragUITests")],
             "3": [("skip", "EmberPadTests/AlphaTests"), ("skip", "EmberPadUITests/DragUITests"),
-                  ("skip", "EmberPadTests/DeviceDrawingStressTests")],
+                  ("skip", "EmberPadTests/DeviceDrawingStressTests"),
+                  ("skip", "EmberPadTests/DevicePresentLatencyTests")],
         })
 
     def test_every_class_in_exactly_one_shard_passes(self):
@@ -82,7 +85,8 @@ class CheckTestShardsTests(unittest.TestCase):
 
     def test_a_shard_that_selects_nothing_is_reported(self):
         text = workflow([], ["-only-testing:EmberPadTests/AlphaTests"],
-                        ["-skip-testing:EmberPadTests/AlphaTests", "-skip-testing:EmberPadTests/DeviceDrawingStressTests"])
+                        ["-skip-testing:EmberPadTests/AlphaTests", "-skip-testing:EmberPadTests/DeviceDrawingStressTests",
+                         "-skip-testing:EmberPadTests/DevicePresentLatencyTests"])
         self.assertEqual(self.problems(text), ["shard 1 selects nothing, so it would run every test"])
 
     def test_this_repository_runs_every_test_class_exactly_once(self):

@@ -14,8 +14,8 @@ import re
 import sys
 
 TARGETS = ("EmberPadTests", "EmberPadUITests")
-# Runs only from scripts/device-stress-test.sh.
-NEVER_IN_CI = {"EmberPadTests/DeviceDrawingStressTests"}
+# Run only from scripts/device-stress-test.sh and scripts/device-present-latency.sh.
+NEVER_IN_CI = {"EmberPadTests/DeviceDrawingStressTests", "EmberPadTests/DevicePresentLatencyTests"}
 
 SHARD = re.compile(r"^\s*-\s+shard:\s*(\S+)\s*$")
 SELECTION = re.compile(r"-(only|skip)-testing:(\S+)")

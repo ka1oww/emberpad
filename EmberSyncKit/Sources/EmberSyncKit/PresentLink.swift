@@ -49,6 +49,8 @@ public final class PresentLink: @unchecked Sendable {
     private let onState: @Sendable (State) -> Void
     private let onOpened: @Sendable (_ generation: Int) -> Void
     private let onReply: @Sendable (_ reply: PresentReply, _ generation: Int) -> Void
+    /// EP148: stamps each marked update's way out and takes the Mac's latency reports; nil in normal use.
+    private let probe: PresentLatencyProbe?
     private let lock = NSLock()
     private var runner: Task<Void, Never>?
     private var retiring: Task<Void, Never>?
@@ -60,10 +62,12 @@ public final class PresentLink: @unchecked Sendable {
     private var queued = 0
     private var currentStats = Stats()
 
-    public init(connect: @escaping Connect, timing: Timing = Timing(), onState: @escaping @Sendable (State) -> Void = { _ in },
+    public init(connect: @escaping Connect, timing: Timing = Timing(), probe: PresentLatencyProbe? = nil,
+                onState: @escaping @Sendable (State) -> Void = { _ in },
                 onOpened: @escaping @Sendable (Int) -> Void, onReply: @escaping @Sendable (PresentReply, Int) -> Void) {
         self.connect = connect
         self.timing = timing
+        self.probe = probe
         self.onState = onState
         self.onOpened = onOpened
         self.onReply = onReply
@@ -118,14 +122,15 @@ public final class PresentLink: @unchecked Sendable {
     }
 
     /// Queues one PRESENT payload for the connection named `generation`. Returns false, dropping it, when that
-    /// connection is gone or not yet negotiated.
+    /// connection is gone or not yet negotiated. `seq` names the update for the latency probe (EP148), if there is one.
     @discardableResult
-    public func send(_ payload: Data, generation: Int) -> Bool {
+    public func send(_ payload: Data, generation: Int, seq: UInt64? = nil) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard accepting, generation == currentGeneration, let outbox else { return false }
         queued += payload.count
-        outbox.yield(Outgoing(frame: WireCodec.encode(.present(payload)), payload: payload.count))
+        outbox.yield(Outgoing(frame: WireCodec.encode(.present(payload)), payload: payload.count,
+                              mark: seq.map { (generation, $0) }))
         return true
     }
 
@@ -176,7 +181,8 @@ public final class PresentLink: @unchecked Sendable {
     }
 
     private enum Input: Sendable {
-        case bytes(Data)
+        /// Bytes from the Mac, and when they arrived on the latency probe's clock (zero without a probe).
+        case bytes(Data, TimeInterval)
         case closed
         case tick
         case progress
@@ -186,12 +192,15 @@ public final class PresentLink: @unchecked Sendable {
     private struct Outgoing: Sendable {
         let frame: Data
         let payload: Int
+        /// The connection and sequence number of an update the latency probe follows.
+        var mark: (generation: Int, seq: UInt64)?
     }
 
     private func session(over transport: any WireTransport) async -> SessionEnd {
         let (inputs, input) = AsyncStream.makeStream(of: Input.self)
+        let probe = self.probe
         let reader = Task<Void, Never> {
-            do { while let bytes = try await transport.receive() { input.yield(.bytes(bytes)) } } catch {}
+            do { while let bytes = try await transport.receive() { input.yield(.bytes(bytes, probe?.clock() ?? 0)) } } catch {}
             input.yield(.closed)
         }
         let tickInterval = timing.tickInterval
@@ -205,6 +214,7 @@ public final class PresentLink: @unchecked Sendable {
         let (frames, writerInput) = AsyncStream.makeStream(of: Outgoing.self)
         let writer = Task<Void, Never> { [weak self] in
             for await item in frames {
+                if let mark = item.mark { probe?.writing(generation: mark.generation, seq: mark.seq) }
                 do {
                     var start = item.frame.startIndex
                     while start < item.frame.endIndex {
@@ -244,11 +254,13 @@ public final class PresentLink: @unchecked Sendable {
         for await item in inputs {
             if Task.isCancelled { break }
             var output: WireClientOutput
+            var arrived: TimeInterval = 0
             switch item {
             case .progress:
                 lastHeard = clock.now
                 continue
-            case .bytes(let bytes):
+            case .bytes(let bytes, let at):
+                arrived = at
                 lock.withLock { currentStats.receivedBytes += bytes.count }
                 output = session.receive(bytes, now: .now)
             case .closed:
@@ -277,6 +289,10 @@ public final class PresentLink: @unchecked Sendable {
                 case .presentReply(let bytes):
                     lastHeard = clock.now
                     guard let reply = try? PresentCodec.decodeReply(bytes) else { continue }
+                    if case .latency(let report) = reply {
+                        probe?.heard(report, generation: generation, received: arrived)
+                        continue
+                    }
                     if !answered {
                         answered = true
                         lock.withLock { currentStats.connections += 1 }
@@ -345,14 +361,19 @@ public final class PresentSender: @unchecked Sendable {
     private let queue = DispatchQueue(label: "EmberSyncKit.PresentSender", qos: .userInitiated)
 
     private let onLesson: @Sendable (PresentLessonStatus) -> Void
+    /// EP148: measures pen-to-projector latency; nil in normal use, when no update is marked and nothing is stamped.
+    private let probe: PresentLatencyProbe?
 
-    /// `onLesson` gets the Mac's lesson recording status (EP129) on the link's own task.
+    /// `onLesson` gets the Mac's lesson recording status (EP129) on the link's own task. `probe` measures latency
+    /// (EP148): leave it nil outside a measurement.
     public init(connect: @escaping PresentLink.Connect, timing: PresentLink.Timing = PresentLink.Timing(),
+                probe: PresentLatencyProbe? = nil,
                 onState: @escaping @Sendable (PresentLink.State) -> Void = { _ in },
                 onLesson: @escaping @Sendable (PresentLessonStatus) -> Void = { _ in }) {
         self.onLesson = onLesson
+        self.probe = probe
         let box = WeakBox<PresentSender>()
-        link = PresentLink(connect: connect, timing: timing, onState: onState,
+        link = PresentLink(connect: connect, timing: timing, probe: probe, onState: onState,
                            onOpened: { generation in box.value?.opened(generation) },
                            onReply: { reply, generation in box.value?.replied(reply, generation: generation) })
         box.value = self
@@ -375,6 +396,7 @@ public final class PresentSender: @unchecked Sendable {
     public func tick(now: TimeInterval, input: () -> PresentInput) {
         let generation = link.generation
         guard link.isAccepting else { return }
+        let tick = probe?.clock()
         var outgoing: [PresentOutgoing] = []
         lock.lock()
         if openFor != generation {
@@ -387,10 +409,18 @@ public final class PresentSender: @unchecked Sendable {
         if proceed, link.queuedBytes < Self.highWater {
             let current = input()
             lock.lock()
-            if let next = encoder.update(current, now: now) { outgoing.append(next) }
+            if let next = encoder.update(current, now: now) {
+                outgoing.append(next)
+                if let probe, let tick {
+                    probe.read(generation: generation, seq: next.seq, tick: tick, live: current.live.map { ($0.id, $0.count) },
+                               carriesLive: !next.update.live.isEmpty)
+                }
+            }
             lock.unlock()
         }
         guard !outgoing.isEmpty else { return }
+        // A measured link marks every update, so the Mac sends its times back.
+        if probe != nil { for index in outgoing.indices { outgoing[index].update.timed = true } }
         lock.lock()
         encoding += 1
         lock.unlock()
@@ -399,7 +429,8 @@ public final class PresentSender: @unchecked Sendable {
         queue.async { [self] in
             for item in items {
                 guard let bytes = try? item.encode() else { continue }
-                link.send(bytes, generation: generation)
+                probe?.encoded(generation: generation, seq: item.seq)
+                link.send(bytes, generation: generation, seq: probe == nil ? nil : item.seq)
             }
             lock.lock()
             encoding -= 1
@@ -424,7 +455,7 @@ public final class PresentSender: @unchecked Sendable {
             readyFor = generation
         case .resnapshot(let held):
             encoder.resnapshot(heldAssets: held)
-        case .ack, .lesson:
+        case .ack, .lesson, .latency:
             break
         }
     }
@@ -473,7 +504,12 @@ public final class PresentHost: @unchecked Sendable {
     public let silenceLimit: TimeInterval
     /// Commands remembered, so one sent again on a new link counts once.
     static let rememberedCommands = 32
+    /// Timed updates remembered until a frame shows them (EP148); a Mac that draws nothing forgets the oldest.
+    static let rememberedArrivals = 512
     private let lock = NSLock()
+    /// EP148: the presenting link, once it marked an update `timed`; nil in normal use.
+    private var timedLink: ObjectIdentifier?
+    private var arrivals: [PresentLatencyReport.Arrival] = []
     private var lessonStatus = PresentLessonStatus.idle
     private var handledCommands: [UUID] = []
     private var scene = PresentScene()
@@ -516,8 +552,30 @@ public final class PresentHost: @unchecked Sendable {
     public var current: PresentScene { lock.withLock { scene } }
     public var stats: Stats { lock.withLock { currentStats } }
 
-    /// One PRESENT payload arrived on `link`.
-    public func received(_ payload: Data, on link: any PresentReplying) {
+    /// Whether the presenting iPad is measuring latency (EP148), so each frame shown should be reported with `showed`.
+    public var isTimed: Bool { lock.withLock { timedLink != nil && timedLink == active } }
+
+    /// The Mac showed a frame (EP148). Sends the presenting iPad the times of the updates that frame showed for the
+    /// first time, if it asked; otherwise does nothing.
+    public func showed(_ frame: PresentLatencyFrame) {
+        lock.lock()
+        guard let link = activeLink, timedLink != nil, timedLink == active else {
+            arrivals = []
+            return lock.unlock()
+        }
+        let shown = arrivals.filter { $0.seq <= frame.seq }
+        arrivals.removeAll { $0.seq <= frame.seq }
+        lock.unlock()
+        guard !shown.isEmpty else { return }
+        let report = PresentLatencyReport(seq: frame.seq, arrivals: shown, began: frame.began, rendered: frame.rendered,
+                                          presented: frame.presented, refresh: frame.refresh, sent: PresentLatencyClock.now())
+        if let bytes = try? PresentCodec.encode(PresentReply.latency(report)) { link.reply(bytes) }
+    }
+
+    /// One PRESENT payload arrived on `link`. `receivedAt` is when the connection handed over its bytes, on
+    /// `PresentLatencyClock`; it matters only to a link that measures latency (EP148).
+    public func received(_ payload: Data, on link: any PresentReplying, receivedAt: TimeInterval? = nil) {
+        let entered = PresentLatencyClock.now()
         guard let update = try? PresentCodec.decodeUpdate(payload) else { return link.close() }
         var replies: [PresentReply] = []
         var superseded: (any PresentReplying)?
@@ -534,6 +592,8 @@ public final class PresentHost: @unchecked Sendable {
                 active = id
                 activeLink = link
                 currentStats.links += 1
+                timedLink = nil
+                arrivals = []
             }
             scene.linkOpened()
             scene.namesDocuments = lessonLink
@@ -565,6 +625,14 @@ public final class PresentHost: @unchecked Sendable {
             if update.stop {
                 active = nil
                 activeLink = nil
+                timedLink = nil
+                arrivals = []
+            } else if update.timed, outcome == .applied {
+                // The iPad is measuring: remember when this update came in, for the report on the frame that shows it.
+                timedLink = id
+                arrivals.append(PresentLatencyReport.Arrival(seq: update.seq, received: min(receivedAt ?? entered, entered),
+                                                             entered: entered, decoded: PresentLatencyClock.now()))
+                if arrivals.count > Self.rememberedArrivals { arrivals.removeFirst(arrivals.count - Self.rememberedArrivals) }
             }
             changed = (scene, currentStatus)
         }
@@ -584,6 +652,8 @@ public final class PresentHost: @unchecked Sendable {
         if active == ObjectIdentifier(link) {
             active = nil
             activeLink = nil
+            timedLink = nil
+            arrivals = []
             if currentStatus != .off, !scene.stopped {
                 currentStatus = .reconnecting
                 changed = (scene, currentStatus)
@@ -612,6 +682,8 @@ public final class PresentHost: @unchecked Sendable {
         let link = activeLink
         active = nil
         activeLink = nil
+        timedLink = nil
+        arrivals = []
         currentStatus = .off
         scene = PresentScene()
         lock.unlock()

@@ -8,10 +8,17 @@ private func isCompanionSourceDirectory(_ url: URL) -> Bool {
 }
 
 /// Starts the Companion, or, when it hosts `EmberPadCompanionTests`, a bare app with no models, so a test run never
-/// reads the pairing, starts the sync server or prepares the iPad library.
+/// reads the pairing, starts the sync server or prepares the iPad library. A debug build launched with
+/// `-EmberPresentLatencyHost <file>` starts as the Mac end of a device latency run instead (EP148).
 @main
 enum CompanionMain {
     static func main() {
+#if DEBUG
+        if CompanionPresentLatencyHost.pairingFile != nil {
+            NSApplication.shared.setActivationPolicy(.accessory)
+            return CompanionPresentLatencyHostApp.main()
+        }
+#endif
         if CompanionTestHostMode.isActive {
             // No Dock icon and never the active app, before AppKit finishes launching (EP136).
             NSApplication.shared.setActivationPolicy(.accessory)

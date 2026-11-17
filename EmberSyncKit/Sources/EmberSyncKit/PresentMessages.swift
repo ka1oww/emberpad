@@ -159,6 +159,9 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
     /// capture time when it carries a frame, else when it was sent. The Mac plays the frames back by these times
     /// (`PresentMotion`). A Companion from before EP141 ignores it; an iPad from before EP141 leaves it out.
     public var time: TimeInterval?
+    /// EP148: the iPad is measuring latency and asks the Mac for its times (`PresentReply.latency`). Left out in
+    /// normal use. A Companion from before EP148 ignores it and sends no times.
+    public var timed = false
 
     public init(seq: UInt64) { self.seq = seq }
 
@@ -171,6 +174,7 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case seq = "s", open = "o", reset = "r", stop = "x", frame = "f", assets = "a", ink = "i", live = "l"
         case laser = "p", trail = "t", document = "d", lesson = "c", time = "m"
+        case timed = "q"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -188,6 +192,7 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
         document = try container.decodeIfPresent(PresentDocumentChange.self, forKey: .document)
         lesson = try container.decodeIfPresent(PresentLessonCommand.self, forKey: .lesson)
         time = try container.decodeIfPresent(TimeInterval.self, forKey: .time)
+        timed = try container.decodeIfPresent(Bool.self, forKey: .timed) ?? false
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -205,6 +210,7 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
         try container.encodeIfPresent(document, forKey: .document)
         try container.encodeIfPresent(lesson, forKey: .lesson)
         try container.encodeIfPresent(time, forKey: .time)
+        if timed { try container.encode(true, forKey: .timed) }
     }
 }
 
@@ -219,6 +225,9 @@ public enum PresentReply: Equatable, Codable, Sendable {
     /// Version 5 (EP129): the lesson recording's status, sent when the link opens and whenever it changes. An
     /// older iPad cannot decode it, so it goes only to a version-5 link.
     case lesson(PresentLessonStatus)
+    /// EP148: the Mac's times for a frame it showed. Sent only on a link whose iPad asked (`PresentUpdate.timed`), so
+    /// an iPad from before EP148, which cannot decode it, is never sent one.
+    case latency(PresentLatencyReport)
 }
 
 /// Binary property lists: `Data` travels as raw bytes and repeated keys are stored once.

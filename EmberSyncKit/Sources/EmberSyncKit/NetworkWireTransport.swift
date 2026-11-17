@@ -83,6 +83,20 @@ public final class NetworkWireTransport: WireTransport, @unchecked Sendable {
         return NetworkWireTransport(connection: connection, queue: queue)
     }
 
+    /// The interface the connection runs over, for a report: "wifi en0" on a Wi-Fi network, "wifi awdl0" over
+    /// peer-to-peer Wi-Fi, "wired en5" on a cable, "loopback lo0" on this machine. Nil once the connection is gone.
+    public var route: String? {
+        guard let interface = connection.currentPath?.availableInterfaces.first else { return nil }
+        let kind = switch interface.type {
+        case .wifi: "wifi"
+        case .wiredEthernet: "wired"
+        case .cellular: "cellular"
+        case .loopback: "loopback"
+        default: "other"
+        }
+        return "\(kind) \(interface.name)"
+    }
+
     public func send(_ bytes: Data) async throws {
         guard !bytes.isEmpty else { return }
         let connection = self.connection

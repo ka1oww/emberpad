@@ -489,6 +489,7 @@ final class SyncConnection: @unchecked Sendable {
     private var failedRequests = 0
     /// Set once this connection sends its first PRESENT (EP93).
     private var presentLink: ServerPresentLink?
+    private var presentReceivedAt: TimeInterval?
     private var lastReceived = ContinuousClock.now
 
     init(connection: NWConnection, server: SyncServer) {
@@ -579,6 +580,8 @@ final class SyncConnection: @unchecked Sendable {
 
     private func feed(_ bytes: Data) {
         guard var session else { return }
+        // EP148: when a presenting connection's bytes arrived, for a link that measures latency.
+        presentReceivedAt = PresentLatencyClock.now()
         lastReceived = .now
         var input = bytes
         repeat {
@@ -636,7 +639,7 @@ final class SyncConnection: @unchecked Sendable {
             let version: UInt16 = if case .ready(let version) = session?.phase { version } else { WireProtocol.presentVersion }
             let link = presentLink ?? ServerPresentLink(connection: self, queue: queue, version: version)
             presentLink = link
-            host.received(payload, on: link)
+            host.received(payload, on: link, receivedAt: presentReceivedAt)
         }
     }
 
