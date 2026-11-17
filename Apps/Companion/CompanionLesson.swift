@@ -370,8 +370,12 @@ final class CompanionLessonModel: ObservableObject {
     /// The frames of one file that are on the GPU and not yet appended. Ending the file waits for them, off the main thread.
     private final class FramesInFlight: @unchecked Sendable {
         private let group = DispatchGroup()
-        func enter() { group.enter() }
-        func leave() { group.leave() }
+        private let lock = NSLock()
+        private var count = 0
+        /// Frames handed to the GPU that have not yet landed, failed or been dropped.
+        var pending: Int { lock.lock(); defer { lock.unlock() }; return count }
+        func enter() { lock.lock(); count += 1; lock.unlock(); group.enter() }
+        func leave() { lock.lock(); count -= 1; lock.unlock(); group.leave() }
         /// Returns once every frame has landed, or after `limit`, when the rest are dropped.
         func drained(within limit: TimeInterval) async {
             await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
@@ -948,11 +952,13 @@ final class CompanionLessonModel: ObservableObject {
             }
         }
         var buffer = recording.lastFrame
-        if recording.dirty || recording.moving || buffer == nil {
+        // No frame has landed yet but one is on the GPU: the same picture is not drawn again until it does.
+        let awaiting = buffer == nil && recording.flight.pending > 0
+        if recording.dirty || recording.moving || (buffer == nil && !awaiting) {
             recording.dirty = false
             recording.moving = false
             let (shown, changed) = recordedScene(recording)
-            if changed || buffer == nil {
+            if changed || (buffer == nil && !awaiting) {
                 switch draw(shown, at: now, recording: recording, writer: writer, parts: &parts) {
                 case .saved:
                     // On the GPU: it appends the frame itself when it is drawn (and sets `lastFrame` then), and this tick does not wait for it.
