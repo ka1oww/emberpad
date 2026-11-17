@@ -174,6 +174,31 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertFalse(record.microphone.preferred)
     }
 
+    /// A short lesson on a slow GPU (CI's virtual one) still saves its picture: ending waits, off the main thread, for the
+    /// frames still on the GPU. Every frame lands 2 s after it is drawn and the lesson ends within about 1.5 s of
+    /// starting, so when it ends no frame has landed yet. Without the wait the file holds no video and the lesson is "failed".
+    func testAShortLessonOnASlowGPUStillSavesItsVideo() async throws {
+        var slow = options()
+        slow.frameCompletionDelay = 2
+        slow.frameDrainLimit = 4
+        let lesson = CompanionLessonModel(options: slow, microphones: FakeMicrophones(available: [FakeMicrophones.boya]))
+        lesson.start()
+        try await waitUntil { lesson.status.state == .recording }
+        let folder = try XCTUnwrap(lesson.folder)
+        try await pause(0.5)
+        await lesson.finish()
+        let record = try LessonRecord.read(from: folder)
+        XCTAssertEqual(record.status, .complete)
+        let video = folder.appendingPathComponent("lesson.mp4")
+        let asset = AVURLAsset(url: video)
+        let playable = try await asset.load(.isPlayable)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        XCTAssertTrue(playable)
+        XCTAssertEqual(tracks.count, 1)
+        let duration = try await XCTUnwrap(tracks.first).load(.timeRange).duration
+        XCTAssertGreaterThan(duration.seconds, 0, "the video holds a frame")
+    }
+
     func testTheBoyaIsPickedByNameOverTheBuiltInMic() async throws {
         let microphones = FakeMicrophones(available: [FakeMicrophones.builtIn, FakeMicrophones.boya])
         let lesson = CompanionLessonModel(options: options(), microphones: microphones)

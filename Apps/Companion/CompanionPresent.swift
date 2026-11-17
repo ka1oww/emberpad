@@ -61,7 +61,8 @@ final class CompanionPresentModel: ObservableObject {
         self.backdrop = backdrop
         let mailbox = PresentMailbox()
         let box = WeakPresentModel()
-        host = PresentHost(onChange: { scene, status in
+        // Arrivals are timed on the clock the canvas's display link runs by, for smooth playback (EP141).
+        host = PresentHost(now: { CACurrentMediaTime() }, onChange: { scene, status in
             // Called on the server's queue for every update; the main thread draws only the latest.
             if mailbox.put(scene, status) {
                 DispatchQueue.main.async { MainActor.assumeIsolated { box.model?.drain() } }
@@ -347,6 +348,7 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
 
     override init() {
         super.init()
+        canvas.smoothsMotion = true
         content.install(canvas)
         content.onExit = { [weak self] in self?.onHide?() }
         canvas.onEscape = { [weak self] in self?.onHide?() }
@@ -731,6 +733,11 @@ final class PresentExitButton: NSButton {
 /// paths, the laser trail and the dot. A Pencil move changes only paths; ink appended to a page renders only the new
 /// strokes; a scroll moves layers without rasterising anything.
 ///
+/// The presentation window's canvas plays scrolling back smoothly (EP141, `smoothsMotion`): the page's position follows
+/// the iPad's `PresentPlayback.delay` (100 ms) behind, moved every display refresh by the display link while it is
+/// moving, instead of jumping each time an update lands. Everything else is drawn as it is now. The lesson recording's
+/// canvas plays back the same way, at each recorded frame's time.
+///
 /// With a projector backdrop (EP131, `PresentBackdropStore`), the idle screen is the picture alone, full-bleed, and the
 /// Paused screen is the picture with a small, quiet "Paused" in the bottom-left corner, on a dark rounded badge so it
 /// reads on any picture. Without one they are the star alone on black and the large "Paused", as before.
@@ -767,6 +774,15 @@ final class PresentCanvasView: NSView {
     private var paperImages = PresentPaperImages()
     private var scene: PresentScene?
     private var status = PresentHost.Status.off
+    /// Plays the page's position back evenly by the iPad's capture times (EP141): on for the projector and the lesson
+    /// recording, off for a bare canvas, which draws each scene as it is.
+    var smoothsMotion = false
+    /// The clock playback runs by when no display refresh names the time; the display link's own clock.
+    var clock: () -> TimeInterval = { CACurrentMediaTime() }
+    private var playback = PresentPlayback()
+    private var refreshLink: CADisplayLink?
+    /// The played-back picture is still moving, so every display refresh redraws it.
+    private(set) var isRefreshing = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -838,20 +854,62 @@ final class PresentCanvasView: NSView {
         redraw()
     }
 
-    func render(_ scene: PresentScene, status: PresentHost.Status) {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // The link follows the display the window is on; a canvas out of a window needs none.
+        refreshLink?.invalidate()
+        refreshLink = nil
+        refresh(isRefreshing)
+    }
+
+    /// Draws `scene`; a smoothed canvas plays its motion back at `time` (by default, now).
+    func render(_ scene: PresentScene, status: PresentHost.Status, at time: TimeInterval? = nil) {
         self.scene = scene
         self.status = status
-        redraw()
+        redraw(at: time)
+    }
+
+    /// Lays out the latest frame, not the played-back one, so the papers of pages that are about to scroll into view are
+    /// drawn (and cached) before the played-back picture reaches them. Leaves the playback untouched.
+    func layOutLatest(_ scene: PresentScene, status: PresentHost.Status) {
+        self.scene = scene
+        self.status = status
+        redraw(latest: true)
+    }
+
+    /// Draws the picture as it is at `time`, as a display refresh does; tests call it with a clock of their own.
+    func refresh(at time: TimeInterval) {
+        redraw(at: time)
+    }
+
+    /// Runs the display link while the played-back picture moves, and pauses it once it is at rest.
+    private func refresh(_ on: Bool) {
+        isRefreshing = on
+        if on, refreshLink == nil, window != nil {
+            let link = displayLink(target: PresentRefreshTarget(self), selector: #selector(PresentRefreshTarget.refresh(_:)))
+            link.add(to: .main, forMode: .common)
+            refreshLink = link
+        }
+        refreshLink?.isPaused = !on
     }
 
     private var screenScale: CGFloat { scaleOverride ?? window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2 }
 
-    private func redraw() {
+    private func redraw(at time: TimeInterval? = nil, latest: Bool = false) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         root.frame = bounds
-        let screen = scene?.presented?.screen ?? .idle
+        // The frame to draw: played back while smoothing (EP141), else the latest.
+        var shown = scene?.frame
+        if smoothsMotion, !latest, let scene {
+            let played = playback.shown(for: scene, at: time ?? clock())
+            shown = played.frame
+            refresh(played.moving)
+        } else if isRefreshing, !latest {
+            refresh(false)
+        }
+        let screen = scene?.presented(with: shown)?.screen ?? .idle
         viewport.isHidden = true
         message.isHidden = true
         star.isHidden = true
@@ -861,7 +919,7 @@ final class PresentCanvasView: NSView {
         case .idle: if backdrop != nil { showBackdrop() } else { showStar() }
         case .paused: if backdrop != nil { showBackdrop(badge: "Paused") } else { show(message: "Paused") }
         case .teacherCopyPrivate: show(message: "Teacher copy · private")
-        case .page(let page): layout(page)
+        case .page(let page): layout(page, refs: shown?.pages ?? [])
         }
         if case .page = screen {} else { dropPages(keeping: []) }
         layoutStatusDot()
@@ -926,7 +984,7 @@ final class PresentCanvasView: NSView {
         statusDot.opacity = 0.85
     }
 
-    private func layout(_ page: PresentedView.Page) {
+    private func layout(_ page: PresentedView.Page, refs pageRefs: [PresentPageRef]) {
         guard let scene else { return }
         let target = PresentGeometry.aspectFit(page.visibleRect.size, in: bounds, margin: page.margin)
         guard !target.isEmpty else { return dropPages(keeping: []) }
@@ -934,7 +992,7 @@ final class PresentCanvasView: NSView {
         viewport.frame = target
         let local = CGRect(origin: .zero, size: target.size)
         liveLayer.frame = local
-        let refs = Dictionary((scene.frame?.pages ?? []).map { ($0.pageIndex, $0) }, uniquingKeysWith: { a, _ in a })
+        let refs = Dictionary(pageRefs.map { ($0.pageIndex, $0) }, uniquingKeysWith: { a, _ in a })
         var placed: [Int: (frame: CGRect, pageSize: CGSize)] = [:]
         for item in page.pages {
             let frame = PresentGeometry.map(item.frame, from: page.visibleRect, to: local)
@@ -1028,6 +1086,11 @@ final class PresentCanvasView: NSView {
         }
     }
 
+    /// Where a shown page's paper sits in the canvas's picture, for tests.
+    func paperFrame(page index: Int) -> CGRect? {
+        pages[index].map { viewport.convert($0.paper.frame, to: root) }
+    }
+
     /// Draws the picture into `context`, `bounds` filling it at `scale` pixels per point, top-left first (EP129).
     func draw(into context: CGContext, scale: CGFloat) {
         context.saveGState()
@@ -1049,6 +1112,17 @@ final class PresentCanvasView: NSView {
         context.scaleBy(x: scale, y: -scale)
         root.render(in: context)
         return context.makeImage()
+    }
+}
+
+/// Holds the canvas weakly for its display link, which retains its target until invalidated.
+private final class PresentRefreshTarget: NSObject {
+    weak var canvas: PresentCanvasView?
+    init(_ canvas: PresentCanvasView) { self.canvas = canvas }
+    @objc func refresh(_ link: CADisplayLink) {
+        guard let canvas else { return link.invalidate() }
+        // Drawn as it will be when this refresh reaches the screen.
+        MainActor.assumeIsolated { canvas.refresh(at: link.targetTimestamp) }
     }
 }
 

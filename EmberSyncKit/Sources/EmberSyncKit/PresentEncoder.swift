@@ -86,11 +86,15 @@ public struct PresentInput: Sendable {
     public var document: PresentLessonDocument?
     /// Version 5 (EP129): the teacher's Start or End lesson not yet handled by the Mac. Sent once per link.
     public var lessonCommand: PresentLessonCommand?
+    /// EP141: when `view`'s frame was captured (the iPad read its scroll position), on the clock `now` runs by. Nil
+    /// counts as captured when the update is made.
+    public var time: TimeInterval?
 
     public init(view: PresentedView, session: UUID? = nil,
                 pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)] = [:],
                 ink: [Int: PresentInkInput] = [:], live: [PresentLiveInput] = [], document: PresentLessonDocument? = nil,
-                lessonCommand: PresentLessonCommand? = nil) {
+                lessonCommand: PresentLessonCommand? = nil, time: TimeInterval? = nil) {
+        self.time = time
         self.view = view
         self.session = session
         self.pages = pages
@@ -154,6 +158,7 @@ public struct PresentEncoder: Sendable {
         needsReset = true
         var update = PresentUpdate(seq: nextSeq(now: now))
         update.open = true
+        update.time = now
         return PresentOutgoing(update: update)
     }
 
@@ -236,6 +241,9 @@ public struct PresentEncoder: Sendable {
 
         let changed = reset || !out.update.isEmpty || !out.assets.isEmpty || !out.ink.isEmpty
         guard changed || now - lastSent >= Self.heartbeatInterval else { return nil }
+        // A frame is stamped with when it was captured, so the Mac can play frames back evenly (EP141); never later
+        // than now, so a stale stamp cannot run ahead of the update that carries it.
+        out.update.time = out.update.frame == nil ? now : min(input.time ?? now, now)
         out.update.seq = nextSeq(now: now)
         return out
     }
@@ -244,6 +252,7 @@ public struct PresentEncoder: Sendable {
     public mutating func stop(now: TimeInterval) -> PresentOutgoing {
         var update = PresentUpdate(seq: nextSeq(now: now))
         update.stop = true
+        update.time = now
         return PresentOutgoing(update: update)
     }
 

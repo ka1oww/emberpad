@@ -49,6 +49,9 @@ public struct PresentScene: Sendable {
     public private(set) var stopped = false
     public private(set) var lastSeq: UInt64?
     public private(set) var awaitingSnapshot = true
+    /// EP141: the recent frames by the iPad's capture time, for smooth playback (`PresentPlayback`). Filled only by
+    /// updates applied with their arrival time.
+    public private(set) var motion = PresentMotion()
     private var assets: [String: PresentAsset] = [:]
     private var assetOrder: [String] = []
     private var nextGeneration: UInt64 = 1
@@ -61,8 +64,12 @@ public struct PresentScene: Sendable {
     public func asset(for hash: String) -> PresentAsset? { assets[hash] }
 
     /// The frame with its live parts and ink revisions, exactly the `PresentedView` the iPad's student view showed.
-    public var presented: PresentedView? {
-        guard var view = frame?.view else { return nil }
+    public var presented: PresentedView? { presented(with: frame) }
+
+    /// `shown` (a frame played back from `motion`, EP141) with what is held now: its pages' ink revisions, the strokes
+    /// in progress, the laser and its trail on the pages it places. Only the geometry is older than now.
+    public func presented(with shown: PresentFrame?) -> PresentedView? {
+        guard var view = shown?.view else { return nil }
         if case .page(var page) = view.screen {
             let shown = Set(page.pages.map(\.pageIndex))
             page.liveStrokes = live.map(\.stroke).filter { shown.contains($0.pageIndex) }
@@ -76,12 +83,15 @@ public struct PresentScene: Sendable {
 
     /// A new link opened: the next update that counts is its snapshot. What is shown stays until then.
     public mutating func linkOpened() {
+        motion.restartClock()
         awaitingSnapshot = true
         lastSeq = nil
         stopped = false
     }
 
-    public mutating func apply(_ update: PresentUpdate) -> Outcome {
+    /// `arrival` is the Mac time the update arrived (EP141); with it, the update's frame is kept for smooth playback.
+    public mutating func apply(_ update: PresentUpdate, arrival: TimeInterval? = nil) -> Outcome {
+        if let arrival { motion.heard(sent: update.time, arrival: arrival) }
         if update.open { return .applied }
         if update.stop {
             stopped = true
@@ -108,6 +118,7 @@ public struct PresentScene: Sendable {
                 live = []
             }
             frame = next
+            if let arrival { motion.add(next, time: update.time ?? arrival, cut: update.reset) }
             // Every shown page needs its paper; a page the iPad thought was held but is not asks for a snapshot.
             guard next.pages.allSatisfy({ assets[$0.asset] != nil }) else { return askForSnapshot() }
             touch(next.pages.map(\.asset))

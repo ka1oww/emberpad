@@ -120,6 +120,27 @@ final class PresentControllerTests: XCTestCase {
         XCTAssertEqual(scene.presented, model.presented)
     }
 
+    /// EP141: each frame is stamped with when its viewport was read, so the Mac plays scrolling back as it happened.
+    func testAFrameIsStampedWithWhenItsViewportWasRead() throws {
+        let student = try StudentMirrorFixture.session(.student, pages: 2, root: root.appendingPathComponent("stamped"))
+        var clock: TimeInterval = 100
+        let model = StudentDisplayModel(now: { clock })
+        model.paused = false
+        model.opened(student.record)
+        clock = 101.25
+        model.publish(session: student, pageIndex: 0, canvasSize: letter)
+        XCTAssertEqual(model.contentTime, 101.25)
+        let controller = PresentController(student: model)
+        XCTAssertEqual(controller.input().time, 101.25)
+        // The same frame published again keeps the time it was first shown.
+        clock = 102
+        model.publish(session: student, pageIndex: 0, canvasSize: letter)
+        XCTAssertEqual(controller.input().time, 101.25)
+        clock = 102.5
+        model.publish(session: student, pageIndex: 1, canvasSize: letter)
+        XCTAssertEqual(controller.input().time, 102.5)
+    }
+
     func testPresentWithoutAPairingSaysSoAndConnectsNowhere() {
         let controller = PresentController(student: StudentDisplayModel())
         let attempts = PresentAttemptCounter()

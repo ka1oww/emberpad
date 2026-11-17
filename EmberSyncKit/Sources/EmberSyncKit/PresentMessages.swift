@@ -155,10 +155,14 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
     public var document: PresentDocumentChange?
     /// Version 5 (EP129): the teacher's Start or End lesson.
     public var lesson: PresentLessonCommand?
+    /// EP141: when the iPad captured what this update shows, on its own clock (`CACurrentMediaTime`): the frame's
+    /// capture time when it carries a frame, else when it was sent. The Mac plays the frames back by these times
+    /// (`PresentMotion`). A Companion from before EP141 ignores it; an iPad from before EP141 leaves it out.
+    public var time: TimeInterval?
 
     public init(seq: UInt64) { self.seq = seq }
 
-    /// Nothing but the sequence number: a heartbeat.
+    /// Nothing but the sequence number (and its time): a heartbeat.
     public var isEmpty: Bool {
         !open && !reset && !stop && frame == nil && assets.isEmpty && ink.isEmpty && live.isEmpty && laser == nil && trail == nil
             && document == nil && lesson == nil
@@ -166,7 +170,7 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case seq = "s", open = "o", reset = "r", stop = "x", frame = "f", assets = "a", ink = "i", live = "l"
-        case laser = "p", trail = "t", document = "d", lesson = "c"
+        case laser = "p", trail = "t", document = "d", lesson = "c", time = "m"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -183,6 +187,7 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
         trail = try container.decodeIfPresent([PresentedView.TrailPiece].self, forKey: .trail)
         document = try container.decodeIfPresent(PresentDocumentChange.self, forKey: .document)
         lesson = try container.decodeIfPresent(PresentLessonCommand.self, forKey: .lesson)
+        time = try container.decodeIfPresent(TimeInterval.self, forKey: .time)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -199,6 +204,7 @@ public struct PresentUpdate: Equatable, Codable, Sendable {
         try container.encodeIfPresent(trail, forKey: .trail)
         try container.encodeIfPresent(document, forKey: .document)
         try container.encodeIfPresent(lesson, forKey: .lesson)
+        try container.encodeIfPresent(time, forKey: .time)
     }
 }
 
