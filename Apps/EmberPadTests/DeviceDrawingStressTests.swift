@@ -1134,6 +1134,153 @@ final class DeviceDrawingStressTests: XCTestCase {
         scenario.finish(expectedStrokes: [0: kept])
     }
 
+    // MARK: - Scrolling with a finger
+
+    /// EP151: a finger flicking through pages full of ink at 1500 points a second, down across both page boundaries and
+    /// back up across them (four crossings). Around no crossing may a display frame wait longer than
+    /// `StressBounds.scrollCrossingFrameGap`, and a finger touching down on a page other than the focused one may cost
+    /// the worksheet no more than `StressBounds.fingerTouchDown` before the scroll can start. The page pill waits for
+    /// the scroll to stop, the page it stops on is then focused once, and the Pencil writes on it at once.
+    ///
+    /// A test cannot drive the pages' own pan with a real finger, so this is the closest programmatic equivalent, and
+    /// differs from one in three ways. The touch-down is a stand-in finger handed to the PDF view's hit test (twice, as
+    /// UIKit hit-tests a new touch) and then to `PageHitTestPDFView.touchesWillBeDelivered`, as the main window hands a
+    /// real one on; UIKit's own delivery to the recognisers is not in the time. The drag sets the scroll view's offset
+    /// on every turn of the run loop, from the time since it began, rather than UIKit's pan doing so per touch move;
+    /// and since PDFKit names the page in view only once a programmatic offset holds still (it does so mid-drag for a
+    /// real one), the drag rests at each boundary, finger still down, until PDFKit has posted the page change. And
+    /// `scrollIsMoving` stands in for the scroll view's tracking (a test cannot set `isTracking`), and the scroll stops
+    /// dead, with no deceleration.
+    func test24_FingerScrollAcrossPages() throws {
+        let heavy = StressInk.heavyPage()
+        let scenario = try StressScenario(tool: "scroll.fingerAcrossPages", title: "Scrolling across pages with a finger", self,
+                                          ink: heavy, otherPages: [1: heavy, 2: heavy])
+        scenario.note("\(heavy.count) strokes of writing, highlights and boxes on each of the 3 pages")
+        guard let scroll = scenario.scrollView else {
+            scenario.check("finds the pages' scroll view", false, "no scroll view in the PDF view")
+            return scenario.finish(expectedStrokes: nil)
+        }
+        let controller = scenario.controller
+        let pdfView = controller.pdfView
+        var moving = false
+        controller.scrollIsMoving = { moving }
+        var reported: [Int] = []
+        controller.onPageChange = { reported.append($0) }
+        func pageIndex() -> Int { pdfView.currentPage.map { controller.session.pdf.index(for: $0) } ?? -1 }
+        func visible(_ index: Int) -> Bool {
+            guard let canvas = scenario.page.canvas(index), canvas.window != nil else { return false }
+            return pdfView.bounds.intersects(canvas.convert(canvas.bounds, to: pdfView))
+        }
+
+        // The touch-down, on a page shown below the focused one: the boundary is brought up the screen until the next
+        // page shows, its own ink on it.
+        while !(visible(0) && visible(1)), scroll.contentOffset.y < scroll.contentSize.height {
+            scroll.contentOffset.y += 40
+            StressPage.pump(0.016)
+        }
+        StressPage.pump(0.5)
+        let focused = controller.canvases.filter { $0.value.isFirstResponder }.map(\.key)
+        if let target = [0, 1].first(where: { visible($0) && !focused.contains($0) }), let canvas = scenario.page.canvas(target) {
+            let shown = pdfView.bounds.intersection(canvas.convert(canvas.bounds, to: pdfView))
+            let point = CGPoint(x: shown.midX, y: shown.midY)
+            let finger = DirectTouchStub(window: scenario.page.window, view: pdfView, at: pdfView.convert(point, to: nil))
+            let event = DirectTouchEventStub(finger)
+            let began = CACurrentMediaTime()
+            _ = pdfView.hitTest(point, with: event)
+            _ = pdfView.hitTest(point, with: event)
+            PageHitTestPDFView.touchesWillBeDelivered(event)
+            let took = CACurrentMediaTime() - began
+            scenario.metrics["scroll.touchDownMs"] = took * 1000
+            scenario.check("a finger touching down on page \(target + 1) is handed on at once", took <= StressBounds.fingerTouchDown,
+                           String(format: "%.2f ms from the hit test to the window handing it on, bound %.0f ms",
+                                  took * 1000, StressBounds.fingerTouchDown * 1000))
+            let after = controller.canvases.filter { $0.value.isFirstResponder }.map(\.key)
+            scenario.check("a finger touching down leaves the focus where it was", after == focused,
+                           "page \(focused.map { String($0 + 1) }.joined()) focused before, page \(after.map { String($0 + 1) }.joined()) after")
+        } else {
+            scenario.check("shows a page other than the focused one", false, "focused \(focused), none other on the screen")
+        }
+
+        // Back to the top, then the drag: down to the end of the last page and back up, at 1500 points a second.
+        scroll.contentOffset.y = -scroll.adjustedContentInset.top
+        StressPage.pump(0.5)
+        scenario.settle()
+        reported = []
+        let speed: CGFloat = 1500
+        let top = -scroll.adjustedContentInset.top
+        let bottom = max(top, scroll.contentSize.height + scroll.adjustedContentInset.bottom - scroll.bounds.height)
+        var crossings: [(from: Int, to: Int, at: CFTimeInterval)] = []
+        var held: [Double] = []
+        func pageUnderCentre() -> Int {
+            pdfView.page(for: CGPoint(x: pdfView.bounds.midX, y: pdfView.bounds.midY), nearest: true)
+                .map { controller.session.pdf.index(for: $0) } ?? -1
+        }
+        var reportedMidScroll = 0
+        StressPage.pump(0.3)
+        let drag = scenario.frameGaps {
+            moving = true
+            for (from, to) in [(top, bottom), (bottom, top)] {
+                var began = CACurrentMediaTime()
+                var start = from
+                var page = pageUnderCentre()
+                var arrived = false
+                while !arrived {
+                    let travelled = min(abs(to - start), speed * CGFloat(CACurrentMediaTime() - began))
+                    arrived = travelled >= abs(to - start)
+                    scroll.contentOffset.y = arrived ? to : start + (to > start ? travelled : -travelled)
+                    StressPage.pump(1.0 / 120)
+                    let now = pageUnderCentre()
+                    guard now != page, now >= 0 else { continue }
+                    crossings.append((page, now, CACurrentMediaTime()))
+                    page = now
+                    // PDFKit names the page in view only once a programmatic offset holds still; the finger rests
+                    // here (still down) until it has, so the page change comes mid-scroll as a real drag's does.
+                    let waitBegan = CACurrentMediaTime()
+                    while pageIndex() != now, CACurrentMediaTime() - waitBegan < 1 { StressPage.pump(1.0 / 120) }
+                    held.append(CACurrentMediaTime() - waitBegan)
+                    began = CACurrentMediaTime()
+                    start = scroll.contentOffset.y
+                }
+            }
+            reportedMidScroll = reported.count
+            StressPage.pump(0.1)
+        }
+        let landed = pageIndex()
+        let stop = scenario.frameGaps {
+            moving = false
+            StressPage.pump(0.3)
+        }
+        scenario.metrics["scroll.crossings"] = Double(crossings.count)
+        scenario.metrics["scroll.pageNamedAfterHoldMaxMs"] = (held.max() ?? 0) * 1000
+        scenario.check("the drag crosses a page boundary at least four times", crossings.count >= 4,
+                       crossings.map { "\($0.from + 1)→\($0.to + 1)" }.joined(separator: ", "))
+        for (n, crossing) in crossings.enumerated() {
+            // The gaps of the frames from the crossing until a tenth of a second after the page change PDFKit made.
+            let window = crossing.at + (n < held.count ? held[n] : 0) + 0.1
+            let worst = zip(drag.gaps, drag.ends).filter { $0.1 >= crossing.at && $0.1 <= window }.map(\.0).max() ?? 0
+            scenario.metrics["scroll.crossing\(n + 1).worstFrameGapMs"] = worst * 1000
+            scenario.check("crossing \(n + 1) (page \(crossing.from + 1) to \(crossing.to + 1)) keeps the page with the finger",
+                           worst <= StressBounds.scrollCrossingFrameGap,
+                           String(format: "longest frame gap %.1f ms, bound %.1f ms", worst * 1000, StressBounds.scrollCrossingFrameGap * 1000))
+        }
+        scenario.metrics["scroll.dragWorstFrameGapMs"] = drag.worst * 1000
+        scenario.metrics["scroll.settleWorstFrameGapMs"] = stop.worst * 1000
+        scenario.check("the page pill waits for the scroll to stop", reportedMidScroll == 0,
+                       "\(reportedMidScroll) page changes reported while the finger moved the pages")
+        scenario.check("the page the scroll stops on is reported once", reported == [landed],
+                       "reported \(reported.map { String($0 + 1) }), stopped on page \(landed + 1)")
+        scenario.check("the page the scroll stops on is focused", scenario.page.canvas(landed)?.isFirstResponder == true
+                       && scenario.page.canvas(landed)?.drawingGestureRecognizer.isEnabled == true,
+                       "page \(landed + 1) focused: \(scenario.page.canvas(landed)?.isFirstResponder == true)")
+
+        // The Pencil at once on the page the scroll stopped on, in the clear band above the ink already there.
+        let origin = CGPoint(x: 280, y: 50)
+        scenario.pen(StressInk.samples(StressInk.squiggle(at: origin, seed: 24), speed: 420, seed: 24), "after the scroll", page: landed)
+        var expected = [0: scenario.bystanderCount + heavy.count, 1: heavy.count, 2: heavy.count]
+        expected[landed, default: 0] += 1
+        scenario.finish(expectedStrokes: expected)
+    }
+
     // MARK: - Summary
 
     func test99_Summary() throws {
@@ -1175,14 +1322,15 @@ final class StressScenario {
     }
     private let began = Date()
 
-    /// `ink` is more ink on page 0 when the scenario begins, after the handwriting every scenario has there.
-    init(tool: String, title: String, _ testCase: XCTestCase, ink: [PKStroke] = []) throws {
+    /// `ink` is more ink on page 0 when the scenario begins, after the handwriting every scenario has there, and
+    /// `otherPages` the ink on the other pages.
+    init(tool: String, title: String, _ testCase: XCTestCase, ink: [PKStroke] = [], otherPages: [Int: [PKStroke]] = [:]) throws {
         self.tool = tool
         self.title = title
         self.testCase = testCase
         let bystanders = StressInk.bystanders()
         bystanderCount = bystanders.count
-        page = try StressPage(pages: 3, ink: [0: bystanders + ink])
+        page = try StressPage(pages: 3, ink: otherPages.merging([0: bystanders + ink]) { _, first in first })
         sampler.scenario = tool
         sampler.scenarioStart = CACurrentMediaTime()
         notes.append(String(format: "began at %.3f (Unix time)", Date().timeIntervalSince1970))
