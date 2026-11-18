@@ -2038,8 +2038,11 @@ extension PDFOverlayPageController {
     /// Saves again each page a waiting pen stroke's landing shape was worked out for since it was last saved
     /// (`pagesAwaitingPenStrokes`). When PencilKit commits a stroke before the live pen has seen its lift, the shape
     /// is known only from the lift on.
+    /// EP156 diagnostic only (draft PR, never merged): the landing-shape save is switched off.
+    private static let savesLandingPenStrokes = false
+
     private func saveLandingPenStrokes() {
-        guard !savingDrawingChange, !pagesAwaitingPenStrokes.isEmpty else { return }
+        guard Self.savesLandingPenStrokes, !savingDrawingChange, !pagesAwaitingPenStrokes.isEmpty else { return }
         let pages = pagesAwaitingPenStrokes
         pagesAwaitingPenStrokes = []
         for page in pages.sorted() {
