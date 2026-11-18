@@ -2900,3 +2900,29 @@ private final class LaserTrailTicker: NSObject {
 }
 
 
+
+// MARK: - EP158: swapping the class to the Teacher copy and back
+
+extension PDFOverlayPageController: ClassSwapWorksheet {
+    var swapDocumentID: UUID { session.record.id }
+
+    func positionForSwap() -> ReadingPosition? {
+        ReadingPosition.capture(from: pdfView, pageID: { [session] in session.page(at: $0)?.id }, notesFit: notesFit)
+    }
+
+    /// Turns to the worksheet page printed from PDF page `pdfPage`, unless it is already the page in view (it stays
+    /// exactly where it is), or goes back exactly to a place it was.
+    @discardableResult
+    func returnFromSwap(_ place: ClassSwapReturn) -> Bool {
+        switch place {
+        case .pdfPage(let pdfPage):
+            guard let index = session.pages.pages.firstIndex(where: { $0.isOriginal && $0.pdfPage == pdfPage }) else { return false }
+            if index != currentPage { goToPage(index) }
+        case .position(let position):
+            position.restore(into: pdfView, indexOfPageID: { [session] id in session.pages.pages.firstIndex { $0.id == id } },
+                             notesFit: notesFit)
+            if isAtNotesFit { centreHorizontally() }
+        }
+        return true
+    }
+}

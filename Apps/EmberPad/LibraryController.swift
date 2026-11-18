@@ -396,10 +396,14 @@ final class LibraryController: ObservableObject {
 
     /// The stored original of the Teacher copy paired with a Student worksheet: the Teacher copy card's answer key.
     /// `nil` for a Teacher copy itself, an unpaired worksheet, or a pairing whose file cannot be read.
-    func teacherCopyURL(for record: DocumentRecord) async -> URL? {
+    func teacherCopyURL(for record: DocumentRecord) async -> URL? { await teacherCopy(for: record)?.url }
+
+    /// EP158: the paired Teacher copy's original PDF and its record (whose SHA-256 names its page match), if any.
+    func teacherCopy(for record: DocumentRecord) async -> (url: URL, record: DocumentRecord)? {
         guard record.role == .student, let pairedID = record.pairedDocumentID,
-              let paired = try? await store.document(pairedID), paired.role == .teacher else { return nil }
-        return try? await store.originalURL(documentID: pairedID)
+              let paired = try? await store.document(pairedID), paired.role == .teacher,
+              let url = try? await store.originalURL(documentID: pairedID) else { return nil }
+        return (url, paired)
     }
 
     /// The open editor session for `id`, if any. Export reads its in-memory ink.

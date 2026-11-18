@@ -23,6 +23,10 @@ enum UITestLaunch {
     /// to present to), so the header offers the swap between the Student copy and the Teacher copy.
     static let presentingArgument = "-EmberPadUITestPresenting"
     static let notebookPages = 6
+    /// EP158: launched with this as well, the worksheet is six questions, one to a page, and its Teacher copy is nine
+    /// pages that do not line up with them: a cover, then each question with its worked answer, two of them running on
+    /// to a page of their own (see `answerKeyPages`).
+    static let answerKeyArgument = "-EmberPadUITestAnswerKey"
 
     /// Call before the library opens.
     static func prepareIfRequested() {
@@ -60,15 +64,19 @@ enum UITestLaunch {
         Task.detached {
             defer { done.signal() }
             guard let store = try? LibraryStore(root: root) else { return }
+            let answerKey = ProcessInfo.processInfo.arguments.contains(answerKeyArgument)
             for paper in papers {
-                let data = worksheet(heading: paper.title, pages: notebookPages)
+                let lines: [[String]]? = !answerKey || paper.key != "ui-test-worksheet" ? nil
+                    : paper.role == .teacher ? answerKeyPages : questionPages
+                let data = lines.map { printedPages($0) } ?? worksheet(heading: paper.title, pages: notebookPages)
+                let pageCount = lines?.count ?? notebookPages
                 guard let key = try? PaperKey(rawValue: paper.key),
                       let publication = try? Publication(subject: className, classTag: nil, paperKey: key, role: paper.role,
                                                          title: paper.title),
                       let entry = try? ManifestEntry(source: SourcePath(classFolder: className, relativePath: paper.file),
                                                      sha256: ContentHash.digest(data), size: Int64(data.count),
                                                      modifiedAt: Date(), publication: publication) else { continue }
-                _ = try? await store.importPDF(data: data, entry: entry, pageCount: notebookPages)
+                _ = try? await store.importPDF(data: data, entry: entry, pageCount: pageCount)
             }
         }
         done.wait()
@@ -107,6 +115,55 @@ enum UITestLaunch {
             }
         }
         return strokes
+    }
+
+    /// EP158: six made-up questions, each as the lines its page prints it in.
+    static let questions: [[String]] = [
+        ["Calculate the volume of hydrogen gas released when", "magnesium ribbon reacts with excess dilute acid."],
+        ["Explain why the boiling point of water is higher", "than that of hydrogen sulfide."],
+        ["Draw the displayed formula of the organic product", "formed when propene reacts with steam."],
+        ["Sketch a graph showing how the rate of reaction", "changes as the concentration of iodide ions increases."],
+        ["Deduce the oxidation state of manganese in each", "of the ions shown in the table below."],
+        ["Suggest a reason for the decrease in first ionisation", "energy from nitrogen to oxygen."],
+    ]
+
+    /// EP158: the worksheet with `answerKeyArgument`: question N on page N, under its title, above answer space.
+    static var questionPages: [[String]] {
+        questions.enumerated().map { index, stem in ["\(title) · page \(index + 1)", "Question \(index + 1)."] + stem }
+    }
+
+    /// EP158: its Teacher copy: a cover, then each question with its worked answer; the answers to questions 2 and 4
+    /// run on to a page of their own. So question 1 is on page 2, 2 on 3, 3 on 5, 4 on 6, 5 on 8 and 6 on 9.
+    static var answerKeyPages: [[String]] {
+        let working = ["Working: substitute the values given and state the final answer",
+                       "to three significant figures with its units."]
+        var pages: [[String]] = [["\(title) Answers", "Answer key for the teacher, not for the class."]]
+        for (index, stem) in questions.enumerated() {
+            pages.append(["Question \(index + 1)."] + stem + working)
+            if index == 1 || index == 3 { pages.append(["Answers to question \(index + 1), carried on."] + working) }
+        }
+        return pages.enumerated().map { number, lines in number == 0 ? lines : ["\(title) Answers · page \(number + 1)"] + lines }
+    }
+
+    /// A4 pages, each with its `pages` lines of text from the top and ruled answer space below them.
+    private static func printedPages(_ pages: [[String]]) -> Data {
+        let page = CGRect(x: 0, y: 0, width: 595, height: 842)
+        return UIGraphicsPDFRenderer(bounds: page).pdfData { context in
+            for lines in pages {
+                context.beginPage()
+                for (row, line) in lines.enumerated() {
+                    (line as NSString).draw(at: CGPoint(x: 56, y: 56 + CGFloat(row) * 30),
+                                            withAttributes: [.font: UIFont.systemFont(ofSize: row == 0 ? 22 : 16, weight: row == 0 ? .semibold : .regular)])
+                }
+                UIColor.lightGray.setStroke()
+                for row in 0..<16 {
+                    let line = UIBezierPath()
+                    line.move(to: CGPoint(x: 56, y: 300 + CGFloat(row) * 28))
+                    line.addLine(to: CGPoint(x: page.width - 56, y: 300 + CGFloat(row) * 28))
+                    line.stroke()
+                }
+            }
+        }
     }
 
     /// A4 pages (two unless asked) with a heading and ruled lines.

@@ -148,11 +148,23 @@ struct TeacherCopyReveal {
     let pdf: PDFDocument
     /// Names this reveal's pages on the Mac (Present's session), so the Mac never puts the worksheet's ink on them.
     let instanceID = UUID()
+    /// EP158: the Teacher copy page the teacher's own view of it shows (the Teacher copy panel), which the class sees.
+    /// It opens on the page answering the Student page in view and then moves only as the teacher scrolls the Teacher
+    /// copy, so every one of its pages can be shown, however many more it has than the worksheet.
+    fileprivate(set) var page: Int
+    /// EP158: which Teacher page answers each Student page, by their words; nil until it is known, or for a pair whose
+    /// words cannot be read, when a page answers the Student page with its own number.
+    let match: TeacherCopyPageMatch?
 
-    fileprivate init(worksheetID: UUID, pdf: PDFDocument) {
+    fileprivate init(worksheetID: UUID, pdf: PDFDocument, page: Int, match: TeacherCopyPageMatch?) {
         self.worksheetID = worksheetID
         self.pdf = pdf
+        self.page = min(max(page, 0), max(pdf.pageCount - 1, 0))
+        self.match = match
     }
+
+    /// The Teacher page that answers Student PDF page `studentPage` (see `TeacherCopyAnswerPage`).
+    func answer(toStudent studentPage: Int) -> Int { TeacherCopyAnswerPage.teacherPage(forStudent: studentPage, match: match) }
 }
 
 /// One Teacher copy page the class sees, placed where the Student page it answers sits.
@@ -163,14 +175,15 @@ struct TeacherCopySlice {
     private(set) var frame: CGRect
 }
 
-/// What the class sees while the teacher shows the Teacher copy (EP130): the Teacher copy pages that answer the
-/// Student pages in view, placed and zoomed exactly as those were, with no ink, live ink or laser (none of them was
-/// written on the Teacher copy). When a Student page has no answer page (a page added in Ember Slate) or the two
-/// papers' pages differ in size, the answering page of the focused page is shown whole; with no answer page at all
-/// there is no frame, and the class keeps seeing the Student page.
+/// What the class sees while the teacher shows the Teacher copy (EP130): the Teacher copy page the teacher's own view of
+/// it shows (EP158, `TeacherCopyReveal.page`), with no ink, live ink or laser (none of them was written on the Teacher
+/// copy). It is shown whole, except while it is the very page, by number, that answers the focused Student page and
+/// every Student page in view is answered by its own page of the same size: then the Teacher pages are placed and
+/// zoomed exactly as the Student pages are, as EP130 swapped them. On a Student page with no answer page (a page added
+/// in Ember Slate) there is no frame, and the class keeps seeing the Student page.
 struct TeacherCopyFrame {
     private(set) var reveal: TeacherCopyReveal
-    /// The focused Student page's answer page, in the Teacher copy.
+    /// The Teacher copy page shown: the one the teacher's view of it shows (EP158).
     private(set) var focusedPageIndex: Int
     private(set) var visibleRect: CGRect
     private(set) var margin: CGFloat
@@ -178,14 +191,18 @@ struct TeacherCopyFrame {
     var documentID: UUID { reveal.instanceID }
 
     init?(reveal: TeacherCopyReveal, snapshot: StudentPageSnapshot, framing: StudentFraming) {
-        guard reveal.worksheetID == snapshot.documentID, let focused = snapshot.answerPage,
-              let focusedPage = reveal.pdf.page(at: focused) else { return nil }
+        guard reveal.worksheetID == snapshot.documentID, let answered = snapshot.answerPage,
+              let focusedPage = reveal.pdf.page(at: reveal.page) else { return nil }
+        let focused = reveal.page
         self.reveal = reveal
         focusedPageIndex = focused
-        // Following the presenter's view needs every page in view answered by a page of the same size.
-        if let framed = snapshot.framed(framing), framed.margin == 0 {
+        // Following the presenter's view needs the teacher's view on the focused page's own answer page, and every
+        // page in view answered by its own page number (EP158: a page the words matched elsewhere is laid out
+        // differently) on paper of the same size.
+        if answered == focused, reveal.answer(toStudent: answered) == answered,
+           let framed = snapshot.framed(framing), framed.margin == 0 {
             let mapped = framed.slices.compactMap { slice -> TeacherCopySlice? in
-                guard let index = slice.answerPage, let page = reveal.pdf.page(at: index),
+                guard let index = slice.answerPage, reveal.answer(toStudent: index) == index, let page = reveal.pdf.page(at: index),
                       Self.sameSize(page.displayedSize, slice.page.displayedSize) else { return nil }
                 return TeacherCopySlice(pageIndex: index, page: page, frame: slice.frame)
             }
@@ -214,6 +231,34 @@ struct TeacherCopyFrame {
     private static func sameSize(_ a: CGSize, _ b: CGSize) -> Bool {
         abs(a.width - b.width) <= 1 && abs(a.height - b.height) <= 1
     }
+}
+
+/// EP158: a swap's ask that the Teacher copy panel of worksheet `worksheetID` open on Teacher page `page`. `serial` makes
+/// each swap's ask new, so the panel turns again even to the page it turned to last time.
+struct TeacherCopyLanding: Equatable {
+    let worksheetID: UUID
+    let page: Int
+    let serial: Int
+}
+
+/// EP158: where the worksheet goes when the class is swapped back from the Teacher copy.
+enum ClassSwapReturn: Equatable {
+    /// The top of the page showing this PDF page, unless that page is already the one in view.
+    case pdfPage(Int)
+    /// Exactly where it was when the swap began.
+    case position(ReadingPosition)
+}
+
+/// EP158: what the swap needs of the open worksheet's editor.
+@MainActor
+protocol ClassSwapWorksheet: AnyObject {
+    /// The worksheet's library id.
+    var swapDocumentID: UUID { get }
+    /// Where the worksheet is in view now, to come back to.
+    func positionForSwap() -> ReadingPosition?
+    /// False when the worksheet has no page to turn to for `.pdfPage`, so the caller can go back to a saved place.
+    @discardableResult
+    func returnFromSwap(_ place: ClassSwapReturn) -> Bool
 }
 
 /// Which copy the class sees, as its own small observable, so the header's swap control follows it without
@@ -419,6 +464,17 @@ final class StudentDisplayModel: ObservableObject {
         if teacherReveal != nil { teacherReveal = nil }
     }
 
+    /// EP158: the Teacher copy page the class sees while the Teacher copy is shown to it, nil while it is not.
+    var revealedTeacherPage: Int? { teacherReveal?.page }
+
+    /// EP158: the teacher's own view of the Teacher copy (its panel) now shows page `index`, so the class sees it too.
+    /// Nothing changes unless the Teacher copy is shown to the class and has that page.
+    func showTeacherPage(_ index: Int) {
+        guard var reveal = teacherReveal, reveal.page != index, (0..<reveal.pdf.pageCount).contains(index) else { return }
+        reveal.page = index
+        teacherReveal = reveal
+    }
+
     // MARK: Laser pointer (P6)
 
     /// Shows the laser dot at `location` on `pageIndex`, in that page's ink space. Refused unless the student view is
@@ -598,10 +654,30 @@ final class PresentationState: ObservableObject {
         didSet { student.framing = studentFraming }
     }
     /// Called by an editor (identified by `owner`) once it knows its worksheet's Teacher copy, or that it has none.
-    func showPrivateAnswers(_ url: URL?, owner: UUID) {
-        if url != privateAnswerURL { student.concealTeacherCopy() }
+    /// `answersID` is the Teacher copy's library id, under which its panel remembers where it was left (EP121).
+    func showPrivateAnswers(_ url: URL?, owner: UUID, answersID: UUID? = nil) {
+        if url != privateAnswerURL {
+            student.concealTeacherCopy()
+            teacherMatch = nil
+        }
         privateAnswerOwner = owner
         privateAnswerURL = url
+        self.answersID = url == nil ? nil : answersID
+    }
+
+    /// EP158: which Teacher page answers each page of the open worksheet, by their words. Nil until the editor has
+    /// matched them (see `TeacherCopyPageMatches`), and for a worksheet with no Teacher copy.
+    @Published private(set) var teacherMatch: TeacherCopyPageMatch?
+    /// The Teacher copy's library id (see `showPrivateAnswers`).
+    private var answersID: UUID?
+    /// EP158: where the Teacher copy panel remembers its place (EP121), read for where it was last left.
+    var readingPositions = ReadingPositions()
+
+    /// EP158: the editor (`owner`) matched its worksheet's pages with the Teacher copy at `url`. Kept only while that
+    /// editor's answers are still the ones shown.
+    func pageMatchFound(_ match: TeacherCopyPageMatch, for url: URL, owner: UUID) {
+        guard privateAnswerOwner == owner, privateAnswerURL == url, teacherMatch != match else { return }
+        teacherMatch = match
     }
 
     /// Clears the answers only if `owner` set them, so a closing editor cannot wipe the next editor's Teacher copy
@@ -610,7 +686,10 @@ final class PresentationState: ObservableObject {
         guard privateAnswerOwner == owner else { return }
         privateAnswerOwner = nil
         privateAnswerURL = nil
+        answersID = nil
+        teacherMatch = nil
         revealedDocument = nil
+        studentBeforeSwap = nil
         student.concealTeacherCopy()
     }
 
@@ -628,10 +707,17 @@ final class PresentationState: ObservableObject {
     /// Shows the class `copy` of the worksheet `worksheet`. The Teacher copy is the one paired with it, the same one
     /// the iPad's panel shows; with none, or a worksheet that is not a Student copy, the class stays on the Student
     /// copy. Returns what the class sees now.
+    ///
+    /// EP158: swapped to the Teacher copy, the class sees the page the teacher's own view of it shows: the Teacher copy
+    /// panel opens (`teacherLanding`) on the page whose words match the top of the Student page in view, or, when the
+    /// words match nothing, where the panel was last left, else the Student page's own number held to the Teacher
+    /// copy's pages. From then on the class follows the panel as the teacher scrolls it, through every page. Swapped
+    /// back, the worksheet (`swapWorksheet`) turns to the Student page matching the Teacher page the class saw last;
+    /// when nothing matches, it goes back to exactly where it was when the swap began.
     @discardableResult
     func setClassCopy(_ copy: ClassCopy, worksheet: DocumentRecord) -> ClassCopy {
         guard copy == .teacher else {
-            student.concealTeacherCopy()
+            returnFromTeacherCopy(worksheet: worksheet)
             return .student
         }
         guard StudentSafeDocument(worksheet) != nil, let url = privateAnswerURL else {
@@ -640,8 +726,35 @@ final class PresentationState: ObservableObject {
         }
         if let current = student.teacherReveal, current.worksheetID == worksheet.id { return .teacher }
         guard let pdf = revealedPDF(url) else { return .student }
-        student.reveal(TeacherCopyReveal(worksheetID: worksheet.id, pdf: pdf))
+        let lastTeacherPage = answersID.flatMap { readingPositions.position(for: $0) }?.page
+        let page = TeacherCopyAnswerPage.swapPage(forStudent: student.snapshot?.answerPage, match: teacherMatch,
+                                                  lastTeacherPage: lastTeacherPage, pageCount: pdf.pageCount)
+        let place = swapWorksheet.flatMap { $0.swapDocumentID == worksheet.id ? $0.positionForSwap() : nil }
+        student.reveal(TeacherCopyReveal(worksheetID: worksheet.id, pdf: pdf, page: page, match: teacherMatch))
+        studentBeforeSwap = place
+        teacherLanding = TeacherCopyLanding(worksheetID: worksheet.id, page: page, serial: (teacherLanding?.serial ?? 0) + 1)
         return .teacher
+    }
+
+    /// EP158: the open worksheet's editor, which the swap back turns. Set by the editor, which owns it.
+    weak var swapWorksheet: (any ClassSwapWorksheet)?
+    /// EP158: the latest swap's ask that the Teacher copy panel open on a page. Each swap makes a new one.
+    @Published private(set) var teacherLanding: TeacherCopyLanding?
+    /// EP158: where the worksheet was when the class was swapped to the Teacher copy.
+    private var studentBeforeSwap: ReadingPosition?
+
+    /// Ends the swap to `worksheet`'s Teacher copy, if it is on, and turns the worksheet as `setClassCopy` describes.
+    private func returnFromTeacherCopy(worksheet: DocumentRecord) {
+        defer { studentBeforeSwap = nil }
+        guard let reveal = student.teacherReveal else { return }
+        student.concealTeacherCopy()
+        guard reveal.worksheetID == worksheet.id, let editor = swapWorksheet, editor.swapDocumentID == worksheet.id else { return }
+        if let page = reveal.match?.studentPage(forTeacher: reveal.page) {
+            if editor.returnFromSwap(.pdfPage(page)) { return }
+        }
+        if let studentBeforeSwap {
+            editor.returnFromSwap(.position(studentBeforeSwap))
+        }
     }
 
     /// Presenting started or stopped: either way the class is back on the Student copy, so every presentation starts
@@ -649,6 +762,7 @@ final class PresentationState: ObservableObject {
     func presentingChanged() {
         student.unfreezeClassView()
         student.concealTeacherCopy()
+        studentBeforeSwap = nil
     }
 
     // MARK: Freezing the class view (EP152)
