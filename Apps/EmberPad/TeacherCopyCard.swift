@@ -1002,6 +1002,11 @@ final class RememberingPDFView: PDFView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        // EP157: a tap on the status bar (iPadOS scroll-to-top) never sends the answers back to page 1, as for the worksheet.
+        if !scrollsToTopOff, let scrollView = Self.firstScrollView(in: self) {
+            scrollView.scrollsToTop = false
+            scrollsToTopOff = true
+        }
         guard positionID != nil || pendingOpenPage != nil, !positionRestored, !restoreScheduled, window != nil, bounds.width > 0, bounds.height > 0 else { return }
         restoreScheduled = true
         // After PDFKit's own first layout, or `go(to:)` lands on the first page.
@@ -1019,6 +1024,16 @@ final class RememberingPDFView: PDFView {
         }
     }
     private var restoreScheduled = false
+    private var scrollsToTopOff = false
+
+    /// PDFKit scrolls inside its own scroll view, the first one among its subviews.
+    private static func firstScrollView(in view: UIView) -> UIScrollView? {
+        for subview in view.subviews {
+            if let scrollView = subview as? UIScrollView { return scrollView }
+            if let nested = firstScrollView(in: subview) { return nested }
+        }
+        return nil
+    }
 
     /// Names the page in view, as the worksheet's page pill does.
     override var accessibilityValue: String? {

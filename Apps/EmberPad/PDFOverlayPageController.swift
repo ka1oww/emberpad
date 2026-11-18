@@ -315,6 +315,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private func observeScrolling() {
         guard scrollObservation == nil, let scrollView = Self.firstScrollView(in: pdfView) else { return }
         self.scrollView = scrollView
+        // EP157: a tap on the status bar (iPadOS scroll-to-top) never sends the worksheet back to page 1 mid-lesson.
+        scrollView.scrollsToTop = false
         scrollObservation = scrollView.observe(\.contentOffset, options: []) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.viewportThrottle.signal() }
         }
