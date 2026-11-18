@@ -314,10 +314,34 @@ enum TeacherCopyCardContent: Equatable {
 
 /// EP61: which Teacher copy page answers a worksheet page. Pairing is by the PDF's own pages, so a page added in
 /// Ember Slate (blank or squared paper) has none; a duplicate of a PDF page keeps its page's answers.
+/// Which Teacher copy page answers a Student page. EP130 paired them by PDF page number; EP158 pairs them by the
+/// pages' words (`TeacherCopyPageMatch`) wherever those match, and by number only where they do not. Both the Teacher
+/// copy panel's slide-open (EP138) and the class swap (EP130) ask here, so the two always agree.
 enum TeacherCopyAnswerPage {
+    /// The Student page's own PDF page, or nil for a page added in Ember Slate, which no Teacher page answers.
     static func pdfPage(for page: PageEntry?) -> Int? {
         guard let page else { return 0 }
         return page.pdfPage
+    }
+
+    /// EP158: the Teacher page answering Student PDF page `studentPage`: the one holding the words at its top, else the
+    /// page of the same number (not held to the Teacher copy's pages).
+    static func teacherPage(forStudent studentPage: Int, match: TeacherCopyPageMatch?) -> Int {
+        match?.teacherPage(forStudent: studentPage) ?? studentPage
+    }
+
+    /// EP158: the Teacher page the panel slides open on (EP138) while the worksheet shows `page`, at `index` among its
+    /// pages: the page answering it, or for an added page, the page with the worksheet's own number.
+    static func openPage(for page: PageEntry?, index: Int, match: TeacherCopyPageMatch?) -> Int {
+        pdfPage(for: page).map { teacherPage(forStudent: $0, match: match) } ?? index
+    }
+
+    /// EP158: the Teacher page a swap shows the class (and turns the panel to) from Student PDF page `studentPage`
+    /// (nil for an added page): the page its words matched; when they match nothing, the page the panel was last left
+    /// on; else the page of the same number. Always one of the Teacher copy's `pageCount` pages.
+    static func swapPage(forStudent studentPage: Int?, match: TeacherCopyPageMatch?, lastTeacherPage: Int?, pageCount: Int) -> Int {
+        let page = studentPage.flatMap { match?.teacherPage(forStudent: $0) } ?? lastTeacherPage ?? studentPage ?? 0
+        return min(max(page, 0), max(pageCount - 1, 0))
     }
 }
 
@@ -330,6 +354,9 @@ struct TeacherCopyOpenPage: Equatable {
     mutating func panel(shown: Bool, studentPage: Int) {
         page = shown ? (page ?? studentPage) : nil
     }
+
+    /// EP158: a swap to the Teacher copy opens the hidden panel on `page`, which this opening then keeps.
+    mutating func land(on page: Int) { self.page = page }
 }
 
 // MARK: - Views
@@ -350,6 +377,10 @@ struct TeacherCopyCardOverlay: View {
     var shownToClass = false
     /// EP138: the Teacher copy page that answers the student copy's page in view; the panel opens on it.
     var studentPage = 0
+    /// EP158: the latest swap of the class to the Teacher copy, which opens the panel on its page, or turns it there.
+    var landing: TeacherCopyLanding?
+    /// EP158: told the Teacher copy page the panel shows, each time it changes.
+    var onShownPage: ((Int) -> Void)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The finger's horizontal travel while a swipe is in progress.
     @State private var drag: CGFloat?
@@ -375,6 +406,7 @@ struct TeacherCopyCardOverlay: View {
                                      onEnded: { settle(translation: $0, velocity: $1, panelSize: panelSize, in: container) }) {
                         TeacherCopyCard(content: content, documentTitle: documentTitle, side: side, hasAnswerPage: hasAnswerPage,
                                         answersID: answersID, shownToClass: shownToClass, openOnPage: openPage.page,
+                                        landing: landing, onShownPage: onShownPage,
                                         onClose: { settle(to: .hide(side), panelSize: panelSize, in: container) },
                                         onMove: { settle(to: .dock(side.opposite), panelSize: panelSize, in: container) })
                     }
@@ -432,6 +464,13 @@ struct TeacherCopyCardOverlay: View {
                 openPage.panel(shown: shown, studentPage: studentPage)
                 // A panel that had left the hierarchy builds its answers afresh, after this; they restore from here.
                 if shown, let page = openPage.page, let answersID { ReadingPositions().open(answersID, onPage: page) }
+            }
+            // EP158: a swap of the class to the Teacher copy opens a hidden panel on its page; an open one turns there
+            // (`ReadOnlyPDF.landing`).
+            .onChange(of: landing) { _, landing in
+                guard let landing, !card.isOpen else { return }
+                openPage.land(on: landing.page)
+                settle(to: .dock(card.side), panelSize: TeacherCopyCardGeometry.size(in: container, width: width), in: container)
             }
             // A hide from the book toggle animates outside this view, so the panel leaves once it has surely settled.
             .task(id: card.isOpen) {
@@ -730,6 +769,9 @@ struct TeacherCopyCard: View {
     var shownToClass = false
     /// EP138: the page this opening of the panel matched (see `TeacherCopyOpenPage`).
     var openOnPage: Int?
+    /// EP158: the latest swap's page (see `ReadOnlyPDF.landing`), and the page shown, as it changes.
+    var landing: TeacherCopyLanding?
+    var onShownPage: ((Int) -> Void)?
     let onClose: () -> Void
     var onMove: () -> Void = {}
 
@@ -737,7 +779,8 @@ struct TeacherCopyCard: View {
         VStack(spacing: 0) {
             // A sideways finger swipe anywhere on the panel slides it (see SlideOverSurface); the body scrolls.
             TeacherCopyCardHeader(documentTitle: documentTitle, shownToClass: shownToClass, onClose: onClose)
-            TeacherCopyCardBody(content: content, hasAnswerPage: hasAnswerPage, answersID: answersID, openOnPage: openOnPage)
+            TeacherCopyCardBody(content: content, hasAnswerPage: hasAnswerPage, answersID: answersID, openOnPage: openOnPage,
+                                landing: landing, onShownPage: onShownPage)
         }
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: TeacherCopyCardGeometry.cornerRadius, style: .continuous))
@@ -791,6 +834,8 @@ struct TeacherCopyCardBody: View {
     var hasAnswerPage = true
     var answersID: UUID?
     var openOnPage: Int?
+    var landing: TeacherCopyLanding?
+    var onShownPage: ((Int) -> Void)?
 
     var body: some View {
         switch content {
@@ -798,7 +843,8 @@ struct TeacherCopyCardBody: View {
             // The answers stay loaded under the note, so they are where they were on the next PDF page. Hidden and
             // shown again, or reopened later, they come back where they were left (EP121), except that each time the panel
             // is slid open they turn to the student copy's page (EP138).
-            ReadOnlyPDF(url: url, positionID: answersID, positions: ReadingPositions(), openOnPage: openOnPage)
+            ReadOnlyPDF(url: url, positionID: answersID, positions: ReadingPositions(), openOnPage: openOnPage,
+                        landing: landing, onShownPage: onShownPage)
                 .accessibilityLabel("Private teacher answers")
                 .overlay { if !hasAnswerPage { NoAnswerPageState() } }
         case .hidden(let reason):
@@ -946,6 +992,11 @@ struct ReadOnlyPDF: UIViewRepresentable {
     var positions: ReadingPositions?
     /// EP138: the page the panel's current opening matched; a new value turns the answers there once.
     var openOnPage: Int?
+    /// EP158: the latest swap of the class to the Teacher copy; a new one turns the answers to its page once, even
+    /// while the panel stays open. A view built for it (the panel was hidden) already opens there.
+    var landing: TeacherCopyLanding?
+    /// EP158: told the page the answers show (`RememberingPDFView.shownPage`) each time it changes.
+    var onShownPage: ((Int) -> Void)?
 
     func makeUIView(context: Context) -> RememberingPDFView {
         let view = RememberingPDFView()
@@ -963,16 +1014,21 @@ struct ReadOnlyPDF: UIViewRepresentable {
         // while the panel stays open (the answers shown again after a capture) opens where they were left. Neither
         // applies this opening again.
         view.adoptOpenPage(openOnPage)
+        view.adoptLanding(landing)
+        view.onShownPage = onShownPage
         return view
     }
 
     func updateUIView(_ uiView: RememberingPDFView, context: Context) {
+        uiView.onShownPage = onShownPage
         uiView.requestOpenPage(openOnPage)
+        uiView.requestLanding(landing)
     }
 
     /// Dropping the document when the card hides or closes frees the answers' pages; where they were is kept first.
     static func dismantleUIView(_ uiView: RememberingPDFView, coordinator: ()) {
         uiView.savePosition()
+        uiView.onShownPage = nil
         uiView.document = nil
     }
 }
@@ -990,6 +1046,13 @@ final class RememberingPDFView: PDFView {
     private var openPage: Int?
     /// EP138: a page asked for before the first layout, put in place of the remembered page when it is restored.
     private var pendingOpenPage: Int?
+    /// EP158: the last swap seen, so the same swap never turns the answers twice.
+    private var landingSerial: Int?
+    /// EP158: told the page the answers show (`shownPage`) once they are in place, and each time it changes.
+    var onShownPage: ((Int) -> Void)?
+    private var reportedPage: Int?
+    private var scrollObservation: NSKeyValueObservation?
+    private weak var scrollView: UIScrollView?
 
     func remember(in positions: ReadingPositions, id: UUID) {
         self.positions = positions
@@ -1012,7 +1075,8 @@ final class RememberingPDFView: PDFView {
         // After PDFKit's own first layout, or `go(to:)` lands on the first page.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if let page = pendingOpenPage, let document {
+            let opened = pendingOpenPage
+            if let page = opened, let document {
                 let from = pending ?? ReadingPosition(page: 0, x: 0, y: .greatestFiniteMagnitude, zoom: 1)
                 from.opening(onPage: page, pageCount: document.pageCount).restore(into: self)
             } else {
@@ -1021,6 +1085,8 @@ final class RememberingPDFView: PDFView {
             pending = nil
             pendingOpenPage = nil
             positionRestored = true
+            observeScrolling()
+            reportShownPage(opened.flatMap { page in self.document.map { min(max(page, 0), $0.pageCount - 1) } })
         }
     }
     private var restoreScheduled = false
@@ -1053,6 +1119,21 @@ final class RememberingPDFView: PDFView {
         guard page != openPage else { return }
         openPage = page
         guard let page else { return }
+        turn(to: page)
+    }
+
+    /// EP158: takes `landing` as already seen without moving, for a view built for it (it opens there).
+    func adoptLanding(_ landing: TeacherCopyLanding?) { landingSerial = landing?.serial }
+
+    /// EP158: a new swap of the class to the Teacher copy turns the answers to its page once, as an opening does.
+    func requestLanding(_ landing: TeacherCopyLanding?) {
+        guard let landing, landing.serial != landingSerial else { return }
+        landingSerial = landing.serial
+        turn(to: landing.page)
+    }
+
+    /// Goes to the top of `page` at the same zoom, or stays exactly where it is when already on it (EP138).
+    private func turn(to page: Int) {
         guard positionRestored, let document else {
             pendingOpenPage = page
             setNeedsLayout()
@@ -1061,6 +1142,59 @@ final class RememberingPDFView: PDFView {
         guard let here = ReadingPosition.capture(from: self) else { return }
         here.opening(onPage: page, pageCount: document.pageCount).restore(into: self)
         savePosition()
+        reportShownPage(min(max(page, 0), document.pageCount - 1))
+    }
+
+    /// EP158: the page showing the most of itself in the view: the page the teacher is reading, and so the one the
+    /// class sees while the Teacher copy is shown to it. Of pages showing as much, it is the first, but at the very end
+    /// of the answers the last, so the last page can always be shown, even zoomed out with whole pages above it.
+    var shownPage: Int? {
+        guard let document, bounds.width > 0, bounds.height > 0 else { return nil }
+        let frames = visiblePages.compactMap { page -> (page: Int, frame: CGRect)? in
+            let index = document.index(for: page)
+            guard index != NSNotFound else { return nil }
+            return (index, convert(page.bounds(for: displayBox), from: page))
+        }
+        let atEnd = scrollView.map { $0.contentOffset.y + $0.bounds.height >= $0.contentSize.height + $0.adjustedContentInset.bottom - 1 } ?? false
+        return Self.mostShown(frames, in: bounds, atEnd: atEnd)
+    }
+
+    /// The page of `frames` (each page's index and frame in view space) that shows the most of its area in `bounds`;
+    /// of equals, the first, or the last when the view is `atEnd` of the document.
+    static func mostShown(_ frames: [(page: Int, frame: CGRect)], in bounds: CGRect, atEnd: Bool = false) -> Int? {
+        var best: (page: Int, area: CGFloat)?
+        for (page, frame) in frames.sorted(by: { $0.page < $1.page }) {
+            let shown = frame.intersection(bounds)
+            let area = shown.isNull ? 0 : shown.width * shown.height
+            guard area > 0 else { continue }
+            if let known = best, atEnd ? area < known.area - 0.5 : area <= known.area + 0.5 { continue }
+            best = (page, area)
+        }
+        return best?.page
+    }
+
+    /// Tells `onShownPage` the page shown, if it changed: `turned`, just turned to, or else the most shown page.
+    private func reportShownPage(_ turned: Int? = nil) {
+        guard positionRestored, let onShownPage, let page = turned ?? shownPage, page != reportedPage else { return }
+        reportedPage = page
+        onShownPage(page)
+    }
+
+    /// Reports the page shown as the teacher scrolls, frame by frame, so the class keeps up.
+    private func observeScrolling() {
+        guard scrollObservation == nil, let scrollView = Self.firstScrollView(in: self) else { return }
+        self.scrollView = scrollView
+        scrollObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.reportShownPage() }
+        }
+    }
+
+    private static func firstScrollView(in view: UIView) -> UIScrollView? {
+        for subview in view.subviews {
+            if let scroll = subview as? UIScrollView { return scroll }
+            if let found = firstScrollView(in: subview) { return found }
+        }
+        return nil
     }
 
     func savePosition() {
@@ -1070,5 +1204,6 @@ final class RememberingPDFView: PDFView {
 
     deinit {
         if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
+        scrollObservation?.invalidate()
     }
 }

@@ -103,6 +103,7 @@ jobs:
               -skip-testing:EmberPadTests/HoldToShapeTests
               -skip-testing:EmberPadUITests/PresentTeacherCopyUITests
               -skip-testing:EmberPadUITests/ReadingPositionUITests
+              -skip-testing:EmberPadUITests/TeacherCopyMatchUITests
               -skip-testing:EmberPadUITests/ToolbarDragTrackingUITests
               -skip-testing:EmberPadUITests/ToolbarFingerDragUITests
               -skip-testing:EmberPadUITests/ToolbarFreeDragUITests
@@ -112,6 +113,7 @@ jobs:
             selection: >-
               -only-testing:EmberPadUITests/PresentTeacherCopyUITests
               -only-testing:EmberPadUITests/ReadingPositionUITests
+              -only-testing:EmberPadUITests/TeacherCopyMatchUITests
               -only-testing:EmberPadUITests/ToolbarDragTrackingUITests
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer

@@ -490,13 +490,23 @@ struct EditorScreen: View {
                 let opened = try await library.open(documentID)
                 presentation.student.opened(opened.record)
                 // The paired Teacher copy is the card's answer key; it stays in the main scene (see TeacherCopyCard).
-                let answers = await library.teacherCopyURL(for: opened.record)
+                let teacherCopy = await library.teacherCopy(for: opened.record)
+                let answers = teacherCopy?.url
                 guard !Task.isCancelled else { return }
-                presentation.showPrivateAnswers(answers, owner: answersOwner)
-                teacherCopyID = answers == nil ? nil : opened.record.pairedDocumentID
+                presentation.showPrivateAnswers(answers, owner: answersOwner, answersID: teacherCopy?.record.id)
+                teacherCopyID = teacherCopy?.record.id
                 teacherCard.worksheetOpened(hasTeacherCopy: answers != nil)
                 LastWorksheet().opened(opened.record)
                 install(opened, startPage: nil)
+                // EP158: which Teacher page answers each worksheet page, by their words, read off the main thread
+                // once per pair of files and kept.
+                if let teacherCopy {
+                    let match = await TeacherCopyPageMatches.shared.match(
+                        student: opened.originalURL, studentHash: opened.record.source.sha256.rawValue,
+                        teacher: teacherCopy.url, teacherHash: teacherCopy.record.source.sha256.rawValue)
+                    guard !Task.isCancelled else { return }
+                    presentation.pageMatchFound(match, for: teacherCopy.url, owner: answersOwner)
+                }
             } catch { errorMessage = error.localizedDescription }
         }
         .onDisappear {
@@ -563,8 +573,11 @@ extension EditorScreen {
                                                hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil,
                                                answersID: teacherCopyID,
                                                shownToClass: classCopy == .teacher,
-                                               studentPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage))
-                                                   ?? chrome.currentPage)
+                                               studentPage: TeacherCopyAnswerPage.openPage(for: session.page(at: chrome.currentPage),
+                                                                                           index: chrome.currentPage,
+                                                                                           match: presentation.teacherMatch),
+                                               landing: presentation.teacherLanding.flatMap { $0.worksheetID == session.record.id ? $0 : nil },
+                                               onShownPage: { [student = presentation.student] page in student.showTeacherPage(page) })
                     }
                 }
             }
@@ -648,6 +661,8 @@ extension EditorScreen {
         search.highlight = { [weak made] matches, current in made?.highlightSearch(matches, current: current) }
         search.reveal = { [weak made] match in made?.reveal(match) }
         renderer = made
+        // EP158: swapping the class back from the Teacher copy turns this worksheet.
+        presentation.swapWorksheet = made as? any ClassSwapWorksheet
         // A page edit reopens the worksheet on a new PDF: an open search runs again on its pages.
         search.attach(opened.pdf)
     }
