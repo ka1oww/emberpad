@@ -121,6 +121,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private(set) var emptyInkStepsOwed = 0
     /// Pages whose undo or redo may have brought back PencilKit's clear copy of a stroke, to make visible.
     private var clearInkPages: Set<Int> = []
+    /// Pages with a waiting pen stroke whose landing shape (`PendingInkEdit.landingPenStroke`) was worked out after
+    /// the page was last saved: saved again (`saveLandingPenStrokes`) so the save shows it from the lift (EP156).
+    private var pagesAwaitingPenStrokes: Set<Int> = []
+    /// Inside `canvasViewDrawingDidChange`, which saves the page itself once its edits are queued.
+    private var savingDrawingChange = false
     /// When the latest lift and commit were, which decide when the queued changes may land.
     var inkTiming = InkLandingTiming()
     /// The display frame the queued changes wait for, the pause they wait out, and the check for strokes that never
@@ -487,6 +492,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         guard !isReplacingStroke else { return }
         // EP94: a change to the drawing lands only on a later display frame than this.
         inkTiming.lastCommit = CACurrentMediaTime()
+        savingDrawingChange = true
+        defer {
+            savingDrawingChange = false
+            saveLandingPenStrokes()
+        }
         // EP94: the drawing is read once for the whole change. Every read of `canvas.drawing` copies each stroke on
         // the page, and the checks below used to make seven to ten of them per stroke.
         let drawing = canvasView.drawing
@@ -531,6 +541,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
                 || straightenIfHeld(canvasView, page: page, previousCount: previousCount, strokes: strokes)
         applyPenFeel(canvasView, page: page, previousCount: previousCount, taken: taken, strokes: strokes)
         session.update(savedDrawing(drawing, strokes: strokes, page: page), page: page)
+        pagesAwaitingPenStrokes.remove(page)
         if replaying, strokes.count > previousCount {
             // Undo and redo bring strokes back exactly as they were, never tapered twice; a clear one is made visible.
             clearInkPages.insert(page)
@@ -1972,7 +1983,12 @@ extension PDFOverlayPageController {
         }) else { return 0 }
         var at: [InkStrokeID: Int] = [:]
         for (index, stroke) in strokes.enumerated() where at[InkStrokeID(stroke)] == nil { at[InkStrokeID(stroke)] = index }
-        let before = session.drawing(on: page).strokes.map(InkStrokeID.init)
+        // A waiting pen stroke saved as its landing shape (EP156) is PencilKit's committed copy on the canvas.
+        var committed: [InkStrokeID: InkStrokeID] = [:]
+        for edit in pendingInkEdits where edit.page == page {
+            if let landing = edit.landingPenStroke { committed[InkStrokeID(landing)] = InkStrokeID(edit.stroke) }
+        }
+        let before = session.drawing(on: page).strokes.map { committed[InkStrokeID($0)] ?? InkStrokeID($0) }
         for index in waiting {
             if let now = at[InkStrokeID(pendingInkEdits[index].stroke)] {
                 pendingInkEdits[index].index = now
@@ -2002,16 +2018,36 @@ extension PDFOverlayPageController {
 
     /// The drawing to save for `page`, from the canvas's `drawing`: PencilKit's clear copy of each stroke whose edit
     /// is still queued is saved visible, so the student view and the file never show a gap while it waits.
+    ///
+    /// EP156: a pen stroke whose landing shape is known (`PendingInkEdit.landingPenStroke`, the live pen's own
+    /// fountain-pen stroke) is saved as that shape rather than the clear copy made visible. The student view and the
+    /// Mac then show from the lift the stroke that lands at the pause, and the landing changes nothing they see: it
+    /// used to send all the page's ink again, a blink on the projector and in the lesson recording.
     func savedDrawing(_ drawing: PKDrawing, strokes: [PKStroke], page: Int) -> PKDrawing {
         var saved = strokes
         var changed = false
         for edit in pendingInkEdits where edit.page == page && edit.index < saved.count {
             let stroke = saved[edit.index]
             guard PenFeel.isClearInk(stroke), InkStrokeID(stroke) == InkStrokeID(edit.stroke) else { continue }
-            saved[edit.index] = PenFeel.visible(stroke)
+            saved[edit.index] = edit.landingPenStroke ?? PenFeel.visible(stroke)
             changed = true
         }
         return changed ? PKDrawing(strokes: saved) : drawing
+    }
+
+    /// Saves again each page a waiting pen stroke's landing shape was worked out for since it was last saved
+    /// (`pagesAwaitingPenStrokes`). When PencilKit commits a stroke before the live pen has seen its lift, the shape
+    /// is known only from the lift on.
+    private func saveLandingPenStrokes() {
+        guard !savingDrawingChange, !pagesAwaitingPenStrokes.isEmpty else { return }
+        let pages = pagesAwaitingPenStrokes
+        pagesAwaitingPenStrokes = []
+        for page in pages.sorted() {
+            // A canvas off the screen lands its edits as saved; one under a highlighter erase saves its own merge.
+            guard let canvas = canvases[page], highlighterErase?.canvas !== canvas else { continue }
+            let drawing = canvas.drawing
+            session.update(savedDrawing(drawing, strokes: drawing.strokes, page: page), page: page)
+        }
     }
 
     /// PencilKit threw these strokes away: each one the pen drew, from a touch that was not cancelled, goes on the
@@ -2032,6 +2068,7 @@ extension PDFOverlayPageController {
     func scheduleInkLanding() {
         guard hasPendingInk else { return }
         claimLivePen(final: false)
+        saveLandingPenStrokes()
         Self.inkWorkers.add(self)
         guard inkLandingFrame == nil else { return }
         let link = CADisplayLink(target: InkFrameTarget(self), selector: #selector(InkFrameTarget.frame(_:)))
@@ -2089,6 +2126,8 @@ extension PDFOverlayPageController {
         pendingInkEdits = []
         recoveredInk = []
         clearInkPages = []
+        // Each page landing now is saved as it lands.
+        pagesAwaitingPenStrokes = []
         Self.inkWorkers.remove(self)
         let now = livePenClock()
         let pages = Set(edits.map(\.page)).union(recovered.map(\.page)).union(restore)
@@ -2150,6 +2189,7 @@ extension PDFOverlayPageController {
                 ?? PenFeel.reshaped(edit.stroke, settings: settings, toolWidth: toolWidth, color: color)
             pendingInkEdits[index].kind = replacement.map { .replace([$0], actionName: PendingInkEdit.inkActionName) }
                 ?? .keep(lasso: false)
+            if !final, pendingInkEdits[index].landingPenStroke != nil { pagesAwaitingPenStrokes.insert(edit.page) }
         }
         scheduleLivePenExpiry()
     }
