@@ -1189,14 +1189,6 @@ final class RememberingPDFView: PDFView {
         }
     }
 
-    private static func firstScrollView(in view: UIView) -> UIScrollView? {
-        for subview in view.subviews {
-            if let scroll = subview as? UIScrollView { return scroll }
-            if let found = firstScrollView(in: subview) { return found }
-        }
-        return nil
-    }
-
     func savePosition() {
         guard positionRestored, let positions, let positionID, let position = ReadingPosition.capture(from: self) else { return }
         positions.save(position, for: positionID)
