@@ -2068,7 +2068,6 @@ extension PDFOverlayPageController {
     func scheduleInkLanding() {
         guard hasPendingInk else { return }
         claimLivePen(final: false)
-        saveLandingPenStrokes()
         Self.inkWorkers.add(self)
         guard inkLandingFrame == nil else { return }
         let link = CADisplayLink(target: InkFrameTarget(self), selector: #selector(InkFrameTarget.frame(_:)))
@@ -2089,6 +2088,10 @@ extension PDFOverlayPageController {
         guard inkTiming.frameIsClearOfCommit(timestamp) else { return false }
         inkLandingFrame?.invalidate()
         inkLandingFrame = nil
+        // The landing-shape save lives in the landing frame, not in `scheduleInkLanding`: it stays out of PencilKit's
+        // commit and flight-check chain, where the extra save slowed the handover of held-back strokes, and it runs
+        // at most once per landing (it returns at once when no new shape waits).
+        saveLandingPenStrokes()
         landInkEdits(force: false)
         return true
     }

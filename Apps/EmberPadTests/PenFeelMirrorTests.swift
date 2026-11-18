@@ -147,6 +147,8 @@ final class PenFeelMirrorTests: XCTestCase {
         let landing = try XCTUnwrap(controller.pendingInkEdits.first?.landingPenStroke,
                                     "the live pen's stroke for it is known", file: file, line: line)
         XCTAssertEqual(landing.ink.inkType, .fountainPen, file: file, line: line)
+        // The landing-shape save runs in a landing frame, clear of PencilKit's commit.
+        controller.inkLandingFrame(shownAt: CACurrentMediaTime() + 1)
         HoldPage.turn(0.1)
         XCTAssertTrue(controller.hasPendingInk, "the swap still waits for the pause", file: file, line: line)
         let saved = try XCTUnwrap(page.session.drawing(on: 0).strokes.last, file: file, line: line)
