@@ -811,7 +811,9 @@ final class PresentCanvasView: NSView {
     let backdropLayer = CALayer()
     let badge = CALayer()
     private let statusDot = CALayer()
-    private var pages: [Int: PresentPageLayers] = [:]
+    private(set) var pages: [Int: PresentPageLayers] = [:]
+    /// Pixels of ink drawn sharper than the paper, shared by the Companion's pages (EP156).
+    var inkBudget = PresentInkBudget.shared
     private var paperImages = PresentPaperImages()
     private var scene: PresentScene?
     private var status = PresentHost.Status.off
@@ -1041,7 +1043,7 @@ final class PresentCanvasView: NSView {
             let pageSize = ref?.size ?? item.frame.size
             placed[item.pageIndex] = (frame, pageSize)
             let layers = pages[item.pageIndex] ?? {
-                let made = PresentPageLayers()
+                let made = PresentPageLayers(budget: inkBudget)
                 viewport.insertSublayer(made.paper, below: liveLayer)
                 viewport.insertSublayer(made.ink, below: liveLayer)
                 pages[item.pageIndex] = made
@@ -1049,13 +1051,14 @@ final class PresentCanvasView: NSView {
             }()
             layers.paper.frame = frame
             layers.ink.frame = frame
-            let scale = PresentGeometry.rasterScale(pageSize: pageSize, displayedPoints: frame.width, screenScale: screenScale)
+            let bucket = PresentGeometry.rasterBucket(pageSize: pageSize, displayedPoints: frame.width, screenScale: screenScale)
+            let scale = PresentGeometry.rasterScale(pageSize: pageSize, bucket: bucket)
             if let ref, let asset = scene.asset(for: ref.asset) {
                 layers.paper.contents = paperImages.image(for: asset, pageSize: pageSize, scale: scale)
             } else {
                 layers.paper.contents = nil
             }
-            layers.update(ink: scene.ink[item.pageIndex], pageSize: pageSize, scale: scale, frame: frame)
+            layers.update(ink: scene.ink[item.pageIndex], pageSize: pageSize, scale: scale, bucket: bucket, frame: frame)
         }
         dropPages(keeping: Set(placed.keys))
         layoutLive(page, placed: placed, size: local.size)
@@ -1173,13 +1176,34 @@ final class PresentPageLayers {
     let ink = CALayer()
     private var generation: UInt64?
     private var scale: CGFloat = 0
+    private var bucket: CGFloat = 0
     private var rendered = 0
-    /// Each segment layer's rect in page points.
-    private var segments: [(layer: CALayer, bounds: CGRect)] = []
-    /// When a page holds more segment layers than this, they are rendered again as one.
+    /// Each ink layer: its rect in page points, the count of the page's segments it holds all of (a segment's own
+    /// layer, or one of the merged ink's), and its pixels drawn above `scale`.
+    private var segments: [(layer: CALayer, bounds: CGRect, upTo: Int, boosted: CGFloat)] = []
+    /// When a page holds more segment layers than this besides its merged ink's, they are all rendered again together.
     static let maxSegmentLayers = 24
+    /// The count of the page's segments its merged ink holds.
+    private var mergedUpTo = 0
+    private var unmergedLayers: Int { segments.filter { $0.upTo > mergedUpTo }.count }
+    private let budget: PresentInkBudget
+    /// This page's ink pixels drawn above `scale`, taken from `budget` (a merge's from when it starts).
+    private(set) var boostedPixels: CGFloat = 0
+    /// Bumped whenever the page's layers are cleared, so a merge rendered for what was shown before is dropped.
+    private var epoch = 0
+    /// The page's segments, kept for merging them.
+    private var held: [Data] = []
+    private var page = CGRect.zero
+    /// Page points to the ink layer's points, as last laid out.
+    private var pointScale: CGFloat = 1
+    /// Whether the page's merged ink is being drawn off the main thread.
+    private(set) var isMerging = false
+    /// Some of the page's ink is in a bitmap at the paper's scale that its merged ink is to replace.
+    private var needsMerge = false
+    private static let mergeQueue = DispatchQueue(label: "EmberPad.Companion.mergedInk", qos: .userInitiated)
 
-    init() {
+    init(budget: PresentInkBudget = .shared) {
+        self.budget = budget
         paper.backgroundColor = NSColor.white.cgColor
         for layer in [paper, ink] {
             layer.contentsGravity = .resize
@@ -1188,30 +1212,59 @@ final class PresentPageLayers {
         }
     }
 
-    func update(ink held: PresentScene.Ink?, pageSize: CGSize, scale: CGFloat, frame: CGRect) {
+    deinit {
+        budget.give(boostedPixels)
+    }
+
+    /// `scale` is the page's `rasterScale` (its paper's), `bucket` its `rasterBucket`; its ink is drawn at `inkScale`.
+    func update(ink held: PresentScene.Ink?, pageSize: CGSize, scale: CGFloat, bucket: CGFloat, frame: CGRect) {
         guard let held, pageSize.width > 0 else {
             clear()
             return
         }
-        let page = CGRect(origin: .zero, size: pageSize)
-        if held.generation != generation || scale != self.scale || held.segments.count < rendered {
+        page = CGRect(origin: .zero, size: pageSize)
+        if held.generation != generation || scale != self.scale || bucket != self.bucket || held.segments.count < rendered {
             clear()
             generation = held.generation
             self.scale = scale
+            self.bucket = bucket
         }
+        self.held = held.segments
         if held.segments.count > rendered {
-            let fresh = held.segments[rendered...]
-            if segments.count + fresh.count > Self.maxSegmentLayers {
-                clear()
-                generation = held.generation
-                self.scale = scale
-                add(drawing: Self.drawing(held.segments[...]), page: page, scale: scale)
+            let fresh = held.segments.count - rendered
+            if fresh > 1, unmergedLayers + fresh > Self.maxSegmentLayers {
+                // Several new segments at once, more than the page keeps as layers (a page shown afresh, at a new
+                // scale, or after a gap): drawn together in one bitmap at the paper's scale, no more work than the
+                // merge before EP156, which drew them and all the rest; the page's sharp merged ink follows.
+                let drawing = Self.drawing(held.segments[rendered...])
+                if let bounds = Self.bounds(of: drawing, on: page) {
+                    place([(Self.image(drawing, bounds: bounds, scale: scale), bounds, 0)], upTo: held.segments.count)
+                }
+                needsMerge = true
+                merge(rendered == 0 ? drawing : nil)
             } else {
-                for data in fresh { add(drawing: Self.drawing([data][...]), page: page, scale: scale) }
+                for (index, data) in held.segments.enumerated().dropFirst(rendered) {
+                    let drawing = Self.drawing([data][...])
+                    guard let bounds = Self.bounds(of: drawing, on: page) else { continue }
+                    let wanted = PresentGeometry.inkScale(bounds: bounds.size, bucket: bucket, rasterScale: scale)
+                    let pixels = bounds.width * bounds.height * wanted * wanted
+                    if wanted > scale, boostedPixels + pixels <= PresentGeometry.pageInkPixels, budget.take(pixels) {
+                        boostedPixels += pixels
+                        place([(Self.image(drawing, bounds: bounds, scale: wanted), bounds, pixels)], upTo: index + 1)
+                    } else {
+                        place([(Self.image(drawing, bounds: bounds, scale: scale), bounds, 0)], upTo: index + 1)
+                    }
+                }
+                if unmergedLayers > Self.maxSegmentLayers { merge() }
             }
             rendered = held.segments.count
         }
-        let k = frame.width / pageSize.width
+        pointScale = frame.width / pageSize.width
+        layOut()
+    }
+
+    private func layOut() {
+        let k = pointScale
         for segment in segments {
             segment.layer.frame = CGRect(x: segment.bounds.minX * k, y: segment.bounds.minY * k,
                                          width: segment.bounds.width * k, height: segment.bounds.height * k)
@@ -1222,24 +1275,122 @@ final class PresentPageLayers {
         for segment in segments { segment.layer.removeFromSuperlayer() }
         segments = []
         rendered = 0
+        mergedUpTo = 0
+        needsMerge = false
         generation = nil
+        budget.give(boostedPixels)
+        boostedPixels = 0
+        epoch += 1
+        isMerging = false
     }
 
-    private func add(drawing: PKDrawing, page: CGRect, scale: CGFloat) {
+    /// Draws all the page's ink again in place of its layers: as tiles at twice the page's scale within the page's and
+    /// the Companion's ink budgets (`PresentGeometry.mergedInkScale`), or with no room above the paper's scale, in one
+    /// bitmap at it, as before EP156. Twice the scale is four times the pixels and about three times the work of one
+    /// bitmap at the paper's scale, so the ink is cut and drawn off the main thread, which only reserves its pixels.
+    /// Until it lands, the page's layers stay as they are and new segments are added as their own layers: the page
+    /// looks the same. `decoded` is the page's ink if the caller has it.
+    private func merge(_ decoded: PKDrawing? = nil) {
+        guard !isMerging else { return }
+        isMerging = true
+        needsMerge = false
+        let (upTo, data, page, epoch) = (held.count, held, page, epoch)
+        let side = PresentGeometry.inkTileSide(bucket: bucket)
+        Self.mergeQueue.async { [weak self] in
+            let drawing = decoded ?? Self.drawing(data[...])
+            let tiles = PresentGeometry.inkTiles(drawing, page: page, side: side)
+            DispatchQueue.main.async {
+                guard let self, self.epoch == epoch else { return }
+                guard let (parts, inkScale) = self.reserve(drawing, tiles: tiles, side: side, upTo: upTo) else {
+                    self.isMerging = false
+                    return
+                }
+                Self.mergeQueue.async { [weak self] in
+                    let images = parts.map { part in
+                        (Self.image(PKDrawing(strokes: part.strokes), bounds: part.bounds, scale: inkScale), part.bounds, part.boosted)
+                    }
+                    DispatchQueue.main.async {
+                        guard let self, self.epoch == epoch else { return }
+                        self.land(images, upTo: upTo)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The merged ink's bitmaps and their scale, their pixels taken from the budgets; nil if it is already one bitmap
+    /// at the paper's scale with no room for more.
+    private func reserve(_ drawing: PKDrawing, tiles: [(bounds: CGRect, strokes: [PKStroke])], side: CGFloat, upTo: Int)
+        -> (parts: [(strokes: [PKStroke], bounds: CGRect, boosted: CGFloat)], scale: CGFloat)? {
+        let area = tiles.reduce(0) { $0 + $1.bounds.width * $1.bounds.height }
+        // The layers it replaces give back their pixels: it may use them, leaving room for strokes written after it.
+        let replaced = segments.filter { $0.upTo <= upTo }.reduce(0) { $0 + $1.boosted }
+        let room = min(PresentGeometry.pageInkPixels - (boostedPixels - replaced), budget.free + replaced)
+            - PresentGeometry.newInkPixels
+        let tileScale = PresentGeometry.mergedInkScale(inkArea: area, room: room, tileSide: side, bucket: bucket)
+        var parts: [(strokes: [PKStroke], bounds: CGRect, boosted: CGFloat)]
+        let inkScale: CGFloat
+        if tileScale > scale {
+            inkScale = tileScale
+            parts = tiles.map { ($0.strokes, $0.bounds, $0.bounds.width * $0.bounds.height * tileScale * tileScale) }
+        } else if unmergedLayers > Self.maxSegmentLayers, let bounds = Self.bounds(of: drawing, on: page) {
+            inkScale = scale
+            parts = [(drawing.strokes, bounds, 0)]
+        } else {
+            return nil
+        }
+        // Accounted from now, as the page will hold it, so other pages see the room it leaves.
+        budget.give(replaced)
+        boostedPixels -= replaced
+        for index in segments.indices where segments[index].upTo <= upTo { segments[index].boosted = 0 }
+        // Within the room it was scaled to, but for rounding.
+        let wanted = parts.reduce(0) { $0 + $1.boosted }
+        let boosted = min(wanted, budget.free)
+        if wanted > 0 { parts = parts.map { ($0.strokes, $0.bounds, $0.boosted * boosted / wanted) } }
+        _ = budget.take(boosted)
+        boostedPixels += boosted
+        return (parts, inkScale)
+    }
+
+    /// The merged ink replaces the layers it holds, in one transaction.
+    private func land(_ images: [(CGImage?, CGRect, CGFloat)], upTo: Int) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        for segment in segments where segment.upTo <= upTo { segment.layer.removeFromSuperlayer() }
+        segments.removeAll { $0.upTo <= upTo }
+        place(images, upTo: upTo)
+        mergedUpTo = upTo
+        isMerging = false
+        layOut()
+        if needsMerge || unmergedLayers > Self.maxSegmentLayers { merge() }
+    }
+
+    private func place(_ images: [(CGImage?, CGRect, CGFloat)], upTo: Int) {
+        for (image, bounds, boosted) in images {
+            let layer = CALayer()
+            layer.contents = image
+            layer.contentsGravity = .resize
+            // The ink multiplies into its page, as on the iPad (EP71).
+            layer.compositingFilter = CIFilter(name: "CIMultiplyBlendMode")
+            ink.addSublayer(layer)
+            segments.append((layer, bounds, upTo, boosted))
+        }
+    }
+
+    private static func bounds(of drawing: PKDrawing, on page: CGRect) -> CGRect? {
         let bounds = drawing.bounds.intersection(page).integral.intersection(page)
-        guard !drawing.strokes.isEmpty, !bounds.isNull, bounds.width > 0, bounds.height > 0 else { return }
+        guard !drawing.strokes.isEmpty, !bounds.isNull, bounds.width > 0, bounds.height > 0 else { return nil }
+        return bounds
+    }
+
+    private static func image(_ drawing: PKDrawing, bounds: CGRect, scale: CGFloat) -> CGImage? {
         var image: CGImage?
         // Ink keeps its light-appearance colours, as on the iPad's pages.
         NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
             image = drawing.image(from: bounds, scale: scale).cgImage(forProposedRect: nil, context: nil, hints: nil)
         }
-        let layer = CALayer()
-        layer.contents = image
-        layer.contentsGravity = .resize
-        // The ink multiplies into its page, as on the iPad (EP71).
-        layer.compositingFilter = CIFilter(name: "CIMultiplyBlendMode")
-        ink.addSublayer(layer)
-        segments.append((layer, bounds))
+        return image
     }
 
     static func drawing(_ parts: ArraySlice<Data>) -> PKDrawing {
@@ -1248,6 +1399,32 @@ final class PresentPageLayers {
             if let part = try? PKDrawing(data: data) { drawing.append(part) }
         }
         return drawing
+    }
+}
+
+/// Ink pixels the Companion draws above its pages' paper scale (EP156), shared by every page it holds ink layers for at
+/// once, in the projector window and the lesson recording alike, so sharper ink cannot grow without bound: 96 Mpx
+/// (384 MB at 4 bytes a pixel), two pages full of ink at `PresentGeometry.pageInkPixels`. A page's ink that does not
+/// fit is drawn at its paper's scale, as before EP156.
+final class PresentInkBudget {
+    static let shared = PresentInkBudget(total: 96_000_000)
+    let total: CGFloat
+    private(set) var used: CGFloat = 0
+
+    init(total: CGFloat) {
+        self.total = total
+    }
+
+    var free: CGFloat { max(0, total - used) }
+
+    func take(_ pixels: CGFloat) -> Bool {
+        guard pixels <= free else { return false }
+        used += pixels
+        return true
+    }
+
+    func give(_ pixels: CGFloat) {
+        used = max(0, used - pixels)
     }
 }
 
@@ -1328,11 +1505,102 @@ enum PresentGeometry {
 
     /// Pixels per page point, rounded up to a power of two so scrolling reuses bitmaps, capped by `maxRasterSide`.
     static func rasterScale(pageSize: CGSize, displayedPoints: CGFloat, screenScale: CGFloat) -> CGFloat {
-        let longest = max(pageSize.width, pageSize.height)
-        guard pageSize.width > 0, longest > 0, displayedPoints > 0, screenScale > 0 else { return 1 }
+        rasterScale(pageSize: pageSize, bucket: rasterBucket(pageSize: pageSize, displayedPoints: displayedPoints, screenScale: screenScale))
+    }
+
+    /// The pixels per page point a page is shown at, rounded up to a power of two: `rasterScale` before its cap.
+    static func rasterBucket(pageSize: CGSize, displayedPoints: CGFloat, screenScale: CGFloat) -> CGFloat {
+        guard pageSize.width > 0, displayedPoints > 0, screenScale > 0 else { return 1 }
         let wanted = displayedPoints / pageSize.width * screenScale
-        let bucket = pow(2, ceil(log2(max(wanted, 0.125))))
+        return pow(2, ceil(log2(max(wanted, 0.125))))
+    }
+
+    /// `bucket` (a `rasterBucket`) capped so a bitmap of the whole page is at most `maxRasterSide` on its longest side.
+    static func rasterScale(pageSize: CGSize, bucket: CGFloat) -> CGFloat {
+        let longest = max(pageSize.width, pageSize.height)
+        guard pageSize.width > 0, longest > 0 else { return 1 }
         return min(bucket, maxRasterSide / longest)
+    }
+
+    /// Pixels per page point for one bitmap of committed ink covering `bounds` (page points), on a page shown at
+    /// `bucket` (its `rasterBucket`) whose paper is drawn at `rasterScale`.
+    ///
+    /// Twice the bucket (EP156). Drawn at the paper's scale, about one bitmap pixel per screen pixel on the 1080p
+    /// projector and in the lesson recording, ink sat at a fractional pixel offset and the GPU's resampling doubled its
+    /// edge, so every stroke went soft the moment the Pencil lifted and its vector live stroke became committed ink;
+    /// zoomed in past the paper's cap it was coarser still. A bitmap of ink is mostly one stroke's few points across,
+    /// so it is capped on its own rather than by the paper's cap: its longest side within `maxRasterSide`, its area
+    /// within `maxInkPixels`. At that cap it falls back towards `rasterScale` (all of an A4 page's ink in one bitmap
+    /// gets exactly that), never below it. A page's merged ink is cut into tiles instead (`mergedInkScale`).
+    static let inkSupersample: CGFloat = 2
+    static let maxInkPixels: CGFloat = 16_000_000
+
+    static func inkScale(bounds: CGSize, bucket: CGFloat, rasterScale: CGFloat) -> CGFloat {
+        guard rasterScale > 0, bucket > 0, bounds.width > 0, bounds.height > 0 else { return rasterScale }
+        let capped = min(bucket * inkSupersample, maxRasterSide / max(bounds.width, bounds.height),
+                         (maxInkPixels / (bounds.width * bounds.height)).squareRoot())
+        return max(rasterScale, capped)
+    }
+
+    /// A page's ink pixels drawn above its paper's scale at most (EP156): about 192 MB at 4 bytes a pixel, against
+    /// about 48 MB for an A4 page's ink in one bitmap at the paper's cap.
+    static let pageInkPixels: CGFloat = 48_000_000
+    /// Of a page's `pageInkPixels`, those its merged ink leaves for the strokes written after it, each in its own
+    /// bitmap at `inkScale` until the next merge: an A4 page full of merged ink is drawn at about 8.9 px/pt.
+    static let newInkPixels: CGFloat = 8_000_000
+    /// The smallest tile the merged ink is cut into, in page points, so a page zoomed far in has a few dozen at most.
+    static let minInkTileSide: CGFloat = 128
+
+    /// The side, in whole page points, of the square cells a page's merged ink is cut into: at twice `bucket`, a tile
+    /// of a full cell is `maxRasterSide` pixels a side.
+    static func inkTileSide(bucket: CGFloat) -> CGFloat {
+        guard bucket > 0 else { return maxRasterSide }
+        return max(minInkTileSide, (maxRasterSide / (bucket * inkSupersample)).rounded(.down))
+    }
+
+    /// The cells of `side` points across `page` that hold ink: each cell's ink cropped to its strokes' render bounds
+    /// (whole page points within the cell), and the strokes that reach into it.
+    static func inkTiles(_ drawing: PKDrawing, page: CGRect, side: CGFloat) -> [(bounds: CGRect, strokes: [PKStroke])] {
+        guard side > 0 else { return [] }
+        struct Cell: Hashable { let column: Int, row: Int }
+        var index: [Cell: Int] = [:]
+        var cells: [(cell: Cell, ink: CGRect, strokes: [PKStroke])] = []
+        for stroke in drawing.strokes {
+            let ink = stroke.renderBounds.intersection(page)
+            guard !ink.isNull, !ink.isEmpty else { continue }
+            let columns = Int((ink.minX / side).rounded(.down))...Int((ink.maxX / side).rounded(.down))
+            let rows = Int((ink.minY / side).rounded(.down))...Int((ink.maxY / side).rounded(.down))
+            for row in rows {
+                for column in columns {
+                    let cell = Cell(column: column, row: row)
+                    let rect = CGRect(x: CGFloat(column) * side, y: CGFloat(row) * side, width: side, height: side)
+                    let part = ink.intersection(rect)
+                    guard !part.isNull, part.width > 0, part.height > 0 else { continue }
+                    if let at = index[cell] {
+                        cells[at].ink = cells[at].ink.union(part)
+                        cells[at].strokes.append(stroke)
+                    } else {
+                        index[cell] = cells.count
+                        cells.append((cell, part, [stroke]))
+                    }
+                }
+            }
+        }
+        return cells.compactMap { held in
+            let rect = CGRect(x: CGFloat(held.cell.column) * side, y: CGFloat(held.cell.row) * side, width: side, height: side)
+                .intersection(page)
+            let bounds = held.ink.integral.intersection(rect)
+            guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else { return nil }
+            return (bounds, held.strokes)
+        }
+    }
+
+    /// Pixels per page point for a page's merged ink tiles covering `inkArea` square points, cut into cells of
+    /// `tileSide` points: twice `bucket`, as committed ink is (`inkScale`), within `room` pixels and each tile within
+    /// `maxRasterSide`. At or below the paper's scale the caller draws the ink in one bitmap at it, as before EP156.
+    static func mergedInkScale(inkArea: CGFloat, room: CGFloat, tileSide: CGFloat, bucket: CGFloat) -> CGFloat {
+        guard inkArea > 0, room > 0, tileSide > 0 else { return 0 }
+        return min(bucket * inkSupersample, maxRasterSide / tileSide, (room / inkArea).squareRoot())
     }
 }
 

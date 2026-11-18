@@ -230,6 +230,16 @@ struct PendingInkEdit {
         }
     }
 
+    /// The live pen's fountain-pen stroke a pen stroke becomes when this edit lands, once worked out from the live
+    /// pen's own stroke (`claimLivePen`); nil while not yet, when the live pen had none (the committed points then take
+    /// the pen feel only as it lands), or when the stroke was taken back (`dropped`). EP156: the saved drawing shows
+    /// this from the lift, so the landing changes nothing the student view or the Mac sees.
+    var landingPenStroke: PKStroke? {
+        guard !dropped, liveID != nil, case .replace(let strokes, let actionName) = kind,
+              actionName == Self.inkActionName, strokes.count == 1 else { return nil }
+        return strokes[0]
+    }
+
     /// The undo step of a stroke that is just ink.
     static let inkActionName = "Ink"
     /// The undo step of a stroke snapped straight.
