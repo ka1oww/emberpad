@@ -2912,16 +2912,17 @@ extension PDFOverlayPageController: ClassSwapWorksheet {
 
     /// Turns to the worksheet page printed from PDF page `pdfPage`, unless it is already the page in view (it stays
     /// exactly where it is), or goes back exactly to a place it was.
-    func returnFromSwap(_ place: ClassSwapReturn) {
+    @discardableResult
+    func returnFromSwap(_ place: ClassSwapReturn) -> Bool {
         switch place {
         case .pdfPage(let pdfPage):
-            guard let index = session.pages.pages.firstIndex(where: { $0.isOriginal && $0.pdfPage == pdfPage }),
-                  index != currentPage else { return }
-            goToPage(index)
+            guard let index = session.pages.pages.firstIndex(where: { $0.isOriginal && $0.pdfPage == pdfPage }) else { return false }
+            if index != currentPage { goToPage(index) }
         case .position(let position):
             position.restore(into: pdfView, indexOfPageID: { [session] id in session.pages.pages.firstIndex { $0.id == id } },
                              notesFit: notesFit)
             if isAtNotesFit { centreHorizontally() }
         }
+        return true
     }
 }

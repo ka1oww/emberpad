@@ -309,6 +309,19 @@ final class ClassCopySwapTests: XCTestCase {
         XCTAssertEqual(worksheet.returns, [.position(place)])
     }
 
+    func testAMatchedPageDeletedFromTheWorksheetGoesBackToWhereItWas() throws {
+        let (state, session, worksheet, _, _) = try presentingAnswerKey()
+        let model = state.student
+        let place = ReadingPosition(page: 2, pageID: session.page(at: 2)?.id, x: 40, y: 500, zoom: 1.5, zoomBasis: .notes)
+        worksheet.place = place
+        worksheet.pdfPagesPresent = [0, 1, 2, 3, 4]
+        publishWhole(model, session, page: 2)
+        state.setClassCopy(.teacher, worksheet: session.record)
+        model.showTeacherPage(8) // Question 6's answer; worksheet page 6 was deleted.
+        state.setClassCopy(.student, worksheet: session.record)
+        XCTAssertEqual(worksheet.returns, [.pdfPage(5), .position(place)])
+    }
+
     func testAScannedTeacherCopyOpensWhereItWasLastLeftOrOnTheSamePageNumber() throws {
         // A scanned copy has no words to match: where the panel was last left wins, else the page number, held to the
         // Teacher copy's pages, so a shorter copy still shows the class a page.
@@ -551,5 +564,12 @@ final class FakeSwapWorksheet: ClassSwapWorksheet {
     init(id: UUID) { swapDocumentID = id }
 
     func positionForSwap() -> ReadingPosition? { place }
-    func returnFromSwap(_ place: ClassSwapReturn) { returns.append(place) }
+    var pdfPagesPresent: Set<Int>?
+
+    @discardableResult
+    func returnFromSwap(_ place: ClassSwapReturn) -> Bool {
+        returns.append(place)
+        if case .pdfPage(let page) = place, let pdfPagesPresent { return pdfPagesPresent.contains(page) }
+        return true
+    }
 }

@@ -256,7 +256,9 @@ protocol ClassSwapWorksheet: AnyObject {
     var swapDocumentID: UUID { get }
     /// Where the worksheet is in view now, to come back to.
     func positionForSwap() -> ReadingPosition?
-    func returnFromSwap(_ place: ClassSwapReturn)
+    /// False when the worksheet has no page to turn to for `.pdfPage`, so the caller can go back to a saved place.
+    @discardableResult
+    func returnFromSwap(_ place: ClassSwapReturn) -> Bool
 }
 
 /// Which copy the class sees, as its own small observable, so the header's swap control follows it without
@@ -748,8 +750,9 @@ final class PresentationState: ObservableObject {
         student.concealTeacherCopy()
         guard reveal.worksheetID == worksheet.id, let editor = swapWorksheet, editor.swapDocumentID == worksheet.id else { return }
         if let page = reveal.match?.studentPage(forTeacher: reveal.page) {
-            editor.returnFromSwap(.pdfPage(page))
-        } else if let studentBeforeSwap {
+            if editor.returnFromSwap(.pdfPage(page)) { return }
+        }
+        if let studentBeforeSwap {
             editor.returnFromSwap(.position(studentBeforeSwap))
         }
     }
