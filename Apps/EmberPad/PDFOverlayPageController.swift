@@ -2791,6 +2791,50 @@ extension PDFOverlayPageController {
     /// More › Clear Page, once the teacher confirms: page `index`, the page in view the confirmation named.
     func clearInk(onPage index: Int) { clearPage(index) }
 
+    /// EP159: More › Clear All Ink, a reset to the original paper for reteaching: removes all the ink on every page of
+    /// the worksheet (pen writing, highlighter and shapes, which are all strokes), PDF pages and added pages alike, as
+    /// one undo step named "Clear All Ink". Every page and its paper stay, and the view stays where it is, as after
+    /// Clear Page. It waits for a stroke PencilKit is still committing exactly as Clear Page does, and each cleared
+    /// page saves like any other ink change. Nothing is cleared unless the undo step can be recorded.
+    func clearAllInk(undoManager: UndoManager? = nil) {
+        pendingClearPage?.cancel()
+        pendingClearPage = nil
+        guard !readOnly, !session.isRetired else { return }
+        let deadline = Date().addingTimeInterval(Self.clearPageMaxWait)
+        func attempt() {
+            pendingClearPage = nil
+            guard !readOnly, !session.isRetired else { return }
+            if pencilIsDown || !inkFlights.isEmpty || isReplacingStroke, Date() < deadline {
+                let work = DispatchWorkItem { MainActor.assumeIsolated { attempt() } }
+                pendingClearPage = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.clearPageRetry, execute: work)
+                return
+            }
+            finishWholeStrokeErase()
+            landInkEdits()
+            finishHighlighterErase()
+            clearAllInkNow(undoManager: undoManager)
+        }
+        attempt()
+    }
+
+    private func clearAllInkNow(undoManager: UndoManager?) {
+        let inked = session.pages.pages.indices.compactMap { page -> (page: Int, before: PKDrawing)? in
+            let before = session.drawing(on: page)
+            return before.strokes.isEmpty ? nil : (page, before)
+        }
+        guard !inked.isEmpty,
+              let undoManager = undoManager ?? inkSelection.undoManagerOverride ?? activeCanvas?.undoManager
+                ?? canvases[currentPage]?.undoManager ?? canvases.values.lazy.compactMap(\.undoManager).first,
+              !undoManager.isUndoing, !undoManager.isRedoing else { return }
+        let empty = PKDrawing()
+        for page in inked { setDrawing(empty, page: page.page) }
+        undoManager.beginUndoGrouping()
+        for page in inked { registerDrawingSwap(on: undoManager, page: page.page, restoring: page.before, then: empty) }
+        undoManager.setActionName("Clear All Ink")
+        undoManager.endUndoGrouping()
+    }
+
     private func clearPageNow(_ page: Int, undoManager: UndoManager?) {
         let before = session.drawing(on: page)
         guard !before.strokes.isEmpty,

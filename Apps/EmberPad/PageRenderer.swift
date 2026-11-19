@@ -32,6 +32,9 @@ protocol WorksheetPageRenderer: AnyObject {
     var readingPositions: ReadingPositions? { get set }
     /// More › Clear Page (EP120): removes all the ink on page `index` (zero-based) as one undo step, keeping the page.
     func clearInk(onPage index: Int)
+    /// More › Clear All Ink (EP159): removes all the ink on every page of the worksheet as one undo step, keeping every
+    /// page, so the worksheet is back to its original paper for reteaching.
+    func clearAllInk(undoManager: UndoManager?)
     /// EP119: lands every stroke and ink change in flight, then takes no more input, before the worksheet leaves the
     /// screen for another tab.
     func landInkBeforeLeaving(timeout: TimeInterval) async
@@ -201,6 +204,8 @@ final class PageChromeState: ObservableObject {
     /// More › Clear Page's confirmation is up for this zero-based page (EP120). It names the page it was asked for, so
     /// a scroll while it is up never clears another page.
     @Published var pageToClear: Int?
+    /// More › Clear All Ink's confirmation is up (EP159).
+    @Published var clearAllInkOpen = false
     /// The page tools for the page in view, as their buttons call them; the editor sets them (EP62).
     var toggleBookmark: (() -> Void)?
     var rotatePage: ((_ clockwise: Bool) -> Void)?
@@ -484,6 +489,12 @@ struct EditorScreen: View {
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text(ClearPageText.message)
+        }
+        .alert(ClearAllInkText.title, isPresented: $chrome.clearAllInkOpen) {
+            Button(ClearAllInkText.confirm, role: .destructive) { renderer?.clearAllInk(undoManager: nil) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(ClearAllInkText.message)
         }
         .task {
             do {
@@ -927,12 +938,20 @@ extension EditorScreen {
                 }
             }
         }
+        // EP159: beside Clear Page, the whole worksheet's reset to its original paper, in a section of its own as it
+        // is not about the page in view.
+        if let session {
+            Section {
+                ClearAllInkMenuButton(session: session, enabled: canAddPages) { chrome.clearAllInkOpen = true }
+            }
+        }
     }
 
+    /// Both exports ask, as they open, whether the pages go with the ink or without it (EP159).
     @ViewBuilder
     private var exportRows: some View {
-        Button {
-            flattenedExport.export(documentID, library: library)
+        Menu {
+            ExportInkChoiceRows { ink in flattenedExport.export(documentID, ink: ink, library: library) }
         } label: {
             HStack {
                 Text("Export flattened PDF")
@@ -941,13 +960,35 @@ extension EditorScreen {
             }
         }
         .disabled(session?.record.role != .student || flattenedExport.isExporting)
-        Button {
-            flattenedExport.export(documentID, page: chrome.currentPage, library: library)
+        Menu {
+            ExportInkChoiceRows { ink in flattenedExport.export(documentID, page: chrome.currentPage, ink: ink, library: library) }
         } label: {
             Text("Export This Page")
         }
         .disabled(session?.record.role != .student || flattenedExport.isExporting)
     }
+}
+
+/// More › Clear All Ink for the whole worksheet (EP159). Off while no page holds ink, as there is nothing to clear, and
+/// wherever the pages take no edits (read-only, a Teacher copy, a page edit saving), as Clear Page is.
+private struct ClearAllInkMenuButton: View {
+    @ObservedObject var session: DocumentSession
+    let enabled: Bool
+    let ask: () -> Void
+
+    var body: some View {
+        Button(ClearAllInkText.row, systemImage: "eraser.line.dashed", role: .destructive, action: ask)
+            .disabled(!enabled || !session.hasAnyInk)
+    }
+}
+
+/// The wording of Clear All Ink and its confirmation (EP159): a reset to the original paper, for reteaching.
+enum ClearAllInkText {
+    static let row = "Clear All Ink"
+    static let title = "Clear all ink?"
+    static let confirm = "Clear All Ink"
+    static let message = "Every page of this worksheet goes back to its original paper: all writing, highlights and shapes "
+        + "on every page are removed. Pages you added stay, cleared. You can undo it."
 }
 
 /// More › Clear Page for the page in view (EP120). Off while the page holds no ink, as there is nothing to clear, and

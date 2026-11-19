@@ -65,6 +65,8 @@ final class DocumentSession: ObservableObject {
     }
 
     func drawing(on page: Int) -> PKDrawing { drawings[page] ?? PKDrawing() }
+    /// Some page of the worksheet holds ink (EP159: Clear All Ink has something to clear).
+    var hasAnyInk: Bool { drawings.values.contains { !$0.strokes.isEmpty } }
     /// Bumps whenever `page`'s drawing changes in this session; 0 means the drawing it opened with.
     func inkRevision(on page: Int) -> UInt64 { pageRevisions[page] ?? 0 }
 

@@ -87,13 +87,20 @@ enum UITestLaunch {
     /// writes.
     static let inkArgument = "-EmberPadUITestInk"
 
-    /// `drawings` as `record` opens with them: the seeded ink on the first page, when launched for it.
-    static func drawings(_ drawings: [Int: PKDrawing], for record: DocumentRecord) -> [Int: PKDrawing] {
+    /// EP159: launched with this as well (instead of `inkArgument`), the same lines of pen ink are on every page of the
+    /// worksheet, so a test can clear the ink of every page at once. Only in memory, like `inkArgument`.
+    static let inkEveryPageArgument = "-EmberPadUITestInkEveryPage"
+
+    /// `drawings` as `record` opens with them: the seeded ink on the first page (or every page), when launched for it.
+    static func drawings(_ drawings: [Int: PKDrawing], for record: DocumentRecord, pageCount: Int = 1) -> [Int: PKDrawing] {
         let arguments = ProcessInfo.processInfo.arguments
-        guard arguments.contains(worksheetArgument), arguments.contains(inkArgument), record.title.hasPrefix(title),
+        let everyPage = arguments.contains(inkEveryPageArgument)
+        guard arguments.contains(worksheetArgument), arguments.contains(inkArgument) || everyPage, record.title.hasPrefix(title),
               drawings[0]?.strokes.isEmpty ?? true else { return drawings }
         var seeded = drawings
-        seeded[0] = PKDrawing(strokes: handwriting())
+        for page in 0..<(everyPage ? max(pageCount, 1) : 1) where seeded[page]?.strokes.isEmpty ?? true {
+            seeded[page] = PKDrawing(strokes: handwriting())
+        }
         return seeded
     }
 

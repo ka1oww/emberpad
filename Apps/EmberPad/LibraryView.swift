@@ -852,8 +852,10 @@ private struct LibraryCardCell: View {
                     Task { await library.archiveDocument(record.id) }
                 }
             }
-            Button("Export flattened PDF", systemImage: "square.and.arrow.up") {
-                flattenedExport.export(record.id, library: library)
+            Menu {
+                ExportInkChoiceRows { ink in flattenedExport.export(record.id, ink: ink, library: library) }
+            } label: {
+                Label("Export flattened PDF", systemImage: "square.and.arrow.up")
             }
             .disabled(record.role != .student || flattenedExport.isExporting)
         }
