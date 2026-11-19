@@ -55,9 +55,22 @@ final class PageThumbnailStore: ObservableObject {
     let width: CGFloat
     let scale: CGFloat
 
+    private var memoryWarning: NSObjectProtocol?
+
     init(width: CGFloat = 132, scale: CGFloat = 2) {
         self.width = width; self.scale = scale
+        // EP160: thumbnails are made again when the Pages popover shows them.
+        memoryWarning = NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification,
+                                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reset() }
+        }
     }
+
+    deinit {
+        if let memoryWarning { NotificationCenter.default.removeObserver(memoryWarning) }
+    }
+
+    var count: Int { images.count }
 
     /// Forgets every thumbnail, for when the worksheet's pages change (EP61).
     func reset() { images = [:] }
