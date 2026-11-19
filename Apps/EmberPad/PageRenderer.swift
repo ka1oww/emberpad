@@ -270,6 +270,17 @@ final class PageChromeState: ObservableObject {
     }
 
     func cancel() { pillTask?.cancel() }
+
+    /// Lets go of every action the editor set (EP160). They capture the editor, which holds this object, the
+    /// renderer and the open session, so the editor sets them again each time it installs a renderer.
+    func detachEditor() {
+        jumpToPage = nil
+        addPage = nil
+        toggleBookmark = nil
+        rotatePage = nil
+        changeTemplate = nil
+        pageAction = nil
+    }
 }
 
 /// What the editor shows and does with the open tabs (EP119).
@@ -529,6 +540,11 @@ struct EditorScreen: View {
             presentation.student.clear()
             presentation.clearPrivateAnswers(owner: answersOwner)
             session?.drawingDidChange = nil
+            // EP160: the page tools' actions and the renderer's Teach and page undo capture this view, whose state holds
+            // the renderer, the session and `chrome`; left set, they keep the whole worksheet in memory after it closes.
+            chrome.detachEditor()
+            renderer?.onTeach = nil
+            renderer?.pageUndo = nil
             Task { do { try await library.close(documentID) } catch { library.errorMessage = error.localizedDescription } }
         }
     }

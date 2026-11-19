@@ -53,6 +53,9 @@ final class LibraryController: ObservableObject {
     @Published private(set) var isImporting = false
     @Published private(set) var lastInboxImport: Date?
     private var sessions: [UUID: DocumentSession] = [:]
+    /// Sessions of worksheets no editor shows (EP160), held weakly: one still held elsewhere (an editor on its way out)
+    /// is opened again rather than a second session made over the same files.
+    private let closedSessions = NSMapTable<NSUUID, DocumentSession>.strongToWeakObjects()
     private var failedOperation: FailedOperation?
     /// Worksheets open in the editor now, with how many times each is open (EP91).
     private var openWorksheets: [UUID: Int] = [:]
@@ -363,6 +366,9 @@ final class LibraryController: ObservableObject {
         try await store.pinDocument(id)
         do {
             let session = try await loadSession(id)
+            // A close of this worksheet's last editor may have let the session go while it loaded (EP160): it is the
+            // open one again, so saves, page edits and export all reach the same session.
+            if sessions[id] == nil { sessions[id] = session }
             openWorksheets[id, default: 0] += 1
             return session
         } catch {
@@ -374,6 +380,10 @@ final class LibraryController: ObservableObject {
 
     private func loadSession(_ id: UUID) async throws -> DocumentSession {
         let record = try await store.document(id)
+        if sessions[id] == nil, let closed = closedSessions.object(forKey: id as NSUUID) {
+            sessions[id] = closed
+        }
+        closedSessions.removeObject(forKey: id as NSUUID)
         if let session = sessions[id], session.record.source.sha256 == record.source.sha256 { return session }
         let url = try await store.originalURL(documentID: id)
         guard let pdf = PDFDocument(url: url), !pdf.isLocked, pdf.pageCount == record.pageCount else { throw LibraryError.invalidDocument }
@@ -479,12 +489,18 @@ final class LibraryController: ObservableObject {
         await store.unpinDocument(id)
         let wasOpen = openWorksheets[id] != nil
         if let count = openWorksheets[id] { openWorksheets[id] = count > 1 ? count - 1 : nil }
+        // EP160: its ink is saved and no editor shows it, so its PDF and every page's ink leave memory; opening it again
+        // reads them back. Kept, every worksheet opened in a lesson stayed in memory until iPadOS ended the app.
+        if wasOpen, openWorksheets[id] == nil, let session = sessions.removeValue(forKey: id) {
+            closedSessions.setObject(session, forKey: id as NSUUID)
+        }
         await refresh()
         if wasOpen, openWorksheets.isEmpty { onLastWorksheetClosed?() }
     }
 
     func flush() async throws {
-        for session in sessions.values { try await session.flush() }
+        let closed = (closedSessions.objectEnumerator()?.allObjects as? [DocumentSession]) ?? []
+        for session in Array(sessions.values) + closed { try await session.flush() }
     }
 
     func flushForBackground() {

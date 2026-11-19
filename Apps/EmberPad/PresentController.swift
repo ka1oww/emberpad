@@ -101,9 +101,28 @@ final class PresentController: ObservableObject {
     /// The class view was frozen at the last frame (EP152), so an unfreeze is noticed at the next one.
     private var sentFrozen = false
 
+    private var memoryWarning: NSObjectProtocol?
+
     init(student: StudentDisplayModel) {
         self.student = student
+        // EP160: under memory pressure keep only the paper of the pages just shown; the rest is made again if shown.
+        memoryWarning = NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification,
+                                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.trimCaches() }
+        }
     }
+
+    deinit {
+        if let memoryWarning { NotificationCenter.default.removeObserver(memoryWarning) }
+    }
+
+    /// Lets go of what can be made again (EP160): the paper of pages not shown just now.
+    func trimCaches() {
+        paper.trim(keeping: PresentPaperCache.keptUnderPressure)
+    }
+
+    /// How many pages' paper is kept, for tests.
+    var paperCount: Int { paper.count }
 
     /// The bytes and frames sent on the current link, for Device checks and tests.
     var stats: PresentLink.Stats? { sender?.link.stats }
@@ -424,6 +443,17 @@ final class PresentPaperCache {
         pending = []
         epoch += 1
     }
+
+    /// Under memory pressure (EP160): two straddled pages of the Student copy and two of a Teacher copy shown to the
+    /// class are the most one frame shows.
+    static let keptUnderPressure = 4
+
+    /// Keeps only the `count` papers shown most recently, so what is on the Mac now never waits for its paper again.
+    func trim(keeping count: Int) {
+        while order.count > max(count, 0) { ready[order.removeFirst()] = nil }
+    }
+
+    var count: Int { ready.count }
 
     private func finish(_ key: Key, page: PDFPage, asset: PresentAsset?, size: CGSize, epoch: Int) {
         guard epoch == self.epoch else { return }
