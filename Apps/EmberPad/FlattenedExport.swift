@@ -99,15 +99,16 @@ enum FlattenedExport {
     }
 
     /// `<title> (annotated).pdf`, or `<title> p<N> (annotated).pdf` for one zero-based `page`,
-    /// with path separators and control characters removed.
-    static func fileName(for record: DocumentRecord, page: Int? = nil) -> String {
+    /// with path separators and control characters removed. Without ink (EP159) the suffix is `(no ink)`.
+    static func fileName(for record: DocumentRecord, page: Int? = nil, ink: Bool = true) -> String {
         let bad = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters).union(.newlines)
         var base = record.title.components(separatedBy: bad).joined(separator: " ")
             .split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
         if base.lowercased().hasSuffix(".pdf") { base = String(base.dropLast(4)).trimmingCharacters(in: .whitespaces) }
         if base.isEmpty { base = "Worksheet" }
-        if let page { return "\(base) p\(page + 1) (annotated).pdf" }
-        return "\(base) (annotated).pdf"
+        let suffix = ink ? "(annotated)" : "(no ink)"
+        if let page { return "\(base) p\(page + 1) \(suffix).pdf" }
+        return "\(base) \(suffix).pdf"
     }
 
     /// Writes `data` into a fresh temporary folder (so the shared name stays clean) and returns the file.
@@ -142,7 +143,9 @@ extension LibraryController {
     /// strokes still waiting for the debounced save are included.
     /// With `page` set (zero-based), only that page is exported, as a one-page PDF named
     /// `<title> p<N> (annotated).pdf` (Export This Page).
-    func exportFlattenedPDF(_ id: UUID, page only: Int? = nil) async throws -> URL {
+    /// With `ink` false (EP159) the pages go as the worksheet's original paper, with no ink read or drawn: the same
+    /// pages in the same order and sizes, added pages included, named `(no ink)` instead of `(annotated)`.
+    func exportFlattenedPDF(_ id: UUID, page only: Int? = nil, ink withInk: Bool = true) async throws -> URL {
         let record = try await store.document(id)
         guard record.role == .student else { throw FlattenedExportError.teacherCopy }
         let live = liveSession(for: id).flatMap { $0.record.source.sha256 == record.source.sha256 ? $0 : nil }
@@ -153,7 +156,9 @@ extension LibraryController {
         let pages = only.map { [$0] } ?? Array(0..<manifest.count)
         let sourceURL = try await store.originalURL(documentID: id)
         var inkData: [Int: Data] = [:]
-        if let live {
+        if !withInk {
+            // EP159: the original paper only; no saved or in-memory ink is read.
+        } else if let live {
             for (page, drawing) in live.drawings where pages.contains(page) && !drawing.strokes.isEmpty {
                 inkData[page] = drawing.dataRepresentation()
             }
@@ -163,7 +168,7 @@ extension LibraryController {
             }
         }
         let title = record.title
-        let name = FlattenedExport.fileName(for: record, page: only)
+        let name = FlattenedExport.fileName(for: record, page: only, ink: withInk)
         let ink = inkData
         let stored = live == nil
         let data = try await Task.detached(priority: .userInitiated) { () -> Data in
@@ -203,13 +208,14 @@ final class FlattenedExportModel: ObservableObject {
     @Published var shareItem: ShareItem?
     @Published private(set) var isExporting = false
 
-    /// Exports the whole worksheet, or only the zero-based `page` when it is set (Export This Page).
-    func export(_ id: UUID, page: Int? = nil, library: LibraryController) {
+    /// Exports the whole worksheet, or only the zero-based `page` when it is set (Export This Page), with its ink or,
+    /// with `ink` false, as the original paper without it (EP159).
+    func export(_ id: UUID, page: Int? = nil, ink: Bool = true, library: LibraryController) {
         guard !isExporting else { return }
         isExporting = true
         Task {
             defer { isExporting = false }
-            do { shareItem = ShareItem(url: try await library.exportFlattenedPDF(id, page: page)) }
+            do { shareItem = ShareItem(url: try await library.exportFlattenedPDF(id, page: page, ink: ink)) }
             catch { library.showError(error.localizedDescription) }
         }
     }
@@ -218,6 +224,21 @@ final class FlattenedExportModel: ObservableObject {
         FlattenedExport.discard(item.url)
         if shareItem?.id == item.id { shareItem = nil }
     }
+}
+
+/// EP159: the choice every export asks for: the pages with the ink on them, as before, or the original paper without it.
+struct ExportInkChoiceRows: View {
+    let export: (_ ink: Bool) -> Void
+
+    var body: some View {
+        Button(ExportInkChoice.withInk, systemImage: "pencil.tip") { export(true) }
+        Button(ExportInkChoice.withoutInk, systemImage: "doc") { export(false) }
+    }
+}
+
+enum ExportInkChoice {
+    static let withInk = "With Ink"
+    static let withoutInk = "Without Ink"
 }
 
 struct ActivityShareSheet: UIViewControllerRepresentable {

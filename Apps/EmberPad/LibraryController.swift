@@ -387,7 +387,7 @@ final class LibraryController: ObservableObject {
             }
         }
         #if DEBUG
-        drawings = UITestLaunch.drawings(drawings, for: record)
+        drawings = UITestLaunch.drawings(drawings, for: record, pageCount: pages.count)
         #endif
         let session = DocumentSession(record: record, pdf: pdf, originalURL: url, pages: pages, drawings: drawings, store: store)
         sessions[id] = session
