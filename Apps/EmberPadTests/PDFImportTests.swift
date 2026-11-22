@@ -94,6 +94,23 @@ final class PDFImportTests: XCTestCase {
         XCTAssertEqual(pages, PDFDocument(data: other)?.pageCount)
     }
 
+    /// Coming back from the picker re-activates the app, which runs an Inbox pass; a PDF picked while that pass holds
+    /// the import lock waits its turn instead of being dropped.
+    func testAPDFPickedWhileAnInboxPassIsRunningWaitsAndIsStillFiled() async throws {
+        try await seed("Unit 1/Existing.pdf")
+        library.sidebarSelection = .subject("Synthetic Subject")
+        library.folderPath = ["Unit 1"]
+
+        let inboxPass = Task { await library.fileInbox() }
+        while !library.isImporting { await Task.yield() }
+        await library.importPDFs([try file("Picked.pdf")])
+        await inboxPass.value
+
+        XCTAssertNil(library.errorMessage)
+        let filed = try await libraryPaths()
+        XCTAssertEqual(filed, ["Synthetic Subject/Unit 1/Existing.pdf", "Synthetic Subject/Unit 1/Picked.pdf"])
+    }
+
     func testFromAllSubjectsOrArchivedAnImportGoesToImports() async throws {
         XCTAssertEqual(library.importDestination, ImportDestination(subject: PDFImport.importsSubject, folder: []))
         await library.importPDFs([try file("Loose.pdf")])

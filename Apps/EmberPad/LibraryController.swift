@@ -561,7 +561,12 @@ final class LibraryController: ObservableObject {
     /// there gets a ` (2)` suffix, so an import never replaces a notebook or its ink. A file that is not a PDF, or a
     /// protected PDF, is refused with a short message; one that cannot be read now is offered for Retry.
     func importPDFs(_ urls: [URL], into destination: ImportDestination? = nil) async {
-        guard !isImporting, !urls.isEmpty else { return }
+        guard !urls.isEmpty else { return }
+        // An Inbox pass or another import may be running (the Inbox is checked as the app comes back from the
+        // picker): wait for it, so the teacher's import is never dropped.
+        while isImporting {
+            guard (try? await Task.sleep(for: .milliseconds(100))) != nil else { return }
+        }
         let destination = destination ?? importDestination
         let operation = FailedOperation.importFiles(urls, destination)
         isImporting = true
@@ -608,9 +613,6 @@ final class LibraryController: ObservableObject {
         let inInbox = urls.filter { $0.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(inboxPath) }
         let claimed = Set(inInbox.map(Self.claimKey))
         claimedInboxPaths.formUnion(claimed)
-        while isImporting {
-            guard (try? await Task.sleep(for: .milliseconds(100))) != nil else { return }
-        }
         await importPDFs(urls)
         let retrying: Set<String>
         if case .importFiles(let failed, _)? = failedOperation { retrying = Set(failed.map(Self.claimKey)) } else { retrying = [] }
