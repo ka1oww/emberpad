@@ -173,6 +173,9 @@ enum LassoGeometry {
             return winding != 0
         }
 
+        /// Whether any of `points` is inside the loop.
+        func touches(_ points: [CGPoint]) -> Bool { points.contains { contains($0) } }
+
         /// Whether at least `insideThreshold` of `points` are inside the loop: `insideFraction(of:in:) >=
         /// insideThreshold`, decided as soon as the points left cannot change it.
         func holds(_ points: [CGPoint]) -> Bool {
@@ -213,12 +216,64 @@ enum LassoGeometry {
     /// box round the loop has no point inside it, so it is passed over without sampling its path (EP126): on a page
     /// full of ink, sampling every stroke made the lift that selects take tens of milliseconds.
     /// Each remaining stroke is judged against the loop made ready once (`Loop`, EP128).
-    static func selectedIndices(in drawing: PKDrawing, lasso: [CGPoint]) -> [Int] {
+    ///
+    /// With `linesByAnyPart` (the lasso selecting, EP162), a line or shape EmberPad drew itself (`isMadeLine`: held
+    /// straight, held into a shape, or drawn with the Shape tool) is selected when any part of it is inside the loop,
+    /// and a shape's fill comes with its outline. A small loop round one end of a long held line held about a fifth
+    /// of it, so the half rule picked up nothing. Handwriting keeps the half rule, so lassoing a word grabs no more
+    /// than before. Deciding whether a held loop is a lasso at all keeps the half rule for everything, so a circle
+    /// drawn across a line stays a circle.
+    static func selectedIndices(in drawing: PKDrawing, lasso: [CGPoint], linesByAnyPart: Bool = false) -> [Int] {
         guard let loop = Loop(lasso) else { return [] }
         let strokes = drawing.strokes
-        return strokes.indices.filter { n in
-            mayReach(strokes[n], loop.box) && loop.holds(drawingPoints(of: strokes[n]))
+        let selected = strokes.indices.filter { n in
+            guard mayReach(strokes[n], loop.box) else { return false }
+            let points = drawingPoints(of: strokes[n])
+            return linesByAnyPart && isMadeLine(strokes[n]) ? loop.touches(points) : loop.holds(points)
         }
+        return linesByAnyPart ? withFills(selected, in: strokes) : selected
+    }
+
+    /// Whether `stroke` is a line or shape EmberPad drew itself, not handwriting: hold-to-straighten
+    /// (`StrokeSnap.straightened`), hold-to-shape (the live pen's `points(to:startTime:)`) and the Shape tool
+    /// (`ShapeInk.stroke(through:...)`) give every point the force, altitude and opacity of one, and time the points
+    /// evenly from start to end. A hand never does: the Pencil's samples come as they come, decimated by PencilKit.
+    /// Read from the stroke itself, so it holds for ink saved before it was asked and needs nothing more saved.
+    static func isMadeLine(_ stroke: PKStroke) -> Bool {
+        let path = stroke.path
+        guard path.count >= 3, let first = path.first, let last = path.last else { return false }
+        let step = (last.timeOffset - first.timeOffset) / Double(path.count - 1)
+        let slack = max(abs(step) * madeTimingSlack, 1e-6)
+        for (n, point) in path.enumerated() {
+            guard point.force == first.force, point.altitude == first.altitude, point.opacity == first.opacity,
+                  abs(point.timeOffset - first.timeOffset - Double(n) * step) <= slack else { return false }
+        }
+        return true
+    }
+
+    /// How far, as a share of the time between points, a made line's points may stray from even timing. Made lines
+    /// stray by nothing; handwriting by a quarter of that time and more (EP162 probes).
+    static let madeTimingSlack: Double = 0.01
+
+    /// `selected` with the fill of each selected shape outline the Shape tool drew (`ShapeInk.fillStroke`): made with
+    /// the outline (same creation date and seed) and centred on it. The fill's only points are at the shape's
+    /// centre, so a loop round part of the outline would otherwise move the outline away from its fill. A copy made
+    /// by Duplicate keeps the date and seed but sits elsewhere, so it never comes along.
+    private static func withFills(_ selected: [Int], in strokes: [PKStroke]) -> [Int] {
+        let outlines = selected.map { strokes[$0] }.filter { $0.mask == nil && isMadeLine($0) }
+        guard !outlines.isEmpty else { return selected }
+        let chosen = Set(selected)
+        let fills = strokes.indices.filter { n in
+            let fill = strokes[n]
+            guard !chosen.contains(n), fill.mask != nil, fill.ink.inkType == ShapeInk.inkType,
+                  let center = bounds(of: fill.path.map { $0.location.applying(fill.transform) }) else { return false }
+            return outlines.contains { outline in
+                guard outline.path.creationDate == fill.path.creationDate, outline.randomSeed == fill.randomSeed,
+                      let box = bounds(of: outline.path.map { $0.location.applying(outline.transform) }) else { return false }
+                return hypot(box.midX - center.midX, box.midY - center.midY) <= 1.5
+            }
+        }
+        return (selected + fills).sorted()
     }
 
     /// Whether any point sampled along `stroke` can lie in `box`: the path's points all lie within the box round its

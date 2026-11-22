@@ -175,14 +175,15 @@ final class InkSelectionController {
 
     // MARK: - Selecting
 
-    /// Selects the strokes on `page` at least half inside `lasso`. With no
+    /// Selects the strokes on `page` at least half inside `lasso`, and the lines and shapes EmberPad drew with any part
+    /// inside it (EP162, `LassoGeometry.isMadeLine`). With no
     /// stroke inside, a lasso round the worksheet's printed content selects
     /// that area for Teach (EP153). Returns false, leaving nothing selected,
     /// when neither is inside.
     @discardableResult
     func select(page: Int, lasso: [CGPoint]) -> Bool {
         guard let host, let canvas = host.canvases[page] else { return false }
-        let indices = LassoGeometry.selectedIndices(in: canvas.drawing, lasso: lasso)
+        let indices = LassoGeometry.selectedIndices(in: canvas.drawing, lasso: lasso, linesByAnyPart: true)
         if indices.isEmpty, host.canTeach(page: page, lasso: lasso) { return showArea(page: page, lasso: lasso) }
         return show(indices, page: page, outline: lasso)
     }
@@ -273,7 +274,7 @@ final class InkSelectionController {
         let strokes = canvas.drawing.strokes
         let loop = LassoGeometry.drawingPoints(of: strokes[strokeCount - 1])
         let rest = PKDrawing(strokes: Array(strokes.dropLast()))
-        let indices = LassoGeometry.selectedIndices(in: rest, lasso: loop)
+        let indices = LassoGeometry.selectedIndices(in: rest, lasso: loop, linesByAnyPart: true)
         guard !indices.isEmpty else { return false }
         liftedLoop = nil
         host.isReplacingStroke = true
