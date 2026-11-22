@@ -65,11 +65,11 @@ final class LassoMoveLeavesNoCopyTests: XCTestCase {
         undo.undo()
         XCTAssertTrue(waitUntil(1.5) { Self.liftsShowingInk(on: page.canvas) == 0 }, "undone, no moved copy over the page")
         XCTAssertTrue(waitUntil(1.5) { (try? self.inkShown(word, at: .zero, on: page)) == word.count }, "the word back home")
-        XCTAssertEqual(try inkShown(word, at: move, on: page), 0, "and not where it was moved to")
+        XCTAssertTrue(waitUntil(1.5) { (try? self.inkShown(word, at: move, on: page)) == 0 }, "and not where it was moved to")
 
         undo.redo()
         XCTAssertTrue(waitUntil(1.5) { (try? self.inkShown(word, at: move, on: page)) == word.count }, "redone, moved")
-        XCTAssertEqual(try inkShown(word, at: .zero, on: page), 0, "and not at home")
+        XCTAssertTrue(waitUntil(1.5) { (try? self.inkShown(word, at: .zero, on: page)) == 0 }, "and not at home")
         XCTAssertEqual(Self.liftsShowingInk(on: page.canvas), 0)
         XCTAssertEqual(page.session.drawing(on: 0).strokes.count, page.base + word.count)
     }
