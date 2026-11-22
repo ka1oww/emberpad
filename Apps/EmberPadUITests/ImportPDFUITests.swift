@@ -53,6 +53,7 @@ final class ImportPDFUITests: XCTestCase {
         var importMessage = "the PDF is a notebook in the folder being viewed"
         if !appeared {
             attach("import wait failed")
+            attachPickerState()
             let report = screenReport()
             print(report)
             importMessage += "\n" + report
@@ -101,7 +102,7 @@ final class ImportPDFUITests: XCTestCase {
     /// What the screen shows, for the failure message when the imported notebook never appears (CI uploads no xcresult).
     private func screenReport() -> String {
         let tree = app.debugDescription
-        let trimmedTree = tree.count > 6000 ? String(tree.prefix(6000)) + "\n…(trimmed)" : tree
+        let trimmedTree = tree.count > 40000 ? String(tree.prefix(40000)) + "\n…(trimmed)" : tree
         return """
         --- screen report ---
         picker still up: Open exists=\(app.buttons["Open"].exists), Cancel exists=\(app.buttons["Cancel"].exists)
@@ -109,6 +110,24 @@ final class ImportPDFUITests: XCTestCase {
         --- app.debugDescription ---
         \(trimmedTree)
         """
+    }
+
+    /// If the system picker is still up (Open still exists), keeps a screenshot of the whole screen and the picker
+    /// subtree's description, since CI uploads the picker's state nowhere else.
+    private func attachPickerState() {
+        guard app.buttons["Open"].exists else { return }
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "picker still up after Open"
+        shot.lifetime = .keepAlways
+        add(shot)
+        let picker = app.otherElements.containing(.button, identifier: "Open")
+            .containing(.button, identifier: "Cancel").element(boundBy: 0)
+        let tree = picker.exists ? picker.debugDescription : app.debugDescription
+        print("--- picker subtree ---\n\(tree)")
+        let text = XCTAttachment(string: tree)
+        text.name = "picker subtree"
+        text.lifetime = .keepAlways
+        add(text)
     }
 
     private func attach(_ name: String) {

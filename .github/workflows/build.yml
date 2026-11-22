@@ -156,3 +156,12 @@ jobs:
           # Each test may run for 5 minutes, twice the longest any has taken in CI (149 s). One that hangs then
           # fails by name and the rest still run; without the limit it ran until the job's 30 minutes were up.
           xcodebuild -project EmberPad.xcodeproj -scheme EmberPad -configuration Debug -destination "id=$UDID" -derivedDataPath "$RUNNER_TEMP/ios-test" CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES $SELECTION -test-timeouts-enabled YES -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 test 2>&1 | tee "$LOG"
+
+      - name: Upload shard 4 test results on failure
+        if: failure() && matrix.shard == 4
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipad-tests-shard-4-xcresult
+          path: ${{ runner.temp }}/ios-test/Logs/Test/*.xcresult
+          retention-days: 3
+          if-no-files-found: ignore
