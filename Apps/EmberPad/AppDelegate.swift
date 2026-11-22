@@ -17,8 +17,10 @@ final class AppEnvironment {
         let documents = try files.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         // The sync download lives in Application Support, out of the Files-visible Documents folder.
         let syncFolder = LibrarySyncFolder(root: support.appendingPathComponent("Sync", isDirectory: true))
+        // EP165: what was imported, for the Mac's Imports folder, kept beside the library, never inside it.
         library = LibraryController(store: try LibraryStore(root: support.appendingPathComponent("Library", isDirectory: true)),
-                                    inbox: documents.appendingPathComponent("Inbox", isDirectory: true), syncFolder: syncFolder)
+                                    inbox: documents.appendingPathComponent("Inbox", isDirectory: true), syncFolder: syncFolder,
+                                    importRegistryURL: support.appendingPathComponent("Imports/registry.json"))
         let keychain = PairingKeychain()
         pairing = PairingController(keychain: keychain)
         presentation.present.credential = { try keychain.load() }
@@ -30,6 +32,8 @@ final class AppEnvironment {
         changeMonitor = LibraryChangeMonitor(check: { await sync.checkForChanges() },
                                              isWorksheetOpen: { library.hasOpenWorksheet })
         let monitor = changeMonitor
+        // EP165: a paired Mac gets each imported PDF's copy straight away, not at the next foreground.
+        library.onImported = { sync.syncSoon() }
         library.onLastWorksheetClosed = {
             sync.worksheetClosed()
             monitor.worksheetClosed()
@@ -99,7 +103,8 @@ final class MainSceneDelegate: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, openURLContexts contexts: Set<UIOpenURLContext>) { importURLs(contexts) }
     private func importURLs(_ contexts: Set<UIOpenURLContext>) {
         guard !contexts.isEmpty, let environment else { return }
-        Task { await environment.library.importFiles(contexts.map(\.url), className: "Unfiled") }
+        // EP165: "Open in Ember Slate" imports into the folder being viewed, like the Files picker.
+        Task { await environment.library.openImported(contexts.map(\.url)) }
     }
 }
 

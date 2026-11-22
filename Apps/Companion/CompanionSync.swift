@@ -11,6 +11,10 @@ import SwiftUI
 /// EP-33: the same server receives the iPad's one-way ink backup into the backup folder (`InkBackupStore`), a
 /// setting that defaults to `~/Library/Application Support/EmberPad/Ink Backup` and is never allowed inside Google
 /// Drive, `~/Documents/Ember Projects` or the Outbox. The Mac never sends a backup back to the iPad.
+///
+/// EP165: the same server keeps a copy of every PDF imported on the iPad in `~/Documents/Ember Slate Imports`
+/// (`ImportsFolder`, created at launch), and offers the iPad every PDF dropped into that folder. It is a plain local
+/// folder, never the Drive EMBER folder, which the Companion only ever reads.
 @MainActor
 final class CompanionSyncModel: ObservableObject {
     /// The server's latest status, or nil while there is no pairing and so no server.
@@ -21,6 +25,8 @@ final class CompanionSyncModel: ObservableObject {
     @Published private(set) var backupFolder: URL
     /// Why a chosen backup folder was refused, or that a saved one was replaced by the default.
     @Published private(set) var backupMessage: String?
+    /// EP165: the Ember Slate Imports folder, both ways between the iPad and this Mac.
+    let imports: ImportsFolder
 
     static let backupFolderKey = "EmberPadCompanion.inkBackupFolderPath"
 
@@ -32,8 +38,11 @@ final class CompanionSyncModel: ObservableObject {
     /// Present on Mac (EP93): the server hands PRESENT frames from the paired iPad to it.
     private let presentHost: PresentHost?
 
-    init(outbox: LibraryOutbox = LibraryOutbox(), defaults: UserDefaults = .standard, presentHost: PresentHost? = nil) {
+    init(outbox: LibraryOutbox = LibraryOutbox(), defaults: UserDefaults = .standard, presentHost: PresentHost? = nil,
+         imports: ImportsFolder = ImportsFolder()) {
         self.outbox = outbox
+        self.imports = imports
+        try? imports.prepare()
         self.defaults = defaults
         self.presentHost = presentHost
         var folder = InkBackupStore.defaultURL
@@ -67,7 +76,9 @@ final class CompanionSyncModel: ObservableObject {
             presentHost?.dismiss()
             return
         }
-        let server = SyncServer(credential: credential, provider: OutboxContentProvider(outbox: outbox), putReceiver: backup,
+        let server = SyncServer(credential: credential,
+                                provider: ImportsContentProvider(base: OutboxContentProvider(outbox: outbox), imports: imports),
+                                putReceiver: ImportsRoutingReceiver(imports: imports, others: backup),
                                 presentHost: presentHost) { [weak self] status in
             Task { @MainActor in
                 guard let self, self.servedPairing == credential else { return }
@@ -114,6 +125,12 @@ final class CompanionSyncModel: ObservableObject {
     func showBackupFolder() {
         try? FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: true)
         NSWorkspace.shared.activateFileViewerSelecting([backupFolder])
+    }
+
+    /// Opens the Ember Slate Imports folder in Finder, creating it first if it is missing.
+    func showImportsFolder() {
+        try? imports.prepare()
+        NSWorkspace.shared.activateFileViewerSelecting([imports.root])
     }
 
     /// Re-read the Outbox manifest after a Prepare. The server itself reads it afresh for every request.

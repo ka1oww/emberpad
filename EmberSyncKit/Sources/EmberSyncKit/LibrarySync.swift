@@ -12,6 +12,9 @@ public struct LibrarySyncFolder: Sendable {
     var deliveryFolder: URL { root.appendingPathComponent(LibraryDelivery.folderName, isDirectory: true) }
     var filesFolder: URL { deliveryFolder.appendingPathComponent(LibraryDelivery.filesFolderName, isDirectory: true) }
     var manifestURL: URL { deliveryFolder.appendingPathComponent(LibraryDelivery.manifestName) }
+    /// EP165: PDFs dropped into the Mac's Ember Slate Imports folder, `<root>/Imports/<sha256>.pdf`, kept apart from
+    /// the library delivery so `InboxScanner` and `LibraryDeliveryApplier` never see them.
+    var importsFolder: URL { root.appendingPathComponent("Imports", isDirectory: true) }
     static let partialPrefix = ".partial-"
 
     /// Creates the folders and removes partial downloads an interrupted sync left behind.
@@ -24,7 +27,31 @@ public struct LibrarySyncFolder: Sendable {
         for name in try files.contentsOfDirectory(atPath: filesFolder.path) where name.hasPrefix(Self.partialPrefix) {
             try? files.removeItem(at: filesFolder.appendingPathComponent(name))
         }
+        try files.createDirectory(at: importsFolder, withIntermediateDirectories: true)
+        try LibraryStore.requireDirectory(importsFolder)
+        for name in try files.contentsOfDirectory(atPath: importsFolder.path) where name.hasPrefix(Self.partialPrefix) {
+            try? files.removeItem(at: importsFolder.appendingPathComponent(name))
+        }
     }
+
+    /// EP165: where a verified PDF from the Mac's Imports folder waits until the app has imported it.
+    public func importURL(for hash: ContentHash) -> URL {
+        importsFolder.appendingPathComponent(LibraryDelivery.fileName(for: hash))
+    }
+
+    func importPartialURL(for hash: ContentHash) -> URL { importsFolder.appendingPathComponent(Self.partialPrefix + hash.rawValue) }
+
+    /// A verified copy of this offer's bytes is already waiting from an earlier sync.
+    func holds(_ offer: ImportOffer) -> Bool {
+        let url = importURL(for: offer.sha256)
+        guard (try? LibraryStore.requireRegularFile(url)) != nil,
+              let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber,
+              size.int64Value == offer.size else { return false }
+        return (try? ContentHash.digest(fileAt: url)) == offer.sha256
+    }
+
+    /// Drops one imported PDF's transport copy once the library holds it.
+    public func removeImport(_ hash: ContentHash) { try? FileManager.default.removeItem(at: importURL(for: hash)) }
 
     func fileURL(for hash: ContentHash) -> URL { filesFolder.appendingPathComponent(LibraryDelivery.fileName(for: hash)) }
     func partialURL(for hash: ContentHash) -> URL { filesFolder.appendingPathComponent(Self.partialPrefix + hash.rawValue) }
@@ -94,6 +121,13 @@ public struct LibrarySyncDownload: Equatable, Sendable {
     /// The ink backup sent on the same connection after the download (EP-33), or nil when none was asked for.
     /// It never changes anything above: the library sync is complete or not on its own.
     public internal(set) var backup: InkBackupReport?
+    /// The protocol version the Mac negotiated.
+    public var macVersion: UInt16? = nil
+    /// EP165: PDFs from the Mac's Ember Slate Imports folder that arrived verified, each waiting at
+    /// `LibrarySyncFolder.importURL(for:)` for the app to import. Never part of `isComplete`.
+    public var imports: [ImportOffer] = []
+    /// EP165: PDFs from the Mac's Imports folder that did not arrive; they are asked for again on the next sync.
+    public var importsFailed = 0
 
     /// Every PDF the library needed arrived. Says nothing about the backup.
     public var isComplete: Bool { failed.isEmpty }
@@ -156,8 +190,13 @@ public struct LibrarySyncDownloader: Sendable {
     /// version 2. The backup only ever adds `backup` to the result. It never throws, never touches the download
     /// folder, and once the closure has run nothing it meets (a failed PUT, a closed connection, an old Mac,
     /// leaving the foreground) can undo or fail the download.
+    ///
+    /// EP165: with `knownImports`, PDFs the Mac offers from its Ember Slate Imports folder whose SHA-256 is not in
+    /// that set are downloaded too, into the folder's `Imports` folder, and listed in the result's `imports`. They
+    /// never count towards the library download being complete.
     public func download(over transport: any WireTransport, local: @escaping @Sendable () async throws -> [DocumentRecord],
                          now: Date = Date(), progress: @escaping Progress = { _ in },
+                         knownImports: (@Sendable () async -> Set<ContentHash>)? = nil,
                          whileConnected: WhileConnected? = nil) async throws -> LibrarySyncDownload {
         try folder.prepare()
         let (inputs, continuation) = AsyncStream.makeStream(of: Input.self)
@@ -176,7 +215,7 @@ public struct LibrarySyncDownloader: Sendable {
             }
         }
         var run = Run(downloader: self, transport: transport, local: local, now: now, progress: progress,
-                      keepOpen: whileConnected != nil)
+                      keepOpen: whileConnected != nil, knownImports: knownImports)
         defer {
             reader.cancel()
             ticker.cancel()
@@ -221,8 +260,15 @@ public struct LibrarySyncDownloader: Sendable {
         let progress: Progress
         var folder: LibrarySyncFolder { downloader.folder }
 
+        /// One PDF to download: a library entry, or (EP165) an offer from the Mac's Imports folder.
+        struct Wanted {
+            let hash: ContentHash
+            let size: Int64
+            let offer: ImportOffer?
+        }
+
         struct Transfer {
-            let entry: ManifestEntry
+            let wanted: Wanted
             let handle: FileHandle
             var received: Int64 = 0
         }
@@ -230,9 +276,14 @@ public struct LibrarySyncDownloader: Sendable {
         var session: WireClientSession
         var manifestRequest: WireRequestID?
         var manifest: Manifest?
-        var queue: [ManifestEntry] = []
+        var queue: [Wanted] = []
         var active: [WireRequestID: Transfer] = [:]
         var failed: [ContentHash: WireRequestFailure] = [:]
+        let knownImports: (@Sendable () async -> Set<ContentHash>)?
+        var importsArrived: [ImportOffer] = []
+        var importsFailed = 0
+        /// The version the Mac negotiated, kept after the session closes.
+        var negotiatedVersion: UInt16?
         var filesNeeded = 0
         var downloaded = 0
         var bytesDownloaded: Int64 = 0
@@ -251,8 +302,9 @@ public struct LibrarySyncDownloader: Sendable {
         }
 
         init(downloader: LibrarySyncDownloader, transport: any WireTransport, local: @escaping @Sendable () async throws -> [DocumentRecord],
-             now: Date, progress: @escaping Progress, keepOpen: Bool) {
+             now: Date, progress: @escaping Progress, keepOpen: Bool, knownImports: (@Sendable () async -> Set<ContentHash>)?) {
             self.downloader = downloader
+            self.knownImports = knownImports
             self.transport = transport
             self.local = local
             self.now = now
@@ -283,6 +335,7 @@ public struct LibrarySyncDownloader: Sendable {
         mutating func react(to event: WireClientEvent) async throws {
             switch event {
             case .ready:
+                negotiatedVersion = session.version
                 let (id, output) = try request { try $0.requestManifest(now: .now) }
                 manifestRequest = id
                 try await perform(output)
@@ -300,10 +353,17 @@ public struct LibrarySyncDownloader: Sendable {
                 guard let transfer = active.removeValue(forKey: id) else { return }
                 try transfer.handle.synchronize()
                 try transfer.handle.close()
-                let target = folder.fileURL(for: hash)
-                try? FileManager.default.removeItem(at: target)
-                try FileManager.default.moveItem(at: folder.partialURL(for: hash), to: target)
-                downloaded += 1
+                if let offer = transfer.wanted.offer {
+                    let target = folder.importURL(for: hash)
+                    try? FileManager.default.removeItem(at: target)
+                    try FileManager.default.moveItem(at: folder.importPartialURL(for: hash), to: target)
+                    importsArrived.append(offer)
+                } else {
+                    let target = folder.fileURL(for: hash)
+                    try? FileManager.default.removeItem(at: target)
+                    try FileManager.default.moveItem(at: folder.partialURL(for: hash), to: target)
+                    downloaded += 1
+                }
                 bytesDownloaded += Int64(total)
                 status.filesDone += 1
                 progress(status)
@@ -312,10 +372,10 @@ public struct LibrarySyncDownloader: Sendable {
                 if id == manifestRequest, manifest == nil { throw LibrarySyncError.manifestUnavailable(failure) }
                 guard let transfer = active.removeValue(forKey: id) else { return }
                 try? transfer.handle.close()
-                try? FileManager.default.removeItem(at: folder.partialURL(for: transfer.entry.sha256))
-                failed[transfer.entry.sha256] = failure
+                try? FileManager.default.removeItem(at: partialURL(transfer.wanted))
+                markFailed(transfer.wanted, failure)
                 // The bytes of a failed PDF will never be counted, so take them out of the total.
-                status.bytesTotal -= transfer.entry.size
+                status.bytesTotal -= transfer.wanted.size
                 status.bytesReceived -= transfer.received
                 progress(status)
                 if case .connectionClosed = failure { return }
@@ -323,9 +383,9 @@ public struct LibrarySyncDownloader: Sendable {
             case .closed(let reason):
                 closeReason = reason
                 guard manifest != nil else { throw LibrarySyncError.closedBeforeManifest(reason) }
-                for entry in queue {
-                    failed[entry.sha256] = .connectionClosed
-                    status.bytesTotal -= entry.size
+                for wanted in queue {
+                    markFailed(wanted, .connectionClosed)
+                    status.bytesTotal -= wanted.size
                 }
                 queue = []
                 progress(status)
@@ -349,7 +409,17 @@ public struct LibrarySyncDownloader: Sendable {
                 }
                 guard seen.insert(entry.sha256).inserted else { continue }
                 filesNeeded += 1
-                if !folder.holds(entry) { queue.append(entry) }
+                if !folder.holds(entry) { queue.append(Wanted(hash: entry.sha256, size: entry.size, offer: nil)) }
+            }
+            if let knownImports, let offers = received.imports, (negotiatedVersion ?? 0) >= WireProtocol.importsVersion {
+                let known = await knownImports()
+                for offer in offers where !known.contains(offer.sha256) && seen.insert(offer.sha256).inserted {
+                    if folder.holds(offer) {
+                        importsArrived.append(offer)
+                    } else {
+                        queue.append(Wanted(hash: offer.sha256, size: offer.size, offer: offer))
+                    }
+                }
             }
             status = LibrarySyncProgress(filesTotal: queue.count, bytesTotal: queue.reduce(0) { $0 + $1.size })
             progress(status)
@@ -359,11 +429,11 @@ public struct LibrarySyncDownloader: Sendable {
         /// Keeps up to `parallelFiles` transfers in flight; finishes once every needed PDF has an outcome.
         mutating func advance() async throws {
             while active.count < downloader.parallelFiles, !queue.isEmpty {
-                let entry = queue.removeFirst()
-                FileManager.default.createFile(atPath: folder.partialURL(for: entry.sha256).path, contents: nil)
-                let handle = try FileHandle(forWritingTo: folder.partialURL(for: entry.sha256))
-                let (id, output) = try request { try $0.requestFile(for: entry, now: .now) }
-                active[id] = Transfer(entry: entry, handle: handle)
+                let wanted = queue.removeFirst()
+                FileManager.default.createFile(atPath: partialURL(wanted).path, contents: nil)
+                let handle = try FileHandle(forWritingTo: partialURL(wanted))
+                let (id, output) = try request { try $0.requestFile(wanted.hash, expectedSize: UInt64(wanted.size), now: .now) }
+                active[id] = Transfer(wanted: wanted, handle: handle)
                 try await perform(output)
             }
             if active.isEmpty, queue.isEmpty, manifest != nil, !finished {
@@ -380,15 +450,28 @@ public struct LibrarySyncDownloader: Sendable {
 
         func result() throws -> LibrarySyncDownload {
             guard let manifest else { throw LibrarySyncError.closedBeforeManifest(closeReason ?? .local) }
-            return LibrarySyncDownload(manifestGeneratedAt: manifest.generatedAt, filesNeeded: filesNeeded,
-                                       filesDownloaded: downloaded, bytesDownloaded: bytesDownloaded, failed: failed)
+            var result = LibrarySyncDownload(manifestGeneratedAt: manifest.generatedAt, filesNeeded: filesNeeded,
+                                             filesDownloaded: downloaded, bytesDownloaded: bytesDownloaded, failed: failed)
+            result.macVersion = session.version ?? negotiatedVersion
+            result.imports = importsArrived
+            result.importsFailed = importsFailed
+            return result
+        }
+
+        func partialURL(_ wanted: Wanted) -> URL {
+            wanted.offer == nil ? folder.partialURL(for: wanted.hash) : folder.importPartialURL(for: wanted.hash)
+        }
+
+        /// A library PDF that did not arrive leaves the sync incomplete; an imported one is only counted.
+        mutating func markFailed(_ wanted: Wanted, _ failure: WireRequestFailure) {
+            if wanted.offer == nil { failed[wanted.hash] = failure } else { importsFailed += 1 }
         }
 
         /// Closes and deletes any transfer still open when the run stops early.
         mutating func discardOpenFiles() {
             for (_, transfer) in active {
                 try? transfer.handle.close()
-                try? FileManager.default.removeItem(at: folder.partialURL(for: transfer.entry.sha256))
+                try? FileManager.default.removeItem(at: partialURL(transfer.wanted))
             }
             active = [:]
         }

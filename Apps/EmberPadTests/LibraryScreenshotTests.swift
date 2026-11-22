@@ -61,7 +61,7 @@ final class LibraryScreenshotTests: XCTestCase {
         let invalidPDF = root.appendingPathComponent("synthetic-invalid.pdf")
         try Data("synthetic invalid PDF".utf8).write(to: invalidPDF)
         let errorLibrary = LibraryController(store: errorStore, inbox: inbox)
-        await errorLibrary.importFiles([invalidPDF], className: "Synthetic Class")
+        await errorLibrary.importPDFs([invalidPDF], into: ImportDestination(subject: "Synthetic Class", folder: []))
         XCTAssertTrue(errorLibrary.canRetryError)
 
         for scheme: ColorScheme in [.light, .dark] {
@@ -103,7 +103,7 @@ final class LibraryScreenshotTests: XCTestCase {
                 try pdf.write(to: url)
                 return url
             }
-            let importTask = Task { await importingLibrary.importFiles(urls, className: "Synthetic Class") }
+            let importTask = Task { await importingLibrary.importPDFs(urls, into: ImportDestination(subject: "Synthetic Class", folder: [])) }
             while !importingLibrary.isImporting { await Task.yield() }
             attach(try await render(importingLibrary, scheme: scheme, expiry: validExpiry),
                    named: "library-importing-\(scheme.label)")

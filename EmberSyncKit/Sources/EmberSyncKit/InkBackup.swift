@@ -13,10 +13,19 @@ public struct InkBackupHeader: Codable, Equatable, Sendable {
         case ink
         /// The worksheet with its ink drawn on, as a PDF anyone can open.
         case flattened
+        /// EP165, protocol version 6 only: a PDF imported on the iPad, its original bytes, which the Mac keeps in its
+        /// Ember Slate Imports folder (`ImportsFolder`) rather than the backup folder. Its `title` is the file name.
+        case imported
 
         public var fileExtension: String { self == .ink ? "emberink" : "pdf" }
         /// The word in a stored file's name.
-        public var label: String { self == .ink ? "ink" : "annotated" }
+        public var label: String {
+            switch self {
+            case .ink: "ink"
+            case .flattened: "annotated"
+            case .imported: "imported"
+            }
+        }
     }
 
     public static let currentFormat = "emberpad.backup/1"

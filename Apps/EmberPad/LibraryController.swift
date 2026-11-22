@@ -1,6 +1,7 @@
 import SwiftUI
 import PDFKit
 import PencilKit
+import UniformTypeIdentifiers
 import EmberSyncKit
 
 enum LibrarySidebarSelection: Hashable {
@@ -23,6 +24,13 @@ enum LibrarySortOrder: String, CaseIterable {
 
     /// The order as the grid's subline names it.
     var sublineLabel: String { self == .name ? "name order" : label.lowercased() }
+}
+
+/// EP165: where an imported PDF goes: a subject and a folder inside it.
+struct ImportDestination: Equatable {
+    let subject: String
+    /// Folder names below the subject, outermost first; empty for its top level.
+    let folder: [String]
 }
 
 /// What the library's detail column lists: folders first, then worksheets.
@@ -67,16 +75,25 @@ final class LibraryController: ObservableObject {
     private enum FailedOperation: Equatable {
         case inbox
         case refresh
-        case importFiles([URL], String)
+        case importFiles([URL], ImportDestination)
         case archive(UUID)
         case unarchive(UUID)
         case flush
     }
 
-    init(store: LibraryStore, inbox: URL, syncFolder: LibrarySyncFolder? = nil) {
+    /// EP165: what the iPad remembers about imports (`ImportRegistry`), outside the library. Nil records nothing.
+    let importRegistryURL: URL?
+    /// EP165: called after a PDF is imported, so a paired Mac gets its copy soon.
+    var onImported: (() -> Void)?
+    /// EP165: Open-in copies iOS put in `Documents/Inbox` that the share-sheet import is filing; the Inbox pass
+    /// leaves them alone, so one PDF never becomes two notebooks.
+    private var claimedInboxPaths: Set<String> = []
+
+    init(store: LibraryStore, inbox: URL, syncFolder: LibrarySyncFolder? = nil, importRegistryURL: URL? = nil) {
         self.store = store
         self.inbox = inbox
         self.syncFolder = syncFolder
+        self.importRegistryURL = importRegistryURL
     }
     var classes: [String] { Set(documents.filter { !$0.showsAsArchived }.map { $0.source.source.classFolder }).sorted() }
 
@@ -325,7 +342,7 @@ final class LibraryController: ObservableObject {
         switch failedOperation {
         case .inbox: await fileInbox()
         case .refresh: await refresh()
-        case .importFiles(let urls, let className): await importFiles(urls, className: className)
+        case .importFiles(let urls, let destination): await importPDFs(urls, into: destination)
         case .archive(let id): await archiveDocument(id)
         case .unarchive(let id): await unarchiveDocument(id)
         case .flush, .none: await retryFlush()
@@ -515,22 +532,156 @@ final class LibraryController: ObservableObject {
         }
     }
 
-    func importFiles(_ urls: [URL], className: String) async {
-        guard !isImporting else { return }
-        let operation = FailedOperation.importFiles(urls, className)
+    // MARK: - Importing PDFs (EP165)
+
+    /// Where an import lands now: the folder the teacher is viewing, or the "Imports" subject from All subjects and
+    /// Archived.
+    var importDestination: ImportDestination {
+        guard !showingArchived, let subject = selectedSubject else { return ImportDestination(subject: PDFImport.importsSubject, folder: []) }
+        return ImportDestination(subject: subject, folder: folderPath)
+    }
+
+    /// The copy shown for a file that is not a PDF.
+    nonisolated static func notPDFMessage(_ name: String) -> String { "\(name) is not a PDF. Ember Slate imports PDFs only." }
+    /// The copy shown for a password-protected PDF.
+    nonisolated static func protectedMessage(_ name: String) -> String {
+        "\(name) is a protected PDF. Ember Slate cannot open protected PDFs."
+    }
+
+    /// Why one file was not imported.
+    private enum ImportProblem: Error {
+        /// Not a PDF, or a protected one: importing it again cannot help.
+        case rejected(String)
+        /// It could not be read now (still arriving, or a storage error): Retry may help.
+        case failed(String)
+    }
+
+    /// The Files picker's and the share sheet's import (EP165): each PDF becomes a new notebook named after its file
+    /// in `destination` (by default the folder being viewed), beside anything already there. A name already used
+    /// there gets a ` (2)` suffix, so an import never replaces a notebook or its ink. A file that is not a PDF, or a
+    /// protected PDF, is refused with a short message; one that cannot be read now is offered for Retry.
+    func importPDFs(_ urls: [URL], into destination: ImportDestination? = nil) async {
+        guard !isImporting, !urls.isEmpty else { return }
+        let destination = destination ?? importDestination
+        let operation = FailedOperation.importFiles(urls, destination)
         isImporting = true
-        defer { isImporting = false }
+        var imported = 0
+        var rejected: [String] = []
+        var failed: [URL] = []
+        var failure: String?
         do {
             try await flush()
-            let sources = try await store.sources(for: urls, classFolder: className.trimmingCharacters(in: .whitespacesAndNewlines))
-            for (url, source) in zip(urls, sources) {
-                let scope = url.startAccessingSecurityScopedResource()
-                defer { if scope { url.stopAccessingSecurityScopedResource() } }
-                let data = try await CoordinatedPDFReader.read(url)
-                try await importData(data, source: source)
+            for url in urls {
+                do {
+                    try await importPDF(at: url, into: destination)
+                    imported += 1
+                } catch ImportProblem.rejected(let message) {
+                    rejected.append(message)
+                } catch ImportProblem.failed(let message) {
+                    failed.append(url)
+                    failure = failure ?? message
+                } catch {
+                    failed.append(url)
+                    failure = failure ?? error.localizedDescription
+                }
             }
+        } catch {
+            failed = urls
+            failure = error.localizedDescription
+        }
+        isImporting = false
+        if !failed.isEmpty {
+            setError(([failure ?? ""] + rejected).joined(separator: " "), for: .importFiles(failed, destination))
+        } else {
             clearError(for: operation)
-        } catch { setError(error.localizedDescription, for: operation) }
+            if !rejected.isEmpty { showError(rejected.joined(separator: " ")) }
+        }
+        await refresh()
+        if imported > 0 { onImported?() }
+    }
+
+    /// The share sheet's "Open in Ember Slate" (EP165): imports into the folder being viewed, like the Files
+    /// picker. iOS's own copy in `Documents/Inbox` is claimed first, so the Inbox pass never files it as a second
+    /// notebook, and removed once it is imported or refused.
+    func openImported(_ urls: [URL]) async {
+        let inboxPath = inbox.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let inInbox = urls.filter { $0.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(inboxPath) }
+        let claimed = Set(inInbox.map(Self.claimKey))
+        claimedInboxPaths.formUnion(claimed)
+        while isImporting {
+            guard (try? await Task.sleep(for: .milliseconds(100))) != nil else { return }
+        }
+        await importPDFs(urls)
+        let retrying: Set<String>
+        if case .importFiles(let failed, _)? = failedOperation { retrying = Set(failed.map(Self.claimKey)) } else { retrying = [] }
+        for url in inInbox where !retrying.contains(Self.claimKey(url)) {
+            try? FileManager.default.removeItem(at: url)
+            claimedInboxPaths.remove(Self.claimKey(url))
+        }
+    }
+
+    private nonisolated static func claimKey(_ url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
+
+    /// Reads, checks and files one PDF as a new notebook, and records it for the Mac's Imports folder.
+    private func importPDF(at url: URL, into destination: ImportDestination) async throws {
+        let name = url.lastPathComponent
+        let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType ?? UTType(filenameExtension: url.pathExtension)
+        guard type?.conforms(to: .pdf) == true || url.pathExtension.lowercased() == "pdf" else {
+            throw ImportProblem.rejected(Self.notPDFMessage(name))
+        }
+        let scope = url.startAccessingSecurityScopedResource()
+        defer { if scope { url.stopAccessingSecurityScopedResource() } }
+        let data: Data
+        do { data = try await CoordinatedPDFReader.read(url) } catch {
+            throw ImportProblem.failed("\(name) could not be read. \(error.localizedDescription)")
+        }
+        guard let pdf = PDFDocument(data: data) else { throw ImportProblem.failed("\(name) could not be opened as a PDF.") }
+        if pdf.isLocked { throw ImportProblem.rejected(Self.protectedMessage(name)) }
+        guard pdf.pageCount > 0 else { throw ImportProblem.failed("\(name) could not be opened as a PDF.") }
+        let source = try PDFImport.source(subject: destination.subject, folder: destination.folder, fileName: name,
+                                          existing: try await store.documents())
+        let record = try await store.importPDF(data: data, source: source, pageCount: pdf.pageCount)
+        recordImport { $0.recordImported(documentID: record.id, fileName: source.filename, hash: record.source.sha256) }
+    }
+
+    private func recordImport(_ change: (inout ImportRegistry) -> Void) {
+        guard let importRegistryURL else { return }
+        var registry = ImportRegistry.load(from: importRegistryURL)
+        change(&registry)
+        try? registry.save(to: importRegistryURL)
+    }
+
+    /// The SHA-256 of every PDF imported either way, so the sync never downloads one from the Mac's Imports folder
+    /// twice.
+    nonisolated static func knownImportHashes(_ url: URL?) -> Set<ContentHash> {
+        url.map { ImportRegistry.load(from: $0).knownHashes } ?? []
+    }
+
+    /// PDFs from the Mac's Ember Slate Imports folder that a sync downloaded (EP165): each becomes a new notebook in
+    /// the "Imports" subject, named after its file on the Mac. A copy that is not a usable PDF is dropped and not
+    /// asked for again. The download's transport copies are removed once filed.
+    func fileMacImports(_ offers: [ImportOffer], from folder: LibrarySyncFolder) async {
+        guard !offers.isEmpty else { return }
+        while isImporting {
+            guard (try? await Task.sleep(for: .milliseconds(100))) != nil else { return }
+        }
+        isImporting = true
+        var refused: [String] = []
+        for offer in offers {
+            let url = folder.importURL(for: offer.sha256)
+            guard let data = try? Data(contentsOf: url) else { continue }
+            if let pdf = PDFDocument(data: data), !pdf.isLocked, pdf.pageCount > 0,
+               let source = try? PDFImport.source(subject: PDFImport.importsSubject, folder: [], fileName: offer.name,
+                                                  existing: (try? await store.documents()) ?? []) {
+                guard (try? await store.importPDF(data: data, source: source, pageCount: pdf.pageCount)) != nil else { continue }
+            } else {
+                refused.append(PDFDocument(data: data)?.isLocked == true ? Self.protectedMessage(offer.name) : Self.notPDFMessage(offer.name))
+            }
+            recordImport { $0.recordReceived(hash: offer.sha256) }
+            folder.removeImport(offer.sha256)
+        }
+        isImporting = false
+        if !refused.isEmpty, errorMessage == nil { showError(refused.joined(separator: " ")) }
         await refresh()
     }
 
@@ -554,7 +705,7 @@ final class LibraryController: ObservableObject {
             // Saves every open page's ink before anything is filed.
             try await flush()
             outcome = await applyLibraryDelivery()
-            let items = try InboxScanner.items(in: inbox)
+            let items = try InboxScanner.items(in: inbox).filter { !claimedInboxPaths.contains(Self.claimKey($0.url)) }
             for item in items {
                 do {
                     let data = try await CoordinatedPDFReader.read(item.url)

@@ -91,7 +91,8 @@ public final class InkBackupStore: WirePutReceiver, @unchecked Sendable {
     // MARK: WirePutReceiver
 
     public func begin(metadata: Data, size: UInt64, hash: ContentHash) throws -> (any WirePutSink)? {
-        guard let header = try? InkBackupHeader.decode(metadata) else { throw WirePutRefusal.rejected }
+        // An imported PDF belongs in the Imports folder (EP165), never among the backups.
+        guard let header = try? InkBackupHeader.decode(metadata), header.kind != .imported else { throw WirePutRefusal.rejected }
         let folder = root.appendingPathComponent(Self.folderName(header.subject), isDirectory: true)
             .appendingPathComponent(Self.folderName(header.paper), isDirectory: true)
         return try lock.withLock {

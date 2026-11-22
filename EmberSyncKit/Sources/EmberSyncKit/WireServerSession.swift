@@ -321,8 +321,18 @@ public struct WireServerSession: Sendable {
         return true
     }
 
+    /// The manifest as this peer may see it: the imports list (EP165) only for a version-6 iPad, so an older iPad gets
+    /// exactly the bytes it always did and its digest still matches the manifest it files.
+    private func servedManifestJSON() throws -> Data {
+        var manifest = try provider.manifest()
+        if case .ready(let version) = phase, version < WireProtocol.importsVersion, manifest.imports != nil {
+            manifest = try manifest.with(imports: nil)
+        }
+        return try ManifestCodec.encode(manifest)
+    }
+
     private func serveManifest(_ id: WireRequestID, _ out: inout WireServerOutput) {
-        guard let json = try? ManifestCodec.encode(provider.manifest()) else {
+        guard let json = try? servedManifestJSON() else {
             return out.outbound.append(.error(id, .unavailable))
         }
         guard json.count <= Int(peerMaxManifestBytes) else { return out.outbound.append(.error(id, .manifestTooLarge)) }
@@ -332,7 +342,7 @@ public struct WireServerSession: Sendable {
     /// The SHA-256 of exactly the bytes `serveManifest` would send now. The manifest is read afresh, as for
     /// GET_MANIFEST, so a new Prepare changes the answer at once.
     private func serveDigest(_ id: WireRequestID, _ out: inout WireServerOutput) {
-        guard let json = try? ManifestCodec.encode(provider.manifest()) else {
+        guard let json = try? servedManifestJSON() else {
             return out.outbound.append(.error(id, .unavailable))
         }
         out.outbound.append(.digest(id, sha256: .digest(json)))

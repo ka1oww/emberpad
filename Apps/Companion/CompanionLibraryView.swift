@@ -58,6 +58,9 @@ struct CompanionSettingsContent: View {
     var backupMessage: String?
     var onChooseBackupFolder: () -> Void = {}
     var onShowBackupFolder: () -> Void = {}
+    /// EP165: the Ember Slate Imports folder, PDFs imported on the iPad and PDFs to send to it.
+    var importsFolder: URL?
+    var onShowImportsFolder: () -> Void = {}
     var loginItem: CompanionLoginItemState = .off
     var loginItemMessage: String?
     var onSetOpenAtLogin: (Bool) -> Void = { _ in }
@@ -291,6 +294,22 @@ struct CompanionSettingsContent: View {
             if let backupMessage {
                 Text(backupMessage).font(.system(size: 11)).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if let importsFolder {
+                HStack(spacing: 6) {
+                    Image(systemName: "tray.and.arrow.down").font(.system(size: 11))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Imported PDFs").font(.system(size: 12, weight: .semibold))
+                        Text(importsFolder.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                .padding(.top, 4)
+                Text("PDFs imported on the iPad are copied here. Drop a PDF here to send it to the iPad.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Show in Finder", action: onShowImportsFolder).buttonStyle(.link).font(.system(size: 11))
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
