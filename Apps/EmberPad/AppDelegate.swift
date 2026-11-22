@@ -39,6 +39,12 @@ final class AppEnvironment {
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        // EP166: before any ink, so PencilKit's record save never holds the live ink back.
+        PencilKitRecord.holdOffSaves()
+        return true
+    }
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         let external = session.role == .windowExternalDisplayNonInteractive
