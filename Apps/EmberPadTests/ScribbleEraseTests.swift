@@ -513,7 +513,7 @@ final class ScribbleEraseTests: XCTestCase {
 
     private static func canvas(_ controller: PDFOverlayPageController, _ session: DocumentSession) throws -> PKCanvasView {
         let pdfPage = try XCTUnwrap(session.pdf.page(at: 0))
-        return try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: pdfPage) as? PageInkView)?.canvas)
+        return try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: pdfPage) as? PageOverlayView)?.inkView.canvas)
     }
 
     private func makeController() async throws -> (PDFOverlayPageController, DocumentSession) {

@@ -10,8 +10,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// Internal, not private, so the EP-15 external-display screenshot test can scroll and zoom it.
     let pdfView = PageHitTestPDFView()
     private(set) var canvases: [Int: PKCanvasView] = [:]
-    /// Each live canvas's page view (EP-49), held here as well as by PDFKit so a canvas always keeps its page space.
-    private var pageViews: [Int: PageInkView] = [:]
+    /// Each live canvas's page view (EP-49), in the overlay PDFKit holds (EP164), held here as well as by PDFKit so a
+    /// canvas always keeps its page space.
+    private var pageViews: [Int: PageOverlayView] = [:]
     private weak var activeCanvas: PKCanvasView?
     /// EP151: a page a touch landed on, readied for the Pencil before UIKit says whether the touch is the Pencil.
     private weak var armedCanvas: PKCanvasView?
@@ -433,8 +434,9 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.isOpaque = false
     }
 
-    /// The overlay is a `PageInkView` holding the page's canvas, so PDFKit can size it freely while the canvas inside
-    /// keeps its own zoom (EP-49). Returning the canvas itself would let PDFKit reset that zoom on layout.
+    /// The overlay holds a `PageInkView` holding the page's canvas, so PDFKit can size it freely while the canvas
+    /// inside keeps its own zoom (EP-49). Returning the canvas itself would let PDFKit reset that zoom on layout. The
+    /// overlay keeps the ink view upright on a turned page (EP164, `PageOverlayView`).
     func pdfView(_ view: PDFView, overlayViewFor page: PDFPage) -> UIView? {
         let index = session.pdf.index(for: page)
         guard index != NSNotFound else { return nil }
@@ -459,21 +461,22 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             canvas.map { self?.strokesDown.contains(ObjectIdentifier($0)) ?? false } ?? false
         }
         canvases[index] = canvas
-        pageViews[index] = pageView
+        let overlay = PageOverlayView(inkView: pageView)
+        pageViews[index] = overlay
         pdfView.visibleCanvases = Array(canvases.values)
         updateCanvasInput()
-        return pageView
+        return overlay
     }
 
     func pdfView(_ pdfView: PDFView, willDisplayOverlayView overlayView: UIView, for page: PDFPage) {
         // While a scroll's page change waits to settle, the settle focuses the page instead.
-        if let canvas = (overlayView as? PageInkView)?.canvas, session.pdf.index(for: page) == currentPage, !pageSettlePending {
+        if let canvas = (overlayView as? PageOverlayView)?.inkView.canvas, session.pdf.index(for: page) == currentPage, !pageSettlePending {
             focus(canvas)
         }
     }
 
     func pdfView(_ pdfView: PDFView, willEndDisplayingOverlayView overlayView: UIView, for page: PDFPage) {
-        guard let canvas = (overlayView as? PageInkView)?.canvas else { return }
+        guard let canvas = (overlayView as? PageOverlayView)?.inkView.canvas else { return }
         // Saving already happened through the model delegate; this callback only releases views.
         let index = session.pdf.index(for: page)
         if canvases[index] === canvas { landInkEdits() }
@@ -1397,7 +1400,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             return
         }
         inkScaleWaitsForPencil = false
-        for pageView in pageViews.values { pageView.setPDFScale(pdfView.scaleFactor) }
+        for pageView in pageViews.values { pageView.inkView.setPDFScale(pdfView.scaleFactor) }
     }
 
     private func showLaserDot(at point: CGPoint) {
