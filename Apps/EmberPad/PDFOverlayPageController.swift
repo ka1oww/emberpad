@@ -101,7 +101,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private(set) var recoveredInk: [RecoveredInk] = []
     /// EP98: the strokes the latest landing on `page` gave an undo step of their own before PencilKit had made its
     /// own for them, and the watch for PencilKit's steps, made late, which then take back only those strokes or
-    /// nothing, and are dropped. The watch ends after `lateInkStepWait`; the strokes are remembered until their
+    /// nothing, and are dropped. The watch's plain wait is `lateInkStepWait`, and past it only while steps are still owed (EP168); the strokes are remembered until their
     /// late steps are dropped, by the idle watch or by the page's next landing, however long after (EP107).
     private var lateInkSteps: LateInkSteps?
     private struct LateInkSteps {
@@ -2352,7 +2352,7 @@ extension PDFOverlayPageController {
     /// PencilKit makes them within a few turns, or a little longer on a slow device; once PencilKit is idle again,
     /// each that takes back only those strokes, or nothing, is dropped (`undoStep`, `dropEmptySteps`). If more ink is
     /// waiting by then, that landing's pops drop it instead.
-    /// EP107: the watch ends after `lateInkStepWait`, but the strokes are still remembered for the page's next
+    /// EP107: the watch's plain wait ends after `lateInkStepWait` (EP168 extends it below), but the strokes are still remembered for the page's next
     /// landing. While the writing never pauses, landings come about 4 s apart (twice that on the CI runner), and a
     /// late step that arrived while the next strokes waited is met only by that landing. Forgotten by then, it was
     /// kept as a step that took a landed stroke back, and the landing's own change of the drawing left it a step that
