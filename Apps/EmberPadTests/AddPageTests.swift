@@ -223,7 +223,58 @@ final class AddPageTests: XCTestCase {
         choice.save(to: defaults)
         let loaded = AddPageChoice.load(from: defaults)
         XCTAssertEqual(loaded.position, .last)
-        XCTAssertEqual(loaded.recent, [ruled, .a3Squared])
+        XCTAssertEqual(loaded.recent, [ruled, .a3Squared, .a4Squared])
         XCTAssertEqual(PaperTemplate.a3Squared.title, "A3 · Squared")
+    }
+
+    /// EP163: A4 squared is as easy to add as A3 squared: one tap in the recent row, straight after A3 squared, which
+    /// stays first and is still the paper the next page takes.
+    func testAddPageOffersA4SquaredBesideA3SquaredFromTheFirstRun() {
+        let defaults = UserDefaults(suiteName: "AddPageTests-\(UUID().uuidString)")!
+        var choice = AddPageChoice.load(from: defaults)
+        XCTAssertEqual(choice.recent, [.a3Squared, .a4Squared], "the first run offers A3 squared, then A4 squared")
+        XCTAssertEqual(choice.current, .a3Squared, "A3 squared is still the paper the next page takes")
+        XCTAssertEqual(PaperTemplate.a4Squared, PaperTemplate(kind: .squared, size: .a4, orientation: .portrait, color: .white))
+        XCTAssertEqual(PaperTemplate.a4Squared.pageSize, CGSize(width: 595, height: 842))
+        XCTAssertEqual(PaperTemplate.a4Squared.title, "A4 · Squared")
+        choice.used(.a4Squared)
+        XCTAssertEqual(choice.recent, [.a4Squared, .a3Squared], "using A4 squared makes it current and keeps A3 squared")
+        choice.save(to: defaults)
+        XCTAssertEqual(AddPageChoice.load(from: defaults).recent, [.a4Squared, .a3Squared])
+    }
+
+    /// EP163: a choice saved before A4 squared was offered gains it once, straight after its current paper, keeping
+    /// every paper it had in its order, its position and its current paper. Once pushed out by use, it stays out.
+    func testAChoiceSavedBeforeA4SquaredGainsItOnceKeepingItsPapers() throws {
+        let defaults = UserDefaults(suiteName: "AddPageTests-\(UUID().uuidString)")!
+        func paper(_ kind: String, _ size: String, _ orientation: String = "portrait") -> String {
+            #"{"kind":"\#(kind)","size":"\#(size)","orientation":"\#(orientation)","color":"white"}"#
+        }
+        // A full row, saved before EP163: no A4 squared and no record of having offered it.
+        let saved = #"{"position":"last","recent":["# + [paper("ruled", "a5"), paper("squared", "a3"), paper("dotted", "a4"),
+                                                         paper("squared", "a3", "landscape")].joined(separator: ",") + "]}"
+        defaults.set(Data(saved.utf8), forKey: AddPageChoice.defaultsKey)
+        let ruledA5 = PaperTemplate(kind: .ruled, size: .a5)
+        let dottedA4 = PaperTemplate(kind: .dotted, size: .a4)
+        let a3Landscape = PaperTemplate(kind: .squared, size: .a3, orientation: .landscape)
+        var loaded = AddPageChoice.load(from: defaults)
+        XCTAssertEqual(loaded.recent, [ruledA5, .a4Squared, .a3Squared, dottedA4, a3Landscape],
+                       "A4 squared joins straight after the current paper, and no saved paper is lost")
+        XCTAssertEqual(loaded.current, ruledA5, "the current paper stays current")
+        XCTAssertEqual(loaded.position, .last)
+        loaded.save(to: defaults)
+        XCTAssertEqual(AddPageChoice.load(from: defaults), loaded, "offered once: loading again changes nothing")
+
+        // Pushed out of the row by use, it does not come back.
+        for kind in PaperTemplate.Kind.allCases { loaded.used(PaperTemplate(kind: kind, size: .a5)) }
+        XCTAssertFalse(loaded.recent.contains(.a4Squared))
+        loaded.save(to: defaults)
+        XCTAssertFalse(AddPageChoice.load(from: defaults).recent.contains(.a4Squared), "it was offered once only")
+
+        // A saved row that already has A4 squared keeps its order.
+        let withA4 = #"{"position":"after","recent":["# + [paper("squared", "a3"), paper("ruled", "a4"), paper("squared", "a4")]
+            .joined(separator: ",") + "]}"
+        defaults.set(Data(withA4.utf8), forKey: AddPageChoice.defaultsKey)
+        XCTAssertEqual(AddPageChoice.load(from: defaults).recent, [.a3Squared, PaperTemplate(kind: .ruled, size: .a4), .a4Squared])
     }
 }

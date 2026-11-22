@@ -24,6 +24,8 @@ public struct PaperTemplate: Codable, Hashable, Sendable {
 
     /// The captain's paper: A3 squared, portrait, white.
     public static let a3Squared = PaperTemplate(kind: .squared, size: .a3)
+    /// A4 squared, portrait, white: offered beside A3 squared in Add Page (EP163).
+    public static let a4Squared = PaperTemplate(kind: .squared, size: .a4)
 
     /// The page size in PDF points (1/72 in), orientation applied.
     public var pageSize: CGSize {

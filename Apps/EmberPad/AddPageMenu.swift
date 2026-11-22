@@ -40,13 +40,15 @@ extension PageInsertPosition {
 }
 
 /// The remembered Add Page choice: where pages go and the paper used most recently, first. First run is the
-/// captain's: A3 squared, after the page in view.
+/// captain's: A3 squared, after the page in view, with A4 squared one tap away beside it (EP163).
 struct AddPageChoice: Codable, Equatable {
     static let defaultsKey = "addPage.v1"
     static let recentLimit = 4
 
     var position: PageInsertPosition = .after
-    var recent: [PaperTemplate] = [.a3Squared]
+    var recent: [PaperTemplate] = [.a3Squared, .a4Squared]
+    /// EP163: A4 squared has been put in `recent` once. nil in a choice saved before EP163, which gains it on load.
+    var offeredA4Squared: Bool? = true
 
     /// The paper the next page takes: the one used last.
     var current: PaperTemplate { recent.first ?? .a3Squared }
@@ -59,8 +61,17 @@ struct AddPageChoice: Codable, Equatable {
 
     static func load(from defaults: UserDefaults = .standard) -> AddPageChoice {
         guard let data = defaults.data(forKey: defaultsKey),
-              let choice = try? JSONDecoder().decode(AddPageChoice.self, from: data), !choice.recent.isEmpty else { return AddPageChoice() }
+              var choice = try? JSONDecoder().decode(AddPageChoice.self, from: data), !choice.recent.isEmpty else { return AddPageChoice() }
+        if choice.offeredA4Squared != true { choice.offerA4Squared() }
         return choice
+    }
+
+    /// EP163: a choice saved before A4 squared was offered gains it once, straight after the paper the next page takes,
+    /// keeping every paper it had and which comes first. Used papers push it along and out as any other.
+    mutating func offerA4Squared() {
+        offeredA4Squared = true
+        guard !recent.contains(.a4Squared) else { return }
+        recent.insert(.a4Squared, at: min(1, recent.count))
     }
 
     func save(to defaults: UserDefaults = .standard) {
