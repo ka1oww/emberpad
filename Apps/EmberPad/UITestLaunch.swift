@@ -4,8 +4,8 @@ import UIKit
 
 #if DEBUG
 /// Debug builds only: what `EmberPadUITests` launches the app with. A launch with `-EmberPadUITestWorksheet` starts
-/// from a fresh library holding one synthetic worksheet, filed from the Inbox as any loose PDF is, with the tool row
-/// and Teacher copy panel in their first-launch places. Nothing here runs without that argument, and Release builds
+/// from a fresh library holding one synthetic worksheet, filed from the Inbox as any loose PDF is, with the tool row,
+/// Teacher copy panel and Add Page choice in their first-launch places. Nothing here runs without that argument, and Release builds
 /// do not contain it.
 enum UITestLaunch {
     static let worksheetArgument = "-EmberPadUITestWorksheet"
@@ -40,7 +40,7 @@ enum UITestLaunch {
         let inbox = documents.appendingPathComponent("Inbox", isDirectory: true)
         try? files.removeItem(at: inbox)
         for key in [ToolState.defaultsKey, LastWorksheet.defaultsKey, TeacherCopyCardState.defaultsKey, ReadingPositions.defaultsKey,
-                    NotebookTabStore.defaultsKey] {
+                    NotebookTabStore.defaultsKey, AddPageChoice.defaultsKey] {
             UserDefaults.standard.removeObject(forKey: key)
         }
         if arguments.contains(notebooksArgument) {
