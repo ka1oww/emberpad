@@ -1816,6 +1816,7 @@ extension PDFOverlayPageController {
     private func setDrawing(_ drawing: PKDrawing, page: Int) {
         inkSelection.pageDidChange(page)
         if let canvas = canvases[page] {
+            (canvas.superview as? PageInkView)?.pageDrawingReplaced(by: drawing)
             isReplacingStroke = true
             canvas.drawing = drawing
             isReplacingStroke = false

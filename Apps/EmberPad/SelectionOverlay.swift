@@ -696,6 +696,9 @@ final class InkSelectionController {
         let box = selection.box.applying(offset)
         self.selection = InkSelection(page: selection.page, indices: indices, box: box, outline: selection.outline)
         overlay.show(box, outline: selection.outline, on: canvas)
+        // The copy is what a drag now moves (EP162): the lift made ready for the original drew the original, so
+        // dragging the copy showed the original's ink 20 points off the copy, and left it there after the drop.
+        readyLift()
     }
 
     /// Removes the selected ink as one undo step.
