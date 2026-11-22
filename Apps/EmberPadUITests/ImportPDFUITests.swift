@@ -32,10 +32,24 @@ final class ImportPDFUITests: XCTestCase {
         importButton.tap()
         XCTAssertFalse(app.textFields["Class folder"].waitForExistence(timeout: 2), "no class form before the picker")
 
-        chooseInFilesPicker(name: "Synthetic Import")
+        let openTappedAt = chooseInFilesPicker(name: "Synthetic Import")
 
         let imported = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Synthetic Import")).firstMatch
-        let appeared = imported.waitForExistence(timeout: 30)
+        // The system picker can drop the Open tap on a loaded simulator, so while it is still up after a short settle
+        // Open is tapped again, all inside the same 30 s window measured from the first tap.
+        let open = app.buttons["Open"]
+        var appeared = false
+        var retaps = 0
+        while true {
+            let remaining = 30 - Date().timeIntervalSince(openTappedAt)
+            if remaining <= 0 { appeared = imported.exists; break }
+            if imported.waitForExistence(timeout: min(3, remaining)) { appeared = true; break }
+            if open.exists && open.isEnabled {
+                retaps += 1
+                print("ImportPDFUITests: picker still up after Open, re-tapping Open (attempt \(retaps))")
+                open.tap()
+            }
+        }
         var importMessage = "the PDF is a notebook in the folder being viewed"
         if !appeared {
             attach("import wait failed")
@@ -56,7 +70,8 @@ final class ImportPDFUITests: XCTestCase {
 
     /// Picks the file called `name` in the system Files picker's On My iPad › Ember Slate folder and opens it. The
     /// picker remembers where it was last, so each step is taken only when it is still needed.
-    private func chooseInFilesPicker(name: String) {
+    @discardableResult
+    private func chooseInFilesPicker(name: String) -> Date {
         let file = app.cells["\(name), pdf"]
         let appFolder = app.cells["Ember Slate, Container"]
         let onMyIPad = app.cells["DOC.sidebar.item.On My iPad"]
@@ -75,7 +90,12 @@ final class ImportPDFUITests: XCTestCase {
             _ = open.waitForExistence(timeout: 5)
         }
         XCTAssertTrue(open.isEnabled, "the PDF is chosen")
+        // A loaded simulator can show Open before it will take the tap.
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true AND isHittable == true"), object: open)
+        _ = XCTWaiter().wait(for: [ready], timeout: 15)
         open.tap()
+        return Date()
     }
 
     /// What the screen shows, for the failure message when the imported notebook never appears (CI uploads no xcresult).
