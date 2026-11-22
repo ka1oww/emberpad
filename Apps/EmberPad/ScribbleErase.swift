@@ -10,7 +10,8 @@ import Foundation
 /// - **Shape** (`passes(of:)`): the stroke turns back on itself along one axis at least twice (three passes), the
 ///   passes going back over the same ground. A quick scrub of three passes over one word is enough; so are a zigzag,
 ///   slanted or upright, tight or loose, and loops along a word. One letter can have this shape too (m, n, u, w), so
-///   the shape alone never erases anything.
+///   the shape alone never erases anything. A circle, oval or loop drawn round ink, which also turns back twice along
+///   any axis once it closes, is not this shape: it turns the same way every time and stays in one place (EP161).
 /// - **Ink** (`erasedIndices(scribble:near:)`): the scribble goes through ink. A stroke goes, whole, when the
 ///   scribble crosses it (not only near one end of it) and at least half of it is near the scribble's line and
 ///   within its reach (a third or so when four or more passes cross it, as a tall letter under a thin scrub). So
@@ -166,11 +167,62 @@ enum ScribbleErase {
     /// points can lean as a whole (three passes of a slanted or two-peak zigzag, or a tall one as wide as it is high),
     /// which tilts the principal axes far enough that every pass seems to drift sideways. The scribble then stopped
     /// being one for a few samples and became one again, so its outline went off and on while it was drawn.
+    ///
+    /// A stroke that goes round and round in one place is no scribble (EP161): a circle, oval or loop drawn round ink,
+    /// closed or carried on past where it started, read along one axis turns back twice too, and then everything it
+    /// went round was erased (`goesRoundInPlace`).
     static func passes(of points: [CGPoint]) -> [[CGPoint]]? {
         guard points.count >= 8, let axes = principalAxes(of: points) else { return nil }
         let level = CGVector(dx: 1, dy: 0), upright = CGVector(dx: 0, dy: 1)
-        return mostPasses(points, axes: [(axes.0, axes.1), (axes.1, axes.0)])
-            ?? mostPasses(points, axes: [(level, upright), (upright, level)])
+        guard let passes = mostPasses(points, axes: [(axes.0, axes.1), (axes.1, axes.0)])
+            ?? mostPasses(points, axes: [(level, upright), (upright, level)]),
+            !goesRoundInPlace(passes) else { return nil }
+        return passes
+    }
+
+    /// A loop's every turn turns the same way by at least this: the sine of the angle it turns through, from the
+    /// middle of the pass before it to the middle of the pass after. A long flat oval round a line of writing turns
+    /// about 0.25 at each end; a scrub's hairpin turns are less, and a scrub's turns go one way and then the other.
+    static let firmTurn: CGFloat = 0.1
+    /// Loops along a word move along at least this much of how wide a loop is that way, from the first loop to the
+    /// last (at least 2.3 in the EP90 fixtures); a circle or oval gone round again, or a spiral, stays in place (at
+    /// most 0.3 round ink).
+    static let loopProgress: CGFloat = 0.8
+
+    /// Whether the passes go round one way, as a circle, oval or loop drawn round something does, without moving
+    /// along. A zigzag or a scrub turns one way at one end and the other way at the other; loops along a word (a
+    /// cursive "llllll") turn one way every time too, but each loop is further along than the one before.
+    static func goesRoundInPlace(_ passes: [[CGPoint]]) -> Bool {
+        guard passes.count >= 3 else { return false }
+        var ways = Set<Bool>()
+        for (incoming, outgoing) in zip(passes, passes.dropFirst()) {
+            let turn = incoming[incoming.count - 1], from = incoming[incoming.count / 2], to = outgoing[outgoing.count / 2]
+            let u = CGVector(dx: turn.x - from.x, dy: turn.y - from.y), v = CGVector(dx: to.x - turn.x, dy: to.y - turn.y)
+            let lengths = hypot(u.dx, u.dy) * hypot(v.dx, v.dy)
+            guard lengths > 0 else { return false }
+            let sine = (u.dx * v.dy - u.dy * v.dx) / lengths
+            guard abs(sine) >= firmTurn else { return false }
+            ways.insert(sine > 0)
+        }
+        // Every turn the same way.
+        guard ways.count == 1 else { return false }
+        // Each loop is a pass and the next: how far the loops' middles move apart, against how wide a loop is that way.
+        let loops = zip(passes, passes.dropFirst()).map { $0 + $1.dropFirst() }
+        let middles = loops.map { loop in
+            CGPoint(x: loop.reduce(0) { $0 + $1.x } / CGFloat(loop.count), y: loop.reduce(0) { $0 + $1.y } / CGFloat(loop.count))
+        }
+        var moved: CGFloat = 0, way = CGVector(dx: 1, dy: 0)
+        for (i, a) in middles.enumerated() {
+            for b in middles[(i + 1)...] where hypot(b.x - a.x, b.y - a.y) > moved {
+                moved = hypot(b.x - a.x, b.y - a.y)
+                way = CGVector(dx: (b.x - a.x) / moved, dy: (b.y - a.y) / moved)
+            }
+        }
+        let widths = loops.map { loop in
+            let along = loop.map { dot($0, way) }
+            return (along.max() ?? 0) - (along.min() ?? 0)
+        }
+        return moved < loopProgress * median(widths)
     }
 
     /// Of the scribbles `points` make along each (axis, across) pair, the one with the most passes.
