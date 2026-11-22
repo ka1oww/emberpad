@@ -35,7 +35,12 @@ final class ImportPDFUITests: XCTestCase {
         chooseInFilesPicker(name: "Synthetic Import")
 
         let imported = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Synthetic Import")).firstMatch
-        XCTAssertTrue(imported.waitForExistence(timeout: 30), "the PDF is a notebook in the folder being viewed")
+        let appeared = imported.waitForExistence(timeout: 30)
+        let importMessage = appeared
+            ? "the PDF is a notebook in the folder being viewed"
+            : "the PDF is a notebook in the folder being viewed\n" + screenReport()
+        if !appeared { attach("import wait failed") }
+        XCTAssertTrue(appeared, importMessage)
         XCTAssertTrue(existing.exists, "the folder's worksheet is still there beside it")
         let unfiled = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Unfiled")).firstMatch
         XCTAssertFalse(unfiled.exists, "no Unfiled subject was made for the import")
@@ -68,6 +73,28 @@ final class ImportPDFUITests: XCTestCase {
         }
         XCTAssertTrue(open.isEnabled, "the PDF is chosen")
         open.tap()
+    }
+
+    /// What the screen shows, for the failure message when the imported notebook never appears (CI uploads no xcresult).
+    private func screenReport() -> String {
+        func labels(_ query: XCUIElementQuery) -> [String] {
+            query.allElementsBoundByIndex.prefix(40).map { $0.label }
+        }
+        let tree = app.debugDescription
+        let trimmedTree = tree.count > 6000 ? String(tree.prefix(6000)) + "\n…(trimmed)" : tree
+        return """
+        --- screen report ---
+        alerts: \(labels(app.alerts))
+        alert texts: \(labels(app.alerts.staticTexts))
+        sheets: \(labels(app.sheets))
+        static texts: \(labels(app.staticTexts))
+        buttons: \(labels(app.buttons))
+        navigation bars: \(app.navigationBars.allElementsBoundByIndex.prefix(10).map { $0.identifier })
+        picker still up: Open exists=\(app.buttons["Open"].exists), Cancel exists=\(app.buttons["Cancel"].exists)
+        UI Test heading exists=\(app.staticTexts["UI Test"].exists || app.navigationBars["UI Test"].exists)
+        --- app.debugDescription ---
+        \(trimmedTree)
+        """
     }
 
     private func attach(_ name: String) {
