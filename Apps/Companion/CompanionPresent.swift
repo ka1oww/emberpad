@@ -37,10 +37,11 @@ enum PresentFrameCommit {
 /// unless another is chosen), or a normal window when the Mac has no other display. The window opens when the iPad
 /// starts presenting and closes when it stops. While it is up the Mac's display does not sleep.
 ///
-/// The teacher can leave the presentation from the Mac at any time (EP127, `PresentWindowController`). That hides only
-/// the Mac's window, as **Exit presentation** in the menu always has: the iPad keeps presenting (its switch is the
-/// iPad's own, and a dropped link would only reconnect), the window stays hidden while it does, **Show presentation**
-/// brings it back, and the next Present from the iPad shows it again.
+/// The teacher can leave the presentation from the Mac at any time (EP127, `PresentWindowController`). That closes the
+/// Mac's window and, since EP172, tells the iPad, which turns Present on Mac off by itself and says "Presentation ended
+/// on your Mac", so an iPad forgotten after the lesson does not keep presenting. A link that is down at that moment, or
+/// an iPad from before EP172, is not told and keeps presenting as before: the window stays hidden while it does,
+/// **Show presentation** brings it back, and the next Present from the iPad shows it again.
 @MainActor
 final class CompanionPresentModel: ObservableObject {
     static let displayKey = "EmberPadCompanion.presentDisplayName"
@@ -137,11 +138,13 @@ final class CompanionPresentModel: ObservableObject {
     var screenName: String? { targetScreen()?.localizedName }
 
     /// Leaves the presentation on the Mac (Esc, the Exit control, **Exit presentation**): closes the window until the
-    /// iPad presents again or **Show presentation**. The iPad is not told; it keeps presenting.
+    /// iPad presents again or **Show presentation**, and tells the iPad to stop presenting (EP172). A lesson recording
+    /// is left as it is: the Mac keeps recording until **End lesson**, as when the iPad stops presenting by itself.
     func hide() {
         hidden = true
         window.close()
         releaseSleep()
+        host.end()
     }
 
     func show() {
@@ -1666,7 +1669,7 @@ struct CompanionPresentBanner: View {
                 }
                 Spacer(minLength: 8)
                 Button("Exit presentation") { model.hide() }
-                    .help("Hides the presentation on this Mac. The iPad keeps presenting; Show presentation brings it back.")
+                    .help("Ends the presentation: the iPad stops presenting too.")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)

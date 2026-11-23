@@ -153,11 +153,13 @@ public struct PresentEncoder: Sendable {
 
     public var awaitingReset: Bool { needsReset }
 
-    /// The first update on a new link: it carries nothing, and the Mac answers `ready`.
+    /// The first update on a new link: it carries nothing but that this iPad stops when the Mac's teacher closes the
+    /// presentation (EP172), and the Mac answers `ready`.
     public mutating func open(now: TimeInterval) -> PresentOutgoing {
         needsReset = true
         var update = PresentUpdate(seq: nextSeq(now: now))
         update.open = true
+        update.takesEnd = true
         update.time = now
         return PresentOutgoing(update: update)
     }
