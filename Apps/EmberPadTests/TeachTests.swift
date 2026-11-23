@@ -481,7 +481,7 @@ final class TeachTests: XCTestCase {
 
     private static func canvas(_ controller: PDFOverlayPageController, _ session: DocumentSession, page: Int) throws -> PKCanvasView {
         let pdfPage = try XCTUnwrap(session.pdf.page(at: page))
-        return try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: pdfPage) as? PageInkView)?.canvas)
+        return try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: pdfPage) as? PageOverlayView)?.inkView.canvas)
     }
 
     private static func penStroke(_ points: [CGPoint]) -> PKStroke {

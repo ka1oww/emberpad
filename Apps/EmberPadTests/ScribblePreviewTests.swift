@@ -430,7 +430,7 @@ final class ScribblePreviewTests: XCTestCase {
     private func makePage() async throws -> (PDFOverlayPageController, PKCanvasView, UndoManager) {
         let (controller, session) = try await makeController()
         let pdfPage = try XCTUnwrap(session.pdf.page(at: 0))
-        let canvas = try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: pdfPage) as? PageInkView)?.canvas)
+        let canvas = try XCTUnwrap((controller.pdfView(PDFView(), overlayViewFor: pdfPage) as? PageOverlayView)?.inkView.canvas)
         controller.focus(canvas)
         let undo = UndoManager()
         undo.groupsByEvent = false
