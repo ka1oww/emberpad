@@ -175,14 +175,15 @@ final class InkSelectionController {
 
     // MARK: - Selecting
 
-    /// Selects the strokes on `page` at least half inside `lasso`. With no
+    /// Selects the strokes on `page` at least half inside `lasso`, and the lines and shapes EmberPad drew with any part
+    /// inside it (EP162, `LassoGeometry.isMadeLine`). With no
     /// stroke inside, a lasso round the worksheet's printed content selects
     /// that area for Teach (EP153). Returns false, leaving nothing selected,
     /// when neither is inside.
     @discardableResult
     func select(page: Int, lasso: [CGPoint]) -> Bool {
         guard let host, let canvas = host.canvases[page] else { return false }
-        let indices = LassoGeometry.selectedIndices(in: canvas.drawing, lasso: lasso)
+        let indices = LassoGeometry.selectedIndices(in: canvas.drawing, lasso: lasso, linesByAnyPart: true)
         if indices.isEmpty, host.canTeach(page: page, lasso: lasso) { return showArea(page: page, lasso: lasso) }
         return show(indices, page: page, outline: lasso)
     }
@@ -273,7 +274,7 @@ final class InkSelectionController {
         let strokes = canvas.drawing.strokes
         let loop = LassoGeometry.drawingPoints(of: strokes[strokeCount - 1])
         let rest = PKDrawing(strokes: Array(strokes.dropLast()))
-        let indices = LassoGeometry.selectedIndices(in: rest, lasso: loop)
+        let indices = LassoGeometry.selectedIndices(in: rest, lasso: loop, linesByAnyPart: true)
         guard !indices.isEmpty else { return false }
         liftedLoop = nil
         host.isReplacingStroke = true
@@ -696,6 +697,9 @@ final class InkSelectionController {
         let box = selection.box.applying(offset)
         self.selection = InkSelection(page: selection.page, indices: indices, box: box, outline: selection.outline)
         overlay.show(box, outline: selection.outline, on: canvas)
+        // The copy is what a drag now moves (EP162): the lift made ready for the original drew the original, so
+        // dragging the copy showed the original's ink 20 points off the copy, and left it there after the drop.
+        readyLift()
     }
 
     /// Removes the selected ink as one undo step.

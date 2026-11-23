@@ -457,6 +457,10 @@ final class PageInkView: UIView {
         var given = 0
         /// Where the lifted strokes draw, in page points, before any move.
         var bounds: CGRect = .null
+        /// The lifted strokes, and the points along them checked for their ink on the page, in page points before any
+        /// move (EP162).
+        var strokes: Set<InkStrokeID> = []
+        var checkPoints: [CGPoint] = []
         /// PencilKit has drawn the strokes (reported it, or been given `livePenRenderPatience` to), and what waits for it.
         var drawn = false
         var waiting: [() -> Void] = []
@@ -482,6 +486,8 @@ final class PageInkView: UIView {
         let generation = liftGeneration
         lift.generation = generation
         lift.bounds = strokes.reduce(CGRect.null) { $0.union($1.renderBounds) }
+        lift.strokes = Set(strokes.map(InkStrokeID.init))
+        lift.checkPoints = Self.checkPoints(of: strokes)
         lift.drawn = false
         lift.waiting = []
         hide(lift)
@@ -515,8 +521,19 @@ final class PageInkView: UIView {
     /// Shows lift `generation` in place of the selected ink, moved by `moved`. `strokes`, the selected ink as the page
     /// held it, are cut out of the page until it has redrawn each tile since `tiles`, taken before the page was given
     /// its drawing without them.
+    ///
+    /// An earlier lift of the same ink still showing it where it was last dropped goes at once (EP162): from now on
+    /// this lift shows that ink, and the page no longer does. Left up, it kept the ink at each place it had been
+    /// dropped on for as long as the page went on changing, so moving a selection again and again left a copy behind
+    /// at every place it had been.
     func pickUpLift(_ generation: Int, moved: CGAffineTransform, cutting strokes: [PKStroke], since tiles: PageTiles) {
         guard let lift = lifts.first(where: { $0.generation == generation }) else { return }
+        let cut = Set(strokes.map(InkStrokeID.init))
+        let place = strokes.reduce(CGRect.null) { $0.union($1.renderBounds) }
+        for earlier in lifts where earlier !== lift && earlier.dropped != nil && !earlier.strokes.isDisjoint(with: cut) {
+            // Only where it shows them now: a copy (Duplicate) has the same strokes somewhere else.
+            if Self.samePlace(earlier.bounds.applying(earlier.moved), place) { finishDrop(earlier) }
+        }
         lift.shown = true
         lift.dropped = nil
         CATransaction.begin()
@@ -632,6 +649,12 @@ final class PageInkView: UIView {
     }
 
     /// Hides each dropped lift once the page has redrawn every tile under it, and masks it off those redrawn so far.
+    ///
+    /// A tile the page did not have at the drop counts once it shows the lift's ink there (EP162). PencilKit makes
+    /// tiles only where the page has ink, so ink dropped on empty paper lands on a tile made after the drop, which no
+    /// seed taken then can tell redrawn: the lift stayed up over it until the drop's patience ran out, and with every
+    /// further move restarting that patience, a moved selection showed twice. Its pixels are read, not its redraw
+    /// taken as proof (EP113); one that cannot be read counts, as it could only be there for a drawing since the drop.
     private func checkDroppedLifts(_ tiles: [Tile]) {
         let now = CACurrentMediaTime()
         for lift in lifts {
@@ -642,7 +665,11 @@ final class PageInkView: UIView {
             }
             let bounds = lift.bounds.applying(lift.moved).insetBy(dx: -1, dy: -1)
             let under = tiles.filter { $0.frame.intersects(bounds) }
-            let redrawn = under.filter { tile in seeds[ObjectIdentifier(tile.layer)].map { $0 != tile.seed } ?? false }
+            let points = lift.checkPoints.map { $0.applying(lift.moved) }
+            let redrawn = under.filter { tile in
+                if let seed = seeds[ObjectIdentifier(tile.layer)] { return seed != tile.seed }
+                return points.allSatisfy { point in !tile.frame.contains(point) || (showsInk(at: point, in: tile) ?? Self.cannotBeRead(tile)) }
+            }
             if !under.isEmpty, redrawn.count == under.count {
                 finishDrop(lift)
             } else if !redrawn.isEmpty {
@@ -651,10 +678,31 @@ final class PageInkView: UIView {
         }
     }
 
+    /// The page is given `drawing` other than by the selection: an undo or redo, or Clear All Ink. A dropped lift whose
+    /// ink `drawing` no longer holds where the lift shows it goes at once (EP162): a move undone just after its drop
+    /// otherwise left the moved ink showing over the page until the drop's patience ran out, as nothing the page drew
+    /// would ever be under it.
+    func pageDrawingReplaced(by drawing: PKDrawing) {
+        for lift in lifts where lift.dropped != nil {
+            let held = drawing.strokes.filter { lift.strokes.contains(InkStrokeID($0)) }
+            let place = held.reduce(CGRect.null) { $0.union($1.renderBounds) }
+            if held.count != lift.strokes.count || !Self.samePlace(lift.bounds.applying(lift.moved), place) {
+                finishDrop(lift)
+            }
+        }
+    }
+
+    /// Whether two places of the same ink match, to within a point.
+    private static func samePlace(_ a: CGRect, _ b: CGRect) -> Bool {
+        guard !a.isNull, !b.isNull else { return false }
+        return abs(a.minX - b.minX) <= 1 && abs(a.minY - b.minY) <= 1 && abs(a.maxX - b.maxX) <= 1 && abs(a.maxY - b.maxY) <= 1
+    }
+
     private func finishDrop(_ lift: Lift) {
         lift.dropped = nil
         lift.shown = false
         lift.generation = 0
+        lift.strokes = []
         hide(lift)
     }
 
