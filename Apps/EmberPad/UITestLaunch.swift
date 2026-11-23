@@ -31,6 +31,21 @@ enum UITestLaunch {
     /// for a test to import through the system Files picker.
     static let importPDFArgument = "-EmberPadUITestImportPDF"
     static let importTitle = "Synthetic Import"
+    /// Launched with this as well, Import PDF hands the synthetic PDF straight to the import, as the Files picker's
+    /// success case does. CI simulators' file provider cannot deliver a picked file, so the real picker cannot be
+    /// walked there; the import itself still can.
+    static let importViaHookArgument = "-EmberPadUITestImportViaHook"
+
+    /// The synthetic PDF's URL when the import hook is on, else nil.
+    static var importHookURL: URL? {
+        guard ProcessInfo.processInfo.arguments.contains(importViaHookArgument),
+              let documents = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
+        else { return nil }
+        return documents.appendingPathComponent("\(importTitle).pdf")
+    }
+
+    /// True under any UI-test import launch, so the library shows the picker-callback marker.
+    static var showsPickerCallbacks: Bool { ProcessInfo.processInfo.arguments.contains(importPDFArgument) }
 
     /// Call before the library opens.
     static func prepareIfRequested() {

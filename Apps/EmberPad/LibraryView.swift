@@ -23,6 +23,10 @@ struct LibraryView: View {
     private let signingExpiryDate: Date?
     @ObservedObject var sync: SyncClient
     @State private var showImport = false
+    #if DEBUG
+    /// UI tests only: how many times the fileImporter completion has run.
+    @State private var pickerCallbacks = 0
+    #endif
     @State private var showPairing = false
     @State private var confirmForget = false
     /// EP145: the Photos picker for the projector backdrop.
@@ -95,11 +99,22 @@ struct LibraryView: View {
         // EP165: Import PDF opens the Files picker straight away, PDFs only, several at once, like GoodNotes'
         // Import; each PDF becomes a notebook in the folder being viewed.
         .fileImporter(isPresented: $showImport, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
+            #if DEBUG
+            pickerCallbacks += 1
+            #endif
             switch result {
             case .success(let urls): Task { await library.importPDFs(urls) }
             case .failure(let error): library.showError(error.localizedDescription)
             }
         }
+        #if DEBUG
+        .overlay(alignment: .topLeading) {
+            if UITestLaunch.showsPickerCallbacks {
+                Text("\(pickerCallbacks)").font(.system(size: 1)).opacity(0.01).frame(width: 1, height: 1)
+                    .accessibilityIdentifier("UITestPickerCallbacks")
+            }
+        }
+        #endif
         .sheet(isPresented: $showPairing) { PairingScannerSheet(pairing: pairing, presentation: presentation) }
         .modifier(StudentBackdropPicker(backdrop: presentation.backdrop, isPresented: $showBackdropPicker))
         .confirmationDialog("Forget this Mac?", isPresented: $confirmForget, titleVisibility: .visible) {
@@ -116,6 +131,17 @@ struct LibraryView: View {
         .onChange(of: library.documents) { _, documents in navigator.keepTabs(documents) }
         .onAppear { navigator.columns.sizeClassChanged(to: horizontalSizeClass) }
         .onChange(of: horizontalSizeClass) { _, sizeClass in navigator.columns.sizeClassChanged(to: sizeClass) }
+    }
+
+    /// Opens the Files picker. UI tests launched with the import hook hand the synthetic PDF over instead.
+    private func startImport() {
+        #if DEBUG
+        if let url = UITestLaunch.importHookURL {
+            Task { await library.importPDFs([url]) }
+            return
+        }
+        #endif
+        showImport = true
     }
 
     // MARK: - Sidebar
@@ -252,7 +278,7 @@ struct LibraryView: View {
                 if library.isImporting {
                     ProgressView()
                 } else {
-                    Button("Import PDF", systemImage: "plus") { showImport = true }
+                    Button("Import PDF", systemImage: "plus") { startImport() }
                 }
             }
         }
@@ -499,7 +525,7 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.text2)
                 .multilineTextAlignment(.center)
             if !library.showingArchived {
-                Button("Import PDF") { showImport = true }
+                Button("Import PDF") { startImport() }
                     .font(.system(.body, weight: .semibold))
                     .padding(.horizontal, 20).padding(.vertical, 10)
                     .background(Theme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
