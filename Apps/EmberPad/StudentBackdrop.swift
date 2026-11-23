@@ -60,12 +60,10 @@ struct StudentBackdropStore: Sendable {
     func install(_ data: Data) throws {
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let decoded = Self.decode(source, maxPixelSize: Self.maximumPixelSize) else { throw Failure.unreadable }
-        var folder = url.deletingLastPathComponent()
+        let folder = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         // The folder, and so the picture in it, stays out of iCloud and computer backups: it never leaves this iPad.
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try folder.setResourceValues(values)
+        try Self.excludeFromBackup(folder)
         let staged = folder.appendingPathComponent(".\(Self.fileName).\(UUID().uuidString)", isDirectory: false)
         defer { try? FileManager.default.removeItem(at: staged) }
         let isJPEG = (CGImageSourceGetType(source) as String?) == UTType.jpeg.identifier
@@ -78,6 +76,26 @@ struct StudentBackdropStore: Sendable {
             guard CGImageDestinationFinalize(destination) else { throw Failure.unreadable }
         }
         _ = try FileManager.default.replaceItemAt(url, withItemAt: staged)
+    }
+
+    /// Keeps the backdrop's folder out of iCloud and computer backups when a picture is there, however it got there
+    /// (EP171): `install(_:)` marks the folder, but a picture copied into the app's container from a Mac, or restored
+    /// with it, sits in a folder nobody marked. With no picture it does nothing, and never makes the folder. Cheap: it
+    /// reads one attribute, and writes it only when the folder is not marked yet. A failure is ignored; the next look
+    /// tries again.
+    func keepOutOfBackups() {
+        guard exists else { return }
+        let folder = url.deletingLastPathComponent()
+        let marked = try? folder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup
+        guard marked != true else { return }
+        try? Self.excludeFromBackup(folder)
+    }
+
+    private static func excludeFromBackup(_ folder: URL) throws {
+        var folder = folder
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try folder.setResourceValues(values)
     }
 
     /// Removes the backdrop, so the student scene shows the Ember star alone again. Nothing to remove is not an error.
@@ -128,6 +146,8 @@ final class StudentBackdropModel: ObservableObject {
         self.store = store
         self.display = display
         hasBackdrop = store.exists
+        // At launch: a picture put there without the picker is kept out of backups from now on (EP171).
+        if hasBackdrop { store.keepOutOfBackups() }
     }
 
     /// A projector's student scene connected: read the backdrop for a display `longestPixelSide` pixels across.
@@ -183,6 +203,7 @@ final class StudentBackdropModel: ObservableObject {
         generation += 1
         let present = store.exists
         hasBackdrop = present
+        if present { store.keepOutOfBackups() }
         guard present, let decodeSize else {
             display.backdrop = nil
             isLoaded = true

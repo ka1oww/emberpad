@@ -158,6 +158,58 @@ final class StudentBackdropTests: XCTestCase {
         XCTAssertTrue(path.hasSuffix("Library/Application Support/Backdrop/Projector Backdrop.jpg"), path)
     }
 
+    private func isExcludedFromBackup(_ folder: URL) throws -> Bool? {
+        // A fresh URL each time: URL caches resource values it has read.
+        try URL(fileURLWithPath: folder.path, isDirectory: true).resourceValues(forKeys: [.isExcludedFromBackupKey])
+            .isExcludedFromBackup
+    }
+
+    private func markIncludedInBackup(_ folder: URL) throws {
+        var folder = folder
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = false
+        try folder.setResourceValues(values)
+    }
+
+    /// EP171: a picture put in the Backdrop folder some other way than **Choose picture…** (copied into the app's
+    /// container from a Mac, or restored with it) is kept out of backups too, once the app finds it: at launch and
+    /// whenever the backdrop is read again.
+    func testABackdropPutThereWithoutThePickerIsKeptOutOfBackupsWhenFound() throws {
+        let backdropFolder = store.url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: backdropFolder, withIntermediateDirectories: true)
+        try picture(type: .jpeg).write(to: store.url)
+        XCTAssertEqual(try isExcludedFromBackup(backdropFolder), false, "a new folder is backed up until the app marks it")
+
+        // At launch.
+        let display = StudentDisplayModel()
+        let model = StudentBackdropModel(store: store, display: display)
+        XCTAssertTrue(model.hasBackdrop)
+        XCTAssertEqual(try isExcludedFromBackup(backdropFolder), true, "marked when the app starts and finds it")
+
+        // Whenever it is read again, as when a projector connects.
+        try markIncludedInBackup(backdropFolder)
+        model.displayConnected(longestPixelSide: 1_920)
+        XCTAssertEqual(try isExcludedFromBackup(backdropFolder), true, "marked when the backdrop is read again")
+        waitForBackdrop(model)
+        XCTAssertEqual(display.backdrop?.width, 1_600, "and shown as before")
+
+        try markIncludedInBackup(backdropFolder)
+        model.reload()
+        XCTAssertEqual(try isExcludedFromBackup(backdropFolder), true)
+        waitForBackdrop(model)
+    }
+
+    /// EP171: with no backdrop, looking for one creates nothing.
+    func testLookingForABackdropThatIsNotThereCreatesNoFolder() throws {
+        let backdropFolder = store.url.deletingLastPathComponent()
+        let model = StudentBackdropModel(store: store, display: StudentDisplayModel())
+        model.displayConnected(longestPixelSide: 1_920)
+        model.reload()
+        model.displayDisconnected()
+        XCTAssertFalse(model.hasBackdrop)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backdropFolder.path), "no Backdrop folder is made")
+    }
+
     // MARK: The model
 
     private func waitForBackdrop(_ model: StudentBackdropModel, file: StaticString = #filePath, line: UInt = #line) {
