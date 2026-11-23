@@ -378,7 +378,8 @@ final class StudentBackdropTests: XCTestCase {
 
         let teacher = try StudentMirrorFixture.session(.teacher, pages: 1, root: folder.appendingPathComponent("teacher"))
         model.opened(teacher.record)
-        spin(0.2)
+        // EP170: the placeholder fades in over the backdrop, which goes once it is in.
+        spin(ProjectorTiming.backdropFade + 0.4)
         XCTAssertEqual(model.presented.screen, .teacherCopyPrivate)
         XCTAssertTrue(backdropViews(in: window).isEmpty)
 
