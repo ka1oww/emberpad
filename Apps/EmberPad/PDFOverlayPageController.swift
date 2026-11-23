@@ -834,12 +834,13 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        guard !readOnly else { return }
         tools.handlePencil(UIPencilInteraction.preferredTapAction, gesture: .doubleTap)
     }
 
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
         // Act once, when the squeeze completes.
-        guard squeeze.phase == .ended else { return }
+        guard squeeze.phase == .ended, !readOnly else { return }
         tools.handlePencil(UIPencilInteraction.preferredSqueezeAction, gesture: .squeeze)
     }
 

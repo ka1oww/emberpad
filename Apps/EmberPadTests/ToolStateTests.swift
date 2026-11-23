@@ -234,9 +234,10 @@ final class ToolStateTests: XCTestCase {
             (.switchPrevious, .pen, .highlighter, .select(.highlighter)),
             (.switchPrevious, .eraser, .pen, .select(.pen)),
             (.switchPrevious, .pen, .pen, .none),
-            (.showColorPalette, .pen, .pen, .openSettings),
-            (.showInkAttributes, .highlighter, .pen, .openSettings),
-            (.showContextualPalette, .eraser, .pen, .openSettings),
+            // EP169: the iPad's palette choices open the tool palette, no longer the tool's settings popover.
+            (.showColorPalette, .pen, .pen, .openPalette),
+            (.showInkAttributes, .highlighter, .pen, .openPalette),
+            (.showContextualPalette, .eraser, .pen, .openPalette),
             (.ignore, .pen, .eraser, .none),
             (.runSystemShortcut, .pen, .eraser, .none),
         ]
@@ -268,11 +269,13 @@ final class ToolStateTests: XCTestCase {
         XCTAssertEqual(tools.toast?.text, "Partial eraser · Pencil squeeze")
     }
 
-    func testPaletteActionsOpenTheCurrentToolsSettingsWithoutSwitching() {
+    /// EP169: the iPad's palette double-tap choices open the tool palette beside its button, not the tool's settings.
+    func testPaletteActionsOpenTheToolPaletteWithoutSwitching() {
         let tools = ToolState(defaults: defaults)
         tools.select(.highlighter)
         tools.handlePencil(.showColorPalette, gesture: .doubleTap)
-        XCTAssertEqual(tools.settingsTool, .highlighter)
+        XCTAssertTrue(tools.paletteOpen)
+        XCTAssertNil(tools.settingsTool)
         XCTAssertEqual(tools.current, .highlighter)
         XCTAssertNil(tools.toast)
     }

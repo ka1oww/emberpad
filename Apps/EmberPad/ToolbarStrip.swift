@@ -359,7 +359,7 @@ private struct EraserModeButton: View {
     }
 }
 
-private struct ColorDot: View {
+struct ColorDot: View {
     let hex: String
     let highlighter: Bool
     let selected: Bool
@@ -408,11 +408,16 @@ struct ToolSettingsPopover: View {
                     Toggle("Circle to lasso", isOn: Binding(get: { tools.settings.circleToLasso }, set: tools.setCircleToLasso))
                     Toggle("Scribble to erase",
                            isOn: Binding(get: { tools.settings.scribbleToErase }, set: tools.setScribbleToErase))
-                    TaggedRow(title: "Pencil double-tap", tag: "iPad Settings")
+                    // EP169: the eraser by default, following the iPad's own Apple Pencil setting, or the tool palette.
+                    Picker("Pencil double-tap",
+                           selection: Binding(get: { tools.settings.pencilDoubleTap }, set: tools.setPencilDoubleTap)) {
+                        ForEach(PencilDoubleTap.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.menu)
                 } header: {
                     Text("Pen gestures")
                 } footer: {
-                    Text("Hold the Pencil still for half a second at the end of a line and it snaps straight. Circle ink with the pen, then hold still, or lift and press the circle, to select it. Scribble back and forth over ink to erase it.")
+                    Text("Hold the Pencil still for half a second at the end of a line and it snaps straight. Circle ink with the pen, then hold still, or lift and press the circle, to select it. Scribble back and forth over ink to erase it. Pencil double-tap opens the tool palette beside its round button when set to Tool palette.")
                 }
             case .highlighter:
                 colorSection(.highlighter)
