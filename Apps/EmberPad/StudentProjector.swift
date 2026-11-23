@@ -31,8 +31,8 @@ final class StudentProjector {
         let layers: [Layer]
         let serial: Int
         let fade: TimeInterval?
-
-        var animation: Animation? { fade.map { .easeInOut(duration: $0) } }
+        /// How the top layer fades in: `animation` for `fade`.
+        let animation: Animation?
     }
 
     private var stage = ProjectorStage()
@@ -49,6 +49,8 @@ final class StudentProjector {
     private let schedule: MirrorThrottle.Scheduler
     /// Asks the student scene to draw again: the grace or a fade ended.
     var redraw: () -> Void = {}
+    /// The animation a fade of the given length plays. Tests swap it for one that holds a fade part way through.
+    var animation: (TimeInterval) -> Animation = { .easeInOut(duration: $0) }
 
     init(now: @escaping () -> TimeInterval, schedule: @escaping MirrorThrottle.Scheduler) {
         self.now = now
@@ -86,7 +88,8 @@ final class StudentProjector {
             wake(at: time + duration, from: time)
         }
         drawn = top
-        return Frame(layers: below + [Layer(id: serial, picture: top)], serial: serial, fade: fade)
+        return Frame(layers: below + [Layer(id: serial, picture: top)], serial: serial, fade: fade,
+                     animation: fade.map(animation))
     }
 
     private func wake(at time: TimeInterval, from now: TimeInterval) {

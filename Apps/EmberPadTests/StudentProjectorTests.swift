@@ -281,11 +281,19 @@ final class StudentProjectorTests: XCTestCase {
         return Double(sum) / Double(width * height * 3 * 255)
     }
 
-    /// A switch cross-fades the new page in as one picture over the old one: the page is never dimmed mid-fade, as it
-    /// was when the incoming screen's black faded in over the old page part by part. Every frame of the fade is
-    /// sampled; the fade's timing does not matter, only that no frame of it is darker than either page.
+    /// A fade that stops halfway and stays there, so a test can look at the screen mid-fade for as long as it likes.
+    private struct HalfwayFade: CustomAnimation {
+        func animate<V: VectorArithmetic>(value: V, time: TimeInterval, context: inout AnimationContext<V>) -> V? {
+            value.scaled(by: 0.5)
+        }
+    }
+
+    /// A switch cross-fades the new page in as one picture over the old one: halfway through, the page is as bright
+    /// as before, not dimmed as it was when the incoming screen's black faded in over the old page part by part. The
+    /// fade is held at its halfway point, so what is checked does not depend on how fast the screen draws.
     func testASwitchCrossFadesWithoutDimmingThePage() throws {
         let model = model()
+        model.projector.animation = { _ in Animation(HalfwayFade()) }
         let first = try session("first"), second = try session("second")
         show(first, in: model)
         let window = try showScene(model)
@@ -298,19 +306,13 @@ final class StudentProjectorTests: XCTestCase {
         model.clear()
         spin(0.1)
         show(second, in: model)
-        var samples: [Double] = []
-        let end = Date().addingTimeInterval(ProjectorTiming.switchFade + 0.4)
-        while Date() < end {
-            samples.append(brightness(of: area, in: window))
-            RunLoop.main.run(until: Date().addingTimeInterval(1.0 / 60))
-        }
+        spin(0.3)
+        XCTAssertEqual(pageViews(in: window).count, 2, "halfway through the cross-fade: the old page and the new one")
+        let halfway = brightness(of: area, in: window)
+        XCTAssertGreaterThan(halfway, 0.97 * before, "the cross-fade does not dim the page (before \(before), halfway \(halfway))")
+
         advance(ProjectorTiming.switchFade)
         spin(0.2)
-        let after = brightness(of: area, in: window)
-        XCTAssertGreaterThan(after, 0.8, "the new page is drawn, white")
-        XCTAssertGreaterThanOrEqual(samples.count, 5)
-        let darkest = try XCTUnwrap(samples.min())
-        XCTAssertGreaterThan(darkest, 0.97 * min(before, after),
-                             "no frame of the cross-fade dims the page (before \(before), after \(after), samples \(samples))")
+        XCTAssertEqual(pageViews(in: window).count, 1, "the old page goes once the fade is over")
     }
 }
