@@ -63,8 +63,8 @@ jobs:
               -only-testing:EmberPadTests/ScribbleOutlineSteadyTests
               -only-testing:EmberPadTests/TeacherCopyCardTests
               -only-testing:EmberPadTests/InkStaysDrawnTests
-              -only-testing:EmberPadTests/MemoryStaysBoundedTests
               -only-testing:EmberPadUITests/ClearAllInkUITests
+              -only-testing:EmberPadUITests/ClearPageUITests
           - shard: 2
             selection: >-
               -only-testing:EmberPadTests/LibraryScreenshotTests
@@ -80,7 +80,7 @@ jobs:
               -only-testing:EmberPadTests/HoldToShapeTests
               -only-testing:EmberPadUITests/ToolbarFingerDragUITests
               -only-testing:EmberPadUITests/ToolbarFreeDragUITests
-              -only-testing:EmberPadUITests/ClearPageUITests
+              -only-testing:EmberPadTests/MemoryStaysBoundedTests
           - shard: 3
             selection: >-
               -skip-testing:EmberPadTests/PageToolsScreenshotTests
@@ -93,8 +93,8 @@ jobs:
               -skip-testing:EmberPadTests/ScribbleOutlineSteadyTests
               -skip-testing:EmberPadTests/TeacherCopyCardTests
               -skip-testing:EmberPadTests/InkStaysDrawnTests
-              -skip-testing:EmberPadTests/MemoryStaysBoundedTests
               -skip-testing:EmberPadUITests/ClearAllInkUITests
+              -skip-testing:EmberPadUITests/ClearPageUITests
               -skip-testing:EmberPadTests/LibraryScreenshotTests
               -skip-testing:EmberPadTests/EraserPreviewScreenshotTests
               -skip-testing:EmberPadTests/PageNavigationTests
@@ -112,7 +112,7 @@ jobs:
               -skip-testing:EmberPadUITests/ToolbarDragTrackingUITests
               -skip-testing:EmberPadUITests/ToolbarFingerDragUITests
               -skip-testing:EmberPadUITests/ToolbarFreeDragUITests
-              -skip-testing:EmberPadUITests/ClearPageUITests
+              -skip-testing:EmberPadTests/MemoryStaysBoundedTests
               -skip-testing:EmberPadUITests/NotebookTabsUITests
               -skip-testing:EmberPadTests/DeviceDrawingStressTests
               -skip-testing:EmberPadTests/DevicePresentLatencyTests
