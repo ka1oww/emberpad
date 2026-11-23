@@ -463,7 +463,7 @@ struct EditorScreen: View {
                 if let session { InkSaveBanner(session: session) }
             }
             // EP169: a touch on the header while the tool palette is open only closes it.
-            .overlay { if tools.paletteOpen { PencilPaletteDismissShield { tools.closePalette() } } }
+            .overlay { if showsTools && tools.paletteOpen { PencilPaletteDismissShield { tools.closePalette() } } }
             // EP101: the tool palette floats over the page (see `pageArea`), so the page keeps the whole worksheet.
             pageArea
         }
