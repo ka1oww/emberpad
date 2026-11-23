@@ -241,6 +241,80 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         }
     }
 
+    /// EP168: with its run loop starved PencilKit makes those steps only once it is free again, which can be well after
+    /// the watch's wait (`lateInkStepWait`): on a loaded CI runner, with each turn 6 ms slower, up to 12 came after
+    /// it, stayed on top, and that many taps of undo in a row did nothing (132 steps for 120 strokes). The watch goes
+    /// on past its wait while any is owed and the page is as the landing left it, and drops each as it comes.
+    func testStepsPencilKitMakesLongAfterTheLandingForStrokesItThrewAwayAreDropped() async throws {
+        let (controller, session) = try await PenFeelTests.makeController()
+        let canvas = try PenFeelTests.canvas(controller, session)
+        controller.focus(canvas)
+        let undo = Self.pencilKitUndo(for: controller)
+        let stroke = Self.liveStroke(y: 100, at: 0)
+        Self.pencilKitStep(undo, on: canvas, removing: [stroke])
+        Self.commit(stroke, on: canvas, controller)
+        for n in 0..<2 { try Self.throwAway(n, on: canvas, controller) }
+        await InkSettle.settle()
+        XCTAssertEqual(canvas.drawing.strokes.count, 3, "the strokes are back on the page")
+        XCTAssertEqual(controller.emptyInkStepsOwed, 2, "PencilKit has not made its steps yet")
+        try await Self.waitPastTheLateStepWait()
+        for _ in 0..<2 { Self.pencilKitStep(undo, on: canvas, removing: []) }
+        await InkSettle.settle()
+        XCTAssertEqual(controller.emptyInkStepsOwed, 0, "both steps were met")
+        XCTAssertFalse(undo.canRedo, "the dropped steps leave no redo behind")
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 3, "every stroke is saved")
+        Self.assertOneUndoStepPerStroke(canvas, undo, count: 3, "steps made after the watch's wait")
+    }
+
+    /// EP168: past its wait the watch never tries (undoes and redoes) a step for new ink, nor takes one that is not
+    /// ink: a highlight written on the page ends it, and so does a step that changes no page, as a search field's
+    /// typing does, sharing the window's undo stack.
+    func testPastItsWaitTheWatchLeavesNewInkAndOtherStepsAlone() async throws {
+        for highlight in [true, false] {
+            let (controller, session) = try await PenFeelTests.makeController()
+            let canvas = try PenFeelTests.canvas(controller, session)
+            controller.focus(canvas)
+            let undo = Self.pencilKitUndo(for: controller)
+            let stroke = Self.liveStroke(y: 100, at: 0)
+            Self.pencilKitStep(undo, on: canvas, removing: [stroke])
+            Self.commit(stroke, on: canvas, controller)
+            try Self.throwAway(0, on: canvas, controller)
+            await InkSettle.settle()
+            XCTAssertEqual(controller.emptyInkStepsOwed, 1, "PencilKit owes a step")
+            try await Self.waitPastTheLateStepWait()
+            let undone = UndoCount()
+            let observer = NotificationCenter.default.addObserver(forName: .NSUndoManagerWillUndoChange, object: undo,
+                                                                  queue: nil) { _ in undone.count += 1 }
+            defer { NotificationCenter.default.removeObserver(observer) }
+            let label = highlight ? "a highlight" : "typing"
+            let token = NSObject()
+            undo.beginUndoGrouping()
+            if highlight {
+                let line = PKStroke(ink: PKInk(.marker, color: .yellow), path: stroke.path)
+                undo.registerUndo(withTarget: canvas) { canvas in
+                    MainActor.assumeIsolated { canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes.dropLast()) }
+                }
+                undo.setActionName("Added strokes")
+                Self.commit(line, on: canvas, controller)
+            } else {
+                undo.registerUndo(withTarget: token) { _ in }
+                undo.setActionName("Typing")
+            }
+            undo.endUndoGrouping()
+            await InkSettle.settle()
+            await InkSettle.turn()
+            XCTAssertEqual(undone.count, 0, "\(label): no step is tried")
+            XCTAssertEqual(undo.undoActionName, highlight ? "Added strokes" : "Typing", "\(label): its step is kept")
+            XCTAssertEqual(canvas.drawing.strokes.count, highlight ? 3 : 2, "\(label): the page is as written")
+            undo.removeAllActions(withTarget: token)
+        }
+    }
+
+    /// Waits until the idle watch's own wait for PencilKit's late steps has passed (EP168).
+    private static func waitPastTheLateStepWait() async throws {
+        try await Task.sleep(nanoseconds: UInt64((PDFOverlayPageController.lateInkStepWait + 0.3) * 1_000_000_000))
+    }
+
     /// EP146: a step PencilKit never makes is not waited for past the next landing, which drops only what is there.
     func testAStepPencilKitNeverMakesIsNotExpectedPastTheNextLanding() async throws {
         let (controller, session) = try await PenFeelTests.makeController()
