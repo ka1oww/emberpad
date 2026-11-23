@@ -265,10 +265,17 @@ public struct Manifest: Equatable, Codable, Sendable {
     public let version: Int
     public let generatedAt: Date
     public let files: [ManifestEntry]
+    /// EP165: the PDFs dropped into the Mac's Ember Slate Imports folder, which the iPad imports into its own Imports
+    /// folder. Outside the library: the planner never sees them, so they never archive, replace or pair anything.
+    /// Only a sync server at protocol version 6 adds them, and only for a version-6 iPad; it is never written to the
+    /// Outbox, so the nightly Inbox copy never carries it. Encoded only when present, so a manifest without it keeps
+    /// exactly the bytes it had.
+    public let imports: [ImportOffer]?
 
-    public init(version: Int = 1, generatedAt: Date, files: [ManifestEntry]) throws {
+    public init(version: Int = 1, generatedAt: Date, files: [ManifestEntry], imports: [ImportOffer]? = nil) throws {
         guard Self.supportedVersions.contains(version), generatedAt.timeIntervalSince1970.isFinite,
-              Set(files.map(\.source)).count == files.count else { throw LibraryError.invalidManifest }
+              Set(files.map(\.source)).count == files.count,
+              Set((imports ?? []).map(\.name)).count == (imports ?? []).count else { throw LibraryError.invalidManifest }
         if version == 1 {
             guard files.allSatisfy({ $0.publication == nil }) else { throw LibraryError.invalidManifest }
         } else {
@@ -278,13 +285,49 @@ public struct Manifest: Equatable, Codable, Sendable {
         self.version = version
         self.generatedAt = generatedAt
         self.files = files
+        self.imports = imports
     }
 
-    enum CodingKeys: String, CodingKey { case version, generatedAt, files }
+    /// The same manifest with `imports` in place of its own list.
+    public func with(imports: [ImportOffer]?) throws -> Manifest {
+        try Manifest(version: version, generatedAt: generatedAt, files: files, imports: imports)
+    }
+
+    enum CodingKeys: String, CodingKey { case version, generatedAt, files, imports }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(version: c.decode(Int.self, forKey: .version), generatedAt: c.decode(Date.self, forKey: .generatedAt),
-                      files: c.decode([ManifestEntry].self, forKey: .files))
+                      files: c.decode([ManifestEntry].self, forKey: .files),
+                      imports: c.decodeIfPresent([ImportOffer].self, forKey: .imports))
+    }
+}
+
+/// EP165: one PDF the Mac offers from its Ember Slate Imports folder. `name` is the file's own name there, a single
+/// path component; the iPad files it in its Imports folder under that name and fetches it by `sha256`.
+public struct ImportOffer: Equatable, Codable, Sendable {
+    public let name: String
+    public let sha256: ContentHash
+    public let size: Int64
+    public let modifiedAt: Date
+
+    public init(name: String, sha256: ContentHash, size: Int64, modifiedAt: Date) throws {
+        guard Self.isValidName(name), size > 0, modifiedAt.timeIntervalSince1970.isFinite else { throw LibraryError.invalidManifest }
+        self.name = name
+        self.sha256 = sha256
+        self.size = size
+        self.modifiedAt = modifiedAt
+    }
+
+    enum CodingKeys: String, CodingKey { case name, sha256, size, modifiedAt }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(name: c.decode(String.self, forKey: .name), sha256: c.decode(ContentHash.self, forKey: .sha256),
+                      size: c.decode(Int64.self, forKey: .size), modifiedAt: c.decode(Date.self, forKey: .modifiedAt))
+    }
+
+    /// One file name: a valid publication label that is also a safe single path component, not hidden.
+    static func isValidName(_ name: String) -> Bool {
+        Publication.isValidLabel(name) && !name.hasPrefix(".") && !name.contains("/") && !name.contains("\\")
     }
 }
 

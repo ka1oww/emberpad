@@ -68,6 +68,8 @@ struct CompanionSettingsView: View {
             backupMessage: sync.backupMessage,
             onChooseBackupFolder: { sync.chooseBackupFolder() },
             onShowBackupFolder: { sync.showBackupFolder() },
+            importsFolder: sync.imports.root,
+            onShowImportsFolder: { sync.showImportsFolder() },
             loginItem: loginItem.state,
             loginItemMessage: loginItem.message,
             onSetOpenAtLogin: { loginItem.setEnabled($0) },

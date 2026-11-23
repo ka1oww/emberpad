@@ -23,6 +23,10 @@ struct LibraryView: View {
     private let signingExpiryDate: Date?
     @ObservedObject var sync: SyncClient
     @State private var showImport = false
+    #if DEBUG
+    /// UI tests only: how many times the fileImporter completion has run.
+    @State private var pickerCallbacks = 0
+    #endif
     @State private var showPairing = false
     @State private var confirmForget = false
     /// EP145: the Photos picker for the projector backdrop.
@@ -92,7 +96,25 @@ struct LibraryView: View {
         .tint(Theme.tint)
         // EP129: the Mac's lesson recording, and EP152's Frozen badge, over every screen.
         .modifier(PresentLessonChrome(present: presentation.present, presentation: presentation))
-        .sheet(isPresented: $showImport) { ImportWorksheetView(library: library, isPresented: $showImport) }
+        // EP165: Import PDF opens the Files picker straight away, PDFs only, several at once, like GoodNotes'
+        // Import; each PDF becomes a notebook in the folder being viewed.
+        .fileImporter(isPresented: $showImport, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
+            #if DEBUG
+            pickerCallbacks += 1
+            #endif
+            switch result {
+            case .success(let urls): Task { await library.importPDFs(urls) }
+            case .failure(let error): library.showError(error.localizedDescription)
+            }
+        }
+        #if DEBUG
+        .overlay(alignment: .topLeading) {
+            if UITestLaunch.showsPickerCallbacks {
+                Text("\(pickerCallbacks)").font(.system(size: 1)).opacity(0.01).frame(width: 1, height: 1)
+                    .accessibilityIdentifier("UITestPickerCallbacks")
+            }
+        }
+        #endif
         .sheet(isPresented: $showPairing) { PairingScannerSheet(pairing: pairing, presentation: presentation) }
         .modifier(StudentBackdropPicker(backdrop: presentation.backdrop, isPresented: $showBackdropPicker))
         .confirmationDialog("Forget this Mac?", isPresented: $confirmForget, titleVisibility: .visible) {
@@ -109,6 +131,17 @@ struct LibraryView: View {
         .onChange(of: library.documents) { _, documents in navigator.keepTabs(documents) }
         .onAppear { navigator.columns.sizeClassChanged(to: horizontalSizeClass) }
         .onChange(of: horizontalSizeClass) { _, sizeClass in navigator.columns.sizeClassChanged(to: sizeClass) }
+    }
+
+    /// Opens the Files picker. UI tests launched with the import hook hand the synthetic PDF over instead.
+    private func startImport() {
+        #if DEBUG
+        if let url = UITestLaunch.importHookURL {
+            Task { await library.importPDFs([url]) }
+            return
+        }
+        #endif
+        showImport = true
     }
 
     // MARK: - Sidebar
@@ -212,7 +245,7 @@ struct LibraryView: View {
         .background(Theme.bg)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            // The system sidebar toggle is the only one; Import from Files lives only here (P2).
+            // The system sidebar toggle is the only one; Import PDF lives only here (P2).
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu(library.sortOrder.label) {
                     ForEach(LibrarySortOrder.allCases, id: \.self) { order in
@@ -245,7 +278,7 @@ struct LibraryView: View {
                 if library.isImporting {
                     ProgressView()
                 } else {
-                    Button("Import from Files", systemImage: "square.and.arrow.down") { showImport = true }
+                    Button("Import PDF", systemImage: "plus") { startImport() }
                 }
             }
         }
@@ -487,12 +520,12 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.text)
             Text(library.showingArchived
                  ? "Archived worksheets appear here."
-                 : "Import PDFs from Files and choose a class, or let the Mac drop them into the Inbox overnight.")
+                 : "Import a PDF with +, or let the Mac drop them into the Inbox overnight.")
                 .font(Theme.meta)
                 .foregroundStyle(Theme.text2)
                 .multilineTextAlignment(.center)
             if !library.showingArchived {
-                Button("Import from Files") { showImport = true }
+                Button("Import PDF") { startImport() }
                     .font(.system(.body, weight: .semibold))
                     .padding(.horizontal, 20).padding(.vertical, 10)
                     .background(Theme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -863,42 +896,6 @@ private struct LibraryCardCell: View {
         .task(id: ThumbnailCache.key(for: record)) {
             await thumbnails.thumbnail(for: record)
         }
-    }
-}
-
-struct ImportWorksheetView: View {
-    @ObservedObject var library: LibraryController
-    @Binding var isPresented: Bool
-    @State private var className = "Unfiled"
-    @State private var showPicker = false
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                TextField("Class folder", text: $className)
-                if !library.classes.isEmpty {
-                    Menu("Use existing class") { ForEach(library.classes, id: \.self) { name in Button(name) { className = name } } }
-                }
-                Button("Choose PDFs…") { showPicker = true }
-                    .disabled(className.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || library.isImporting)
-                if library.isImporting { ProgressView("Importing") }
-                if let error = library.errorMessage { Text(error).foregroundStyle(Theme.danger) }
-            }
-            .navigationTitle("Import worksheets")
-            .toolbar { Button("Close") { isPresented = false } }
-            .fileImporter(isPresented: $showPicker, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
-                switch result {
-                case .success(let urls): Task { await importFiles(urls) }
-                case .failure(let error): library.showError(error.localizedDescription)
-                }
-            }
-        }
-        .tint(Theme.tint)
-    }
-
-    func importFiles(_ urls: [URL]) async {
-        await library.importFiles(urls, className: className)
-        isPresented = false
     }
 }
 

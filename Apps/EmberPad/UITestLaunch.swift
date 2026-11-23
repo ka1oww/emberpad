@@ -27,6 +27,25 @@ enum UITestLaunch {
     /// pages that do not line up with them: a cover, then each question with its worked answer, two of them running on
     /// to a page of their own (see `answerKeyPages`).
     static let answerKeyArgument = "-EmberPadUITestAnswerKey"
+    /// EP165: launched with this as well, a synthetic PDF sits in the app's own Files folder (On My iPad › Ember Slate),
+    /// for a test to import through the system Files picker.
+    static let importPDFArgument = "-EmberPadUITestImportPDF"
+    static let importTitle = "Synthetic Import"
+    /// Launched with this as well, Import PDF hands the synthetic PDF straight to the import, as the Files picker's
+    /// success case does. CI simulators' file provider cannot deliver a picked file, so the real picker cannot be
+    /// walked there; the import itself still can.
+    static let importViaHookArgument = "-EmberPadUITestImportViaHook"
+
+    /// The synthetic PDF's URL when the import hook is on, else nil.
+    static var importHookURL: URL? {
+        guard ProcessInfo.processInfo.arguments.contains(importViaHookArgument),
+              let documents = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
+        else { return nil }
+        return documents.appendingPathComponent("\(importTitle).pdf")
+    }
+
+    /// True under any UI-test import launch, so the library shows the picker-callback marker.
+    static var showsPickerCallbacks: Bool { ProcessInfo.processInfo.arguments.contains(importPDFArgument) }
 
     /// Call before the library opens.
     static func prepareIfRequested() {
@@ -36,13 +55,16 @@ enum UITestLaunch {
         guard let support = try? files.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true),
               let documents = try? files.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         else { return }
-        for name in ["Library", "Sync", "Backup"] { try? files.removeItem(at: support.appendingPathComponent(name)) }
+        for name in ["Library", "Sync", "Backup", "Imports"] { try? files.removeItem(at: support.appendingPathComponent(name)) }
         let inbox = documents.appendingPathComponent("Inbox", isDirectory: true)
         try? files.removeItem(at: inbox)
         for key in [ToolState.defaultsKey, LastWorksheet.defaultsKey, TeacherCopyCardState.defaultsKey, ReadingPositions.defaultsKey,
                     NotebookTabStore.defaultsKey, AddPageChoice.defaultsKey] {
             UserDefaults.standard.removeObject(forKey: key)
         }
+        let importable = documents.appendingPathComponent("\(importTitle).pdf")
+        try? files.removeItem(at: importable)
+        if arguments.contains(importPDFArgument) { try? worksheet(heading: importTitle, pages: 1).write(to: importable) }
         if arguments.contains(notebooksArgument) {
             seedNotebooks(in: support.appendingPathComponent("Library", isDirectory: true))
             return

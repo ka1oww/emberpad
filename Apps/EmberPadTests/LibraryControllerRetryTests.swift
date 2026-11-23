@@ -137,9 +137,9 @@ final class LibraryControllerRetryTests: XCTestCase {
         let store = try LibraryStore(root: libraryRoot)
         let library = LibraryController(store: store, inbox: inbox)
 
-        await library.importFiles([failedFile], className: "Synthetic Class")
+        await library.importPDFs([failedFile], into: ImportDestination(subject: "Synthetic Class", folder: []))
         XCTAssertNotNil(library.errorMessage)
-        await library.importFiles([successfulFile], className: "Synthetic Class")
+        await library.importPDFs([successfulFile], into: ImportDestination(subject: "Synthetic Class", folder: []))
 
         XCTAssertNotNil(library.errorMessage)
         XCTAssertTrue(library.canRetryError)
@@ -150,7 +150,9 @@ final class LibraryControllerRetryTests: XCTestCase {
         XCTAssertEqual(library.documents.count, 2)
     }
 
-    func testFailedFilesImportDismissesSheetAndLeavesRetryableLibraryError() async throws {
+    /// EP165 removed the import sheet: the Files picker closes itself and the library imports straight away, so a
+    /// failed import is left as a retryable library error.
+    func testFailedFilesImportLeavesRetryableLibraryError() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
         try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
@@ -160,15 +162,8 @@ final class LibraryControllerRetryTests: XCTestCase {
         try Data("not a PDF".utf8).write(to: invalidPDF)
         let store = try LibraryStore(root: root.appendingPathComponent("Library", isDirectory: true))
         let library = LibraryController(store: store, inbox: inbox)
-        var isPresented = true
-        let sheet = ImportWorksheetView(
-            library: library,
-            isPresented: Binding(get: { isPresented }, set: { isPresented = $0 })
-        )
+        await library.importPDFs([invalidPDF])
 
-        await sheet.importFiles([invalidPDF])
-
-        XCTAssertFalse(isPresented)
         XCTAssertNotNil(library.errorMessage)
         XCTAssertTrue(library.canRetryError)
     }

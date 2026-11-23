@@ -17,6 +17,10 @@ import EmberSyncKit
 /// the foreground. It asks the Mac only for the SHA-256 of its prepared manifest (protocol version 3) and runs the
 /// sync above only when that differs from the manifest the library last filed. It shares the one sync slot, so a
 /// check and a sync never overlap, and it shows nothing: no phase, no notice, unless it starts a sync.
+///
+/// EP165: on the same connection, once the ink backup is sent, every PDF imported on the iPad goes to the Mac's
+/// Ember Slate Imports folder (protocol version 6), and PDFs dropped into that folder on the Mac come down with the
+/// library and are imported into the "Imports" subject. Neither ever affects whether the library sync is complete.
 @MainActor
 final class SyncClient: ObservableObject {
     enum Phase: Equatable {
@@ -107,6 +111,18 @@ final class SyncClient: ObservableObject {
 
     private func updateSyncing() { isSyncing = task != nil && !taskIsCheck }
 
+    /// A sync that was asked for while one ran: it runs once that one ends (EP165).
+    private var syncAgain = false
+
+    /// Syncs now, or straight after the sync in progress, so something just imported reaches the Mac (EP165).
+    func syncSoon() {
+        if let task, !task.isCancelled, !taskIsCheck {
+            syncAgain = true
+            return
+        }
+        sync()
+    }
+
     /// Starts a sync unless one is already running. Does nothing while the iPad is not paired. A quiet change check
     /// in progress is cancelled and the sync runs straight after it.
     func sync() {
@@ -121,11 +137,16 @@ final class SyncClient: ObservableObject {
             if !Task.isCancelled { _ = await self?.run(id) }
             guard let self, self.runID == id else { return }
             self.task = nil
+            if self.syncAgain, !Task.isCancelled {
+                self.syncAgain = false
+                self.sync()
+            }
         }
     }
 
     /// Stops the sync or check in progress when the app leaves the foreground. Verified PDFs stay for the next sync.
     func suspend() {
+        syncAgain = false
         task?.cancel()
         phase = .idle
         settledDigest = nil
@@ -248,14 +269,29 @@ final class SyncClient: ObservableObject {
                 InkBackupQueue(store: store, ledgerURL: ledger, serviceID: credential.serviceID,
                                flatten: FlattenedExport.backupRenderer(store: store))
             }
+            // EP165: PDFs imported here, for the Mac's Imports folder, with their own ledger beside the backup's.
+            let registry = library.importRegistryURL
+            var uploads: ImportUploadQueue?
+            if let backupLedger, let registry {
+                uploads = ImportUploadQueue(store: store, registryURL: registry,
+                                            ledgerURL: backupLedger.deletingLastPathComponent().appendingPathComponent("imports-ledger.json"),
+                                            serviceID: credential.serviceID)
+            }
+            let importUploads = uploads
+            let folder = folder
             let download = try await LibrarySyncDownloader(folder: folder).download(
                 over: transport, local: { try await store.documents() },
                 progress: { progress in Task { @MainActor [weak self] in self?.show(progress, id) } },
+                knownImports: registry.map { url in { LibraryController.knownImportHashes(url) } },
                 whileConnected: { [weak self] download in
                     // File and record the sync first, so nothing about the backup can hold the library up.
                     guard let self, await self.file(download, run: id) else { return nil }
+                    await self.library.fileMacImports(download.imports, from: folder)
                     guard let backup else { return nil }
                     await self.prepareBackup(run: id)
+                    if let importUploads, (download.macVersion ?? 0) >= WireProtocol.importsVersion {
+                        return ChainedBackupSource([backup, importUploads])
+                    }
                     return backup
                 })
             try Task.checkCancellation()

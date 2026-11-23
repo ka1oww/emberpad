@@ -30,7 +30,8 @@ struct LessonRecordingTests {
         // A version-4 Mac decodes the update with its fields ignored: a heartbeat with a document is still read.
         let legacy = try PropertyListDecoder().decode(LegacyUpdate.self, from: PresentCodec.encode(update))
         #expect(legacy.s == 4)
-        #expect(WireProtocol.supportedVersions.upperBound == WireProtocol.lessonVersion)
+        #expect(WireProtocol.supportedVersions.contains(WireProtocol.lessonVersion))
+        #expect(WireProtocol.supportedVersions.upperBound == WireProtocol.importsVersion)
     }
 
     @Test func theDocumentTravelsWithItsFrameAndACommandOncePerLink() throws {
