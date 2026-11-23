@@ -5,7 +5,8 @@ import EmberSyncKit
 
 extension StudentDisplayModel {
     /// The current presentation, described exactly as `StudentDisplayView` draws it: the frozen picture while the
-    /// class view is frozen (EP152).
+    /// class view is frozen (EP152). The screen as it is now: the transitions between screens (EP170) are each
+    /// projector's own, so the Mac is told the idle screen between two worksheets and holds the page itself.
     var presented: PresentedView { shown.presented }
 
     /// `presented` with its strokes in progress beside it instead of in it (EP142). See `StudentPicture.presentedParts`.

@@ -393,6 +393,7 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
     override init() {
         super.init()
         canvas.smoothsMotion = true
+        canvas.transitionsScreens = true
         content.install(canvas)
         content.onExit = { [weak self] in self?.onHide?() }
         canvas.onEscape = { [weak self] in self?.onHide?() }
@@ -785,6 +786,12 @@ final class PresentExitButton: NSButton {
 /// With a projector backdrop (EP131, `PresentBackdropStore`), the idle screen is the picture alone, full-bleed, and the
 /// Paused screen is the picture with a small, quiet "Paused" in the bottom-left corner, on a dark rounded badge so it
 /// reads on any picture. Without one they are the star alone on black and the large "Paused", as before.
+///
+/// The projector window's canvas moves between its screens as the iPad's own student scene does (EP170,
+/// `transitionsScreens`, `ProjectorStage`): a worksheet switch never shows the backdrop, as the canvas keeps the old
+/// worksheet's last page until the new one's first page arrives and cross-fades to it; a worksheet closed with
+/// nothing after it keeps its last page for the grace, then fades into the backdrop; a worksheet opened from the
+/// backdrop fades in over it. Paused comes and goes at once, as before.
 final class PresentCanvasView: NSView {
     var onEscape: (() -> Void)?
     /// The corner light; the lesson recording's copy of the canvas (EP129) has none.
@@ -829,6 +836,19 @@ final class PresentCanvasView: NSView {
     private var refreshLink: CADisplayLink?
     /// The played-back picture is still moving, so every display refresh redraws it.
     private(set) var isRefreshing = false
+    /// EP170: moves between screens through `ProjectorStage`: on for the projector window, off for a bare canvas and
+    /// the lesson recording's (EP129), which draw each screen as it comes.
+    var transitionsScreens = false
+    /// Whether the Mac's Reduce Motion is on: every fade is then a short plain dissolve.
+    var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    /// Runs `work` after `delay` seconds, for the end of the grace; tests run it themselves.
+    var schedule: (_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { work() } }
+    }
+    private var stage = ProjectorStage()
+    /// The key of the cross-fade on the canvas's layer while one plays: Core Animation keeps every transition under
+    /// this one key, so a new fade replaces one still playing.
+    static let fadeKey = kCATransition
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -956,6 +976,10 @@ final class PresentCanvasView: NSView {
             refresh(false)
         }
         let screen = scene?.presented(with: shown)?.screen ?? .idle
+        if transitionsScreens, !transition(to: screen, latest: latest) {
+            // The last worksheet page stays as it is drawn.
+            return layoutStatusDot()
+        }
         viewport.isHidden = true
         message.isHidden = true
         star.isHidden = true
@@ -969,6 +993,36 @@ final class PresentCanvasView: NSView {
         }
         if case .page = screen {} else { dropPages(keeping: []) }
         layoutStatusDot()
+    }
+
+    /// EP170: whether to draw `screen` now (false keeps the last worksheet page drawn), and the cross-fade to it, if any.
+    /// The latest frame laid out ahead of playback never moves the stage on.
+    private func transition(to screen: PresentedView.Screen, latest: Bool) -> Bool {
+        guard !latest else { return !stage.isHolding }
+        let now = clock(), wasHolding = stage.isHolding, before = stage.drawn
+        let kind: ProjectorStage.Screen = switch screen {
+        case .idle: .idle
+        case .paused: .paused
+        case .teacherCopyPrivate, .page: .worksheet
+        }
+        switch stage.show(kind, at: now) {
+        case .live:
+            // A change at once (Paused) ends any fade under way; the same screen drawn again lets it play on.
+            if stage.drawn != before { root.removeAnimation(forKey: Self.fadeKey) }
+            return true
+        case .hold:
+            if !wasHolding, let ends = stage.holdEnds {
+                schedule(max(0, ends - now)) { [weak self] in self?.redraw() }
+            }
+            return false
+        case .fade(let fade):
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = ProjectorTiming.duration(fade, reduceMotion: reduceMotion())
+            transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            root.add(transition, forKey: Self.fadeKey)
+            return true
+        }
     }
 
     private func show(message text: String) {

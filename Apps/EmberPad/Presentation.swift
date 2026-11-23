@@ -403,6 +403,12 @@ final class StudentDisplayModel: ObservableObject {
     private(set) var openDocument: PresentLessonDocument?
     private let now: () -> TimeInterval
     private let schedule: MirrorThrottle.Scheduler
+    /// EP170: how the student scene moves between its screens: no backdrop between two worksheets, and fades.
+    private(set) lazy var projector: StudentProjector = {
+        let projector = StudentProjector(now: now, schedule: schedule)
+        projector.redraw = { [weak self] in self?.objectWillChange.send() }
+        return projector
+    }()
 
     init(now: @escaping () -> TimeInterval = { CACurrentMediaTime() },
          schedule: @escaping MirrorThrottle.Scheduler = { delay, work in
@@ -800,9 +806,32 @@ final class PresentationState: ObservableObject {
 
 struct StudentDisplayView: View {
     @ObservedObject var model: StudentDisplayModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        // EP152: the frozen picture while the class view is frozen.
-        let picture = model.shown
+        // EP152: the frozen picture while the class view is frozen. EP170: drawn through the projector's transitions,
+        // so a worksheet switch keeps the old page up rather than showing the backdrop, and screens fade into each
+        // other. Each picture is drawn on its own black, so one fading in hides what is under it.
+        let frame = model.projector.frame(for: model.shown, reduceMotion: reduceMotion)
+        ZStack {
+            Color.black
+            ForEach(frame.layers) { layer in
+                StudentScreen(picture: layer.picture)
+                    // Each layer fades as one picture: without it SwiftUI fades its parts one by one, and the new
+                    // layer's half-faded black dims the page below mid-switch.
+                    .compositingGroup()
+                    // The newest fades in over the ones before, which stay as they are until it is in.
+                    .transition(.asymmetric(insertion: .opacity, removal: .identity))
+            }
+        }
+        .animation(frame.animation, value: frame.serial)
+        .ignoresSafeArea()
+    }
+}
+
+/// One picture of the student scene, on black.
+private struct StudentScreen: View {
+    let picture: StudentPicture
+    var body: some View {
         ZStack {
             Color.black
             if picture.paused {
@@ -818,7 +847,7 @@ struct StudentDisplayView: View {
                     if let backdrop = picture.backdrop { StudentBackdropScreen(image: backdrop) } else { StudentIdleMark() }
                 }
             }
-        }.ignoresSafeArea()
+        }
     }
 }
 
