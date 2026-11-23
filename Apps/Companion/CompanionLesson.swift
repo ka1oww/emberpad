@@ -767,8 +767,8 @@ final class CompanionLessonModel: ObservableObject {
     }
 
     /// The current file has saved media: any "not recording" warning ends where it started.
-    private func verify(_ recording: Recording) {
-        guard !recording.segmentProven, recording.segmentBytes > 0 else { return }
+    private func verify(_ recording: Recording, writer: LessonSegmentWriter) {
+        guard !recording.segmentProven, recording.segmentBytes > 0, writer.holdsPlayableMedia else { return }
         recording.segmentProven = true
         recording.anyProven = true
         recording.failures = 0
@@ -1081,7 +1081,7 @@ final class CompanionLessonModel: ObservableObject {
             if let problem = segmentProblem(recording, writer: writer, at: now, steady: steady) {
                 failSegment(recording, writer: writer, at: now, because: problem)
             } else {
-                verify(recording)
+                verify(recording, writer: writer)
             }
         } else if now >= recording.retryAt ?? now {
             resumeSegment(recording, at: now)
