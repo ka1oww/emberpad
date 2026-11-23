@@ -264,9 +264,39 @@ public final class LessonSegmentWriter: @unchecked Sendable {
     /// How far each track has been taken by the encoder, on the source clock; nil until its first sample.
     public var written: (audio: CMTime?, video: CMTime?) { lock.withLock { (audioWritten, lastVideo) } }
 
-    /// The bytes on disk so far. A fragmented MP4 has none until its first fragment closes, with both tracks in it.
+    /// The bytes on disk so far. The file type and the start of the media data can land before the first fragment
+    /// closes (`holdsPlayableMedia`).
     public var bytesOnDisk: Int {
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+    }
+
+    /// The file holds something a player can play.
+    public var holdsPlayableMedia: Bool { Self.holdsPlayableMedia(at: url) }
+
+    /// The MP4 at `url` holds something a player can play: its movie box (`moov`) is on disk. A fragmented MP4 writes
+    /// it when its first fragment closes, or at the finish. Before that the file can already hold bytes that nothing
+    /// plays: the file type and an open media box with the first frames, as when the picture reaches the disk before
+    /// the encoder refuses the first sound (EP150).
+    public static func holdsPlayableMedia(at url: URL) -> Bool {
+        guard let file = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? file.close() }
+        var offset: UInt64 = 0
+        while (try? file.seek(toOffset: offset)) != nil {
+            guard let header = try? file.read(upToCount: 16), header.count >= 8 else { return false }
+            let bytes = [UInt8](header)
+            if bytes[4..<8].elementsEqual("moov".utf8) { return true }
+            let number = { (range: Range<Int>) in range.reduce(UInt64(0)) { $0 << 8 | UInt64(bytes[$1]) } }
+            var size = number(0..<4)
+            // 1: the size follows as 64 bits. 0: the box runs to the end of the file, so no box comes after it.
+            if size == 1 {
+                guard bytes.count >= 16 else { return false }
+                size = number(8..<16)
+            }
+            let (next, overflow) = offset.addingReportingOverflow(size)
+            guard size >= 8, !overflow else { return false }
+            offset = next
+        }
+        return false
     }
 
     /// An error in words, with the code that names it, for the log.

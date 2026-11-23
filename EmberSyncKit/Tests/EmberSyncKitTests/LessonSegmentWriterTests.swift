@@ -55,6 +55,7 @@ struct LessonSegmentWriterTests {
 
         let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
         #expect(size > 10_000, "the file holds media: \(size) bytes")
+        #expect(LessonSegmentWriter.holdsPlayableMedia(at: url))
         let asset = AVURLAsset(url: url)
         let duration = try await asset.load(.duration).seconds
         #expect(abs(duration - 6) < 0.3, "\(duration) s")
@@ -111,6 +112,7 @@ struct LessonSegmentWriterTests {
         #expect(failure.contains("-11861") && failure.contains("-12651"), "\(failure)")
         #expect(writer.written.audio == nil, "no audio was taken")
         #expect(writer.bytesOnDisk == 0)
+        #expect(!writer.holdsPlayableMedia)
         #expect(await writer.finish(at: t0 + CMTime(seconds: 1, preferredTimescale: 48_000)) == false)
     }
 
