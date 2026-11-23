@@ -36,7 +36,7 @@ jobs:
           python3 -I scripts/check_test_shards.py
 
   # The iPad tests (the EmberPadTests unit target and the EmberPadUITests real-touch target) are split into
-  # four parallel shards, balanced by the per-class runtimes in CI at about ten minutes of tests each, so
+  # four parallel shards, balanced by the per-class runtimes in CI at about twelve minutes of tests each, so
   # that with the build and the Simulator's boot each stays well inside the job's 30 minutes. Shards 1, 2
   # and 4 list their classes explicitly; shard 3 skips exactly those classes, so it runs everything else in
   # both targets, including any test class added later. Every test therefore runs in exactly one shard,
@@ -63,6 +63,8 @@ jobs:
               -only-testing:EmberPadTests/ScribbleOutlineSteadyTests
               -only-testing:EmberPadTests/TeacherCopyCardTests
               -only-testing:EmberPadTests/InkStaysDrawnTests
+              -only-testing:EmberPadUITests/ClearAllInkUITests
+              -only-testing:EmberPadUITests/ClearPageUITests
           - shard: 2
             selection: >-
               -only-testing:EmberPadTests/LibraryScreenshotTests
@@ -78,6 +80,7 @@ jobs:
               -only-testing:EmberPadTests/HoldToShapeTests
               -only-testing:EmberPadUITests/ToolbarFingerDragUITests
               -only-testing:EmberPadUITests/ToolbarFreeDragUITests
+              -only-testing:EmberPadTests/MemoryStaysBoundedTests
           - shard: 3
             selection: >-
               -skip-testing:EmberPadTests/PageToolsScreenshotTests
@@ -90,6 +93,8 @@ jobs:
               -skip-testing:EmberPadTests/ScribbleOutlineSteadyTests
               -skip-testing:EmberPadTests/TeacherCopyCardTests
               -skip-testing:EmberPadTests/InkStaysDrawnTests
+              -skip-testing:EmberPadUITests/ClearAllInkUITests
+              -skip-testing:EmberPadUITests/ClearPageUITests
               -skip-testing:EmberPadTests/LibraryScreenshotTests
               -skip-testing:EmberPadTests/EraserPreviewScreenshotTests
               -skip-testing:EmberPadTests/PageNavigationTests
@@ -107,6 +112,8 @@ jobs:
               -skip-testing:EmberPadUITests/ToolbarDragTrackingUITests
               -skip-testing:EmberPadUITests/ToolbarFingerDragUITests
               -skip-testing:EmberPadUITests/ToolbarFreeDragUITests
+              -skip-testing:EmberPadTests/MemoryStaysBoundedTests
+              -skip-testing:EmberPadUITests/NotebookTabsUITests
               -skip-testing:EmberPadTests/DeviceDrawingStressTests
               -skip-testing:EmberPadTests/DevicePresentLatencyTests
           - shard: 4
@@ -115,6 +122,7 @@ jobs:
               -only-testing:EmberPadUITests/ReadingPositionUITests
               -only-testing:EmberPadUITests/TeacherCopyMatchUITests
               -only-testing:EmberPadUITests/ToolbarDragTrackingUITests
+              -only-testing:EmberPadUITests/NotebookTabsUITests
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
