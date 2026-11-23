@@ -118,6 +118,12 @@ struct ToolSettings: Codable, Equatable, Sendable {
     /// EP101: where along that edge it sits, 0 at the left (or top) end and 1 at the right (or bottom). Centred by
     /// default, as GoodNotes' palette starts.
     var toolbarAlong: Double = ToolbarDockDrag.defaultAlong
+    /// EP169: what a Pencil double-tap does. The iPad's own preference (the eraser by default) unless the teacher
+    /// picks the tool palette.
+    var pencilDoubleTap: PencilDoubleTap = .iPadSetting
+    /// EP169: where the floating palette button was left, as a fraction across and down the room it can move in; nil
+    /// until it is first dragged, which keeps it at the bottom right (`PencilPaletteGeometry`).
+    var paletteButton: PaletteButtonPlace?
 
     /// Tip sharpness's default before EP51 (`penTipSharpnessChosen`).
     static let legacyDefaultTipSharpness = 0.5
@@ -180,6 +186,8 @@ struct ToolSettings: Codable, Equatable, Sendable {
         shapeFill = (try? c.decodeIfPresent(Bool.self, forKey: .shapeFill)) ?? d.shapeFill
         toolbarDock = (try? c.decodeIfPresent(ToolbarDock.self, forKey: .toolbarDock)) ?? d.toolbarDock
         toolbarAlong = (try? c.decodeIfPresent(Double.self, forKey: .toolbarAlong)) ?? d.toolbarAlong
+        pencilDoubleTap = (try? c.decodeIfPresent(PencilDoubleTap.self, forKey: .pencilDoubleTap)) ?? d.pencilDoubleTap
+        paletteButton = (try? c.decodeIfPresent(PaletteButtonPlace.self, forKey: .paletteButton)) ?? d.paletteButton
     }
 
     /// Repairs anything out of range: invalid hex, empty or oversized preset
@@ -196,6 +204,9 @@ struct ToolSettings: Codable, Equatable, Sendable {
         s.penTipSharpness = Self.unit(s.penTipSharpness, fallback: Self().penTipSharpness)
         s.penPressureSensitivity = Self.unit(s.penPressureSensitivity, fallback: Self().penPressureSensitivity)
         s.toolbarAlong = Self.unit(s.toolbarAlong, fallback: Self().toolbarAlong)
+        s.paletteButton = s.paletteButton.flatMap { place in
+            place.x.isFinite && place.y.isFinite ? PaletteButtonPlace(x: Self.unit(place.x, fallback: 1), y: Self.unit(place.y, fallback: 1)) : nil
+        }
         return s
     }
 
@@ -272,13 +283,31 @@ enum PencilGesture: Equatable, Sendable {
     }
 }
 
+/// EP169: the teacher's choice for a Pencil double-tap, in the pen's settings.
+enum PencilDoubleTap: String, CaseIterable, Codable, Sendable {
+    /// Whatever the iPad's Settings → Apple Pencil says, which is the eraser unless the teacher changed it there.
+    case iPadSetting
+    /// The tool palette opens beside its floating button.
+    case toolPalette
+
+    var title: String {
+        switch self {
+        case .iPadSetting: "Eraser (iPad setting)"
+        case .toolPalette: "Tool palette"
+        }
+    }
+}
+
 /// What EmberPad does for a Pencil double-tap or squeeze, given the iPad's own
 /// preference (Settings → Apple Pencil). Pure, so tests cover every action.
 enum PencilCommand: Equatable, Sendable {
     case none
     case select(WorksheetTool)
-    case openSettings
+    /// EP169: the tool palette opens beside its floating button (or closes, if it is open).
+    case openPalette
 
+    /// The iPad's preference alone. Its palette choices (Show Color Palette, Show Ink Attributes, Show Contextual
+    /// Palette) open EmberPad's tool palette (EP169), as GoodNotes' do.
     static func command(for action: UIPencilPreferredAction, current: WorksheetTool, previous: WorksheetTool) -> PencilCommand {
         switch action {
         case .switchEraser:
@@ -288,7 +317,7 @@ enum PencilCommand: Equatable, Sendable {
         case .switchPrevious:
             return previous == current ? .none : .select(previous)
         case .showColorPalette, .showInkAttributes, .showContextualPalette:
-            return .openSettings
+            return .openPalette
         case .ignore, .runSystemShortcut:
             // A system shortcut is run by iPadOS itself; the app does nothing.
             return .none
@@ -296,6 +325,27 @@ enum PencilCommand: Equatable, Sendable {
             return .none
         }
     }
+
+    /// EP169: a double-tap or squeeze with the teacher's double-tap choice. A double-tap opens the palette when the
+    /// teacher chose it, and otherwise follows the iPad's preference, as a squeeze (Apple Pencil Pro) always does: its
+    /// default there, Show Contextual Palette, opens the same palette. The iPad's Off, and a system shortcut (which
+    /// iPadOS runs itself), still do nothing.
+    static func command(for action: UIPencilPreferredAction, gesture: PencilGesture, doubleTap: PencilDoubleTap,
+                        current: WorksheetTool, previous: WorksheetTool) -> PencilCommand {
+        switch action {
+        case .ignore, .runSystemShortcut: return .none
+        default: break
+        }
+        if gesture == .doubleTap, doubleTap == .toolPalette { return .openPalette }
+        return command(for: action, current: current, previous: previous)
+    }
+}
+
+/// EP169: where the floating palette button was left: its centre as a fraction across (`x`) and down (`y`) the room it
+/// moves in, so it keeps its corner of the screen when the iPad turns.
+struct PaletteButtonPlace: Codable, Equatable, Sendable {
+    var x: Double
+    var y: Double
 }
 
 /// A transient capsule message over the worksheet (design 5.4).
@@ -318,6 +368,8 @@ final class ToolState {
     private(set) var settings: ToolSettings
     /// The tool whose settings popover is open, if any.
     var settingsTool: WorksheetTool?
+    /// EP169: whether the Pencil tool palette is open beside its floating button.
+    private(set) var paletteOpen = false
     private(set) var toast: ToolToast?
 
     /// Called with the new PencilKit tool whenever it changes.
@@ -344,6 +396,7 @@ final class ToolState {
 
     /// A toolbar tap: a new tool is selected; the selected tool opens its settings.
     func tap(_ tool: WorksheetTool) {
+        paletteOpen = false
         if tool == settings.current { settingsTool = tool }
         else { select(tool) }
     }
@@ -373,20 +426,38 @@ final class ToolState {
         onClearPage?()
     }
 
-    /// Follows the iPad's Pencil preference. Returns what it did, for tests.
+    /// Follows the iPad's Pencil preference and the teacher's double-tap choice (EP169). Returns what it did, for
+    /// tests.
     @discardableResult
     func handlePencil(_ action: UIPencilPreferredAction, gesture: PencilGesture) -> PencilCommand {
-        let command = PencilCommand.command(for: action, current: settings.current, previous: settings.previous)
+        let command = PencilCommand.command(for: action, gesture: gesture, doubleTap: settings.pencilDoubleTap,
+                                            current: settings.current, previous: settings.previous)
         switch command {
         case .none: break
         case .select(let tool):
             select(tool)
             showToast(icon: tool.icon, text: "\(toolTitle(tool)) · \(gesture.title)")
-        case .openSettings:
-            settingsTool = settings.current
+        case .openPalette:
+            // A second double-tap or squeeze puts it away again, as GoodNotes' does.
+            if paletteOpen { closePalette() } else { openPalette() }
         }
         return command
     }
+
+    // MARK: - Tool palette (EP169)
+
+    /// Opens the tool palette beside its floating button, closing any tool's settings popover.
+    func openPalette() {
+        settingsTool = nil
+        paletteOpen = true
+    }
+
+    func closePalette() { paletteOpen = false }
+
+    func setPencilDoubleTap(_ choice: PencilDoubleTap) { update { $0.pencilDoubleTap = choice } }
+
+    /// Leaves the floating palette button at `place` (EP169).
+    func setPaletteButton(_ place: PaletteButtonPlace) { update { $0.paletteButton = place } }
 
     private func toolTitle(_ tool: WorksheetTool) -> String {
         tool == .eraser ? "\(settings.eraserMode.title) eraser" : tool.title

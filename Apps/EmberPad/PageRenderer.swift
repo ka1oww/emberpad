@@ -361,6 +361,8 @@ struct EditorScreen: View {
     /// The tool palette while a finger carries it (EP102). Only the palette reads it, so a move of the finger never
     /// rebuilds the editor.
     @State private var toolbarCarry = ToolbarCarry()
+    /// EP169: the tool row's frame in the page area, which the Pencil palette's button keeps off.
+    @State private var toolRowFrame: CGRect?
     /// True while the worksheet lands its ink to leave for another tab (EP119).
     @State private var leavingForTab = false
 
@@ -451,13 +453,17 @@ struct EditorScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             // EP119: GoodNotes' tab bar, just under the status bar, above the worksheet's own bar.
-            if let tabs {
-                NotebookTabBar(tabs: tabs.bar(), active: documentID,
-                               onSelect: { id in selectTab(id) }, onClose: { id in closeTab(id) })
-                    .disabled(leavingForTab || editingPages)
+            VStack(spacing: 0) {
+                if let tabs {
+                    NotebookTabBar(tabs: tabs.bar(), active: documentID,
+                                   onSelect: { id in selectTab(id) }, onClose: { id in closeTab(id) })
+                        .disabled(leavingForTab || editingPages)
+                }
+                header
+                if let session { InkSaveBanner(session: session) }
             }
-            header
-            if let session { InkSaveBanner(session: session) }
+            // EP169: a touch on the header while the tool palette is open only closes it.
+            .overlay { if tools.paletteOpen { PencilPaletteDismissShield { tools.closePalette() } } }
             // EP101: the tool palette floats over the page (see `pageArea`), so the page keeps the whole worksheet.
             pageArea
         }
@@ -477,7 +483,10 @@ struct EditorScreen: View {
         .flattenedExportSheet(flattenedExport)
         .onChange(of: addPageChoice) { _, choice in choice.save() }
         .onChange(of: chrome.readOnly) { _, readOnly in
-            if readOnly { tools.settingsTool = nil }
+            if readOnly {
+                tools.settingsTool = nil
+                tools.closePalette()
+            }
             renderer?.setReadOnly(readOnly)
         }
         // Matches show page text, so search follows the main-screen policy like the pages and thumbnails.
@@ -537,6 +546,7 @@ struct EditorScreen: View {
             search.close()
             tools.cancelToast()
             tools.settingsTool = nil
+            tools.closePalette()
             presentation.student.clear()
             presentation.clearPrivateAnswers(owner: answersOwner)
             session?.drawingDidChange = nil
@@ -588,6 +598,8 @@ extension EditorScreen {
                         .transition(.opacity)
                         // Carried, it passes over the Teacher copy's pull tab rather than under it.
                         .zIndex(toolbarCarry.isCarrying ? 1 : 0)
+                    // EP169: the Pencil tool palette's button floats over the page, under the Teacher copy panel.
+                    PencilPaletteButtonLayer(tools: tools, toolbar: toolRowFrame, dock: dock)
                 }
                 // iPad main scene only: the external scene never draws this, and it has no answer URL.
                 if let session {
@@ -607,7 +619,11 @@ extension EditorScreen {
                                                onShownPage: { [student = presentation.student] page in student.showTeacherPage(page) })
                     }
                 }
+                // EP169: the open palette, over everything on the page, with the cover that closes it.
+                if showsTools { PencilPaletteBarLayer(tools: tools, toolbar: toolRowFrame, dock: dock) }
             }
+            .coordinateSpace(.named(PencilPaletteGeometry.space))
+            .animation(.easeOut(duration: 0.15), value: tools.paletteOpen)
             .overlay(alignment: dock == .bottom ? .bottom : .top) {
             ToolToastOverlay(toast: tools.toast, fromBottom: dock == .bottom)
         }
@@ -618,6 +634,11 @@ extension EditorScreen {
     private var toolRow: some View {
         ToolbarStrip(tools: tools, dock: dock, onDrag: { phase in dragToolRow(phase) },
                      onMove: { target in moveToolRow(to: target) })
+            // Where it lies, for the palette button to keep off it (EP169). While a finger carries it the button stays
+            // put: nothing on the page moves or shows where the palette will land (EP104).
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(PencilPaletteGeometry.space)) } action: { frame in
+                if !toolbarCarry.isCarrying { toolRowFrame = frame }
+            }
             .modifier(ToolbarCarried(carry: toolbarCarry))
     }
 
@@ -630,6 +651,7 @@ extension EditorScreen {
         switch phase {
         case .began(let start, let point, let palette):
             tools.settingsTool = nil
+            tools.closePalette()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             carry.pickUp(at: start, palette: palette, finger: point)
             withAnimation(.easeOut(duration: 0.15)) { carry.isCarrying = true }
