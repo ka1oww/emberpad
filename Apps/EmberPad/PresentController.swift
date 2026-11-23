@@ -22,6 +22,12 @@ import EmberSyncKit
 /// frame. Lesson commands still go. On unfreeze the next update is a whole snapshot, which the Mac shows at once, as a
 /// cut, rather than moving smoothly from the frozen frame. A dropped link, the iPad leaving the screen, and Present
 /// turning on or off all unfreeze.
+///
+/// Turning itself off (EP172), so an iPad forgotten after a lesson does not keep presenting and drain its battery: when
+/// the teacher closes the presentation in Ember Companion the Mac says so and Present turns off at once; and, unless the
+/// Mac is recording a lesson, Present turns off when the Mac cannot be reached for `autoStopAfter` while EmberPad is on
+/// screen, or when the iPad comes back from being locked (or EmberPad from the background) after at least that long.
+/// Each says why in the status line under the Present control.
 @MainActor
 final class PresentController: ObservableObject {
     /// The small light by the Present control.
@@ -36,6 +42,12 @@ final class PresentController: ObservableObject {
         case unsupported
         /// This iPad has not been paired with a Mac.
         case notPaired
+        /// EP172: Present turned itself off: the teacher closed the presentation on the Mac.
+        case endedOnMac
+        /// EP172: Present turned itself off: the Mac could not be reached for `autoStopAfter`.
+        case macUnreachable
+        /// EP172: Present turned itself off: the iPad was locked, or EmberPad away, for `autoStopAfter` or longer.
+        case stoppedWhileLocked
 
         var title: String {
             switch self {
@@ -45,6 +57,9 @@ final class PresentController: ObservableObject {
             case .reconnecting: "Reconnecting to your Mac…"
             case .unsupported: "Update Ember Companion on your Mac to present"
             case .notPaired: "Pair this iPad with your Mac first"
+            case .endedOnMac: "Presentation ended on your Mac"
+            case .macUnreachable: "Stopped presenting: your Mac could not be reached"
+            case .stoppedWhileLocked: "Stopped presenting while the iPad was locked"
             }
         }
 
@@ -53,7 +68,7 @@ final class PresentController: ObservableObject {
             switch self {
             case .connected: Theme.ok
             case .connecting, .reconnecting: Theme.warn
-            case .off, .unsupported, .notPaired: nil
+            case .off, .unsupported, .notPaired, .endedOnMac, .macUnreachable, .stoppedWhileLocked: nil
             }
         }
     }
@@ -76,6 +91,21 @@ final class PresentController: ObservableObject {
     /// Turning Present off was asked while the Mac records: the teacher chooses whether the lesson ends too.
     @Published var confirmingStop = false
     static let commandTimeout: TimeInterval = 10
+    /// EP172: Present turns itself off once the Mac has been out of reach this long while EmberPad is on screen, or
+    /// when EmberPad comes back after being locked or away this long; never while the Mac records a lesson.
+    static let autoStopAfter: TimeInterval = 120
+    /// The clock `autoStopAfter` is measured by, in seconds. It keeps counting while the iPad sleeps, which
+    /// `CACurrentMediaTime` does not, so a locked iPad's time asleep counts. Tests replace it.
+    var now: () -> TimeInterval = PresentController.awakeOrAsleepNow
+    nonisolated static func awakeOrAsleepNow() -> TimeInterval {
+        TimeInterval(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)) / 1_000_000_000
+    }
+    /// Since when the light has said connecting or reconnecting, while EmberPad is on screen.
+    private var unreachableSince: TimeInterval?
+    /// When EmberPad left the screen while presenting.
+    private var backgroundedAt: TimeInterval?
+    /// Bumped by every `start`, so a late word from an earlier link never stops a later one.
+    private var run = 0
     private var pendingSince: TimeInterval = 0
     private var lastStart: UUID?
     /// Supplies the pairing; nil when this iPad is not paired.
@@ -141,6 +171,8 @@ final class PresentController: ObservableObject {
         }
         let connect = self.connect
         let probe = latencyProbe
+        run += 1
+        let run = self.run
         student.onLiveSamples = probe.map { probe in
             { strokes in for stroke in strokes { probe.sampled(stroke: stroke.id, count: stroke.count) } }
         }
@@ -150,6 +182,9 @@ final class PresentController: ObservableObject {
                                    },
                                    onLesson: { [weak self] status in
                                        Task { @MainActor in self?.lessonChanged(status) }
+                                   },
+                                   onEnded: { [weak self] in
+                                       Task { @MainActor in self?.endedOnMac(run: run) }
                                    })
         self.sender = sender
         // EP152: a presentation never starts frozen.
@@ -158,6 +193,8 @@ final class PresentController: ObservableObject {
         isOn = true
         light = .connecting
         suspended = false
+        unreachableSince = now()
+        backgroundedAt = nil
         sender.start()
         startTicking()
     }
@@ -171,6 +208,8 @@ final class PresentController: ObservableObject {
         macRecords = false
         pendingLesson = nil
         confirmingStop = false
+        unreachableSince = nil
+        backgroundedAt = nil
         stopTicking()
         suspendWork?.cancel()
         suspendWork = nil
@@ -183,6 +222,23 @@ final class PresentController: ObservableObject {
         Task { await sender?.stop(now: CACurrentMediaTime()) }
     }
 
+    // MARK: Turning itself off (EP172)
+
+    /// The teacher closed the presentation in Ember Companion. Whether or not the Mac records a lesson: the Mac keeps
+    /// its recording as it does whenever the iPad stops presenting.
+    private func endedOnMac(run: Int) {
+        guard isOn, run == self.run else { return }
+        stop()
+        light = .endedOnMac
+    }
+
+    /// The Mac has been out of reach for `autoStopAfter` while EmberPad was on screen: stop, unless it records a lesson.
+    private func stopIfUnreachable() {
+        guard isOn, !suspended, !isRecordingLesson, let since = unreachableSince, now() - since >= Self.autoStopAfter else { return }
+        stop()
+        light = .macUnreachable
+    }
+
     // MARK: Lock and background
 
     /// The iPad was locked or EmberPad left the screen. The student view is Paused by then (the main scene resigned
@@ -191,6 +247,7 @@ final class PresentController: ObservableObject {
     /// seconds later anyway.
     func enteredBackground() {
         guard isOn, !suspended else { return }
+        if backgroundedAt == nil { backgroundedAt = now() }
         // EP152: the link closes, so the class view unfreezes and the Mac is sent Paused as before.
         student.unfreezeClassView()
         tick()
@@ -208,15 +265,25 @@ final class PresentController: ObservableObject {
         }
     }
 
-    /// Back on screen: reconnect at once, and the Mac catches up from a fresh snapshot.
+    /// Back on screen: reconnect at once, and the Mac catches up from a fresh snapshot. After `autoStopAfter` or
+    /// longer away, Present is off instead (EP172), unless the Mac was recording a lesson when the link closed.
     func becameActive() {
         suspendWork?.cancel()
         suspendWork = nil
         endBackgroundTask()
         guard isOn else { return }
+        let away = backgroundedAt.map { now() - $0 }
+        backgroundedAt = nil
         if suspended {
+            if let away, away >= Self.autoStopAfter, !isRecordingLesson {
+                stop()
+                light = .stoppedWhileLocked
+                return
+            }
             suspended = false
             light = .reconnecting
+            // Time away does not count toward the Mac being out of reach: that clock starts again now.
+            unreachableSince = now()
             sender?.start()
         }
         startTicking()
@@ -235,11 +302,13 @@ final class PresentController: ObservableObject {
         // EP152: a link that drops unfreezes the class view; the new link's snapshot shows the iPad as it is then.
         if state == .reconnecting || state == .unsupported || (state == .off && suspended) { student.unfreezeClassView() }
         switch state {
-        case .connecting: light = .connecting
+        case .connecting, .reconnecting:
+            light = state == .connecting ? .connecting : .reconnecting
+            if unreachableSince == nil { unreachableSince = now() }
         case .connected:
             light = .connected
+            unreachableSince = nil
             macRecords = sender?.link.supportsLesson ?? false
-        case .reconnecting: light = .reconnecting
         case .off: light = suspended ? .reconnecting : light
         case .unsupported:
             // An older Companion: nothing more is tried. Sync with it is unaffected.
@@ -265,6 +334,7 @@ final class PresentController: ObservableObject {
 
     /// One display frame: hands the sender what the student view shows now. Cheap when nothing changed.
     func tick() {
+        stopIfUnreachable()
         guard let sender else { return }
         let now = CACurrentMediaTime()
         if pendingLesson != nil, now - pendingSince > Self.commandTimeout {

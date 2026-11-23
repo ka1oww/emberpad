@@ -361,16 +361,20 @@ public final class PresentSender: @unchecked Sendable {
     private let queue = DispatchQueue(label: "EmberSyncKit.PresentSender", qos: .userInitiated)
 
     private let onLesson: @Sendable (PresentLessonStatus) -> Void
+    private let onEnded: @Sendable () -> Void
     /// EP148: measures pen-to-projector latency; nil in normal use, when no update is marked and nothing is stamped.
     private let probe: PresentLatencyProbe?
 
-    /// `onLesson` gets the Mac's lesson recording status (EP129) on the link's own task. `probe` measures latency
-    /// (EP148): leave it nil outside a measurement.
+    /// `onLesson` gets the Mac's lesson recording status (EP129) on the link's own task, and `onEnded` that the
+    /// teacher closed the presentation on the Mac (EP172), after which the caller stops presenting. `probe` measures
+    /// latency (EP148): leave it nil outside a measurement.
     public init(connect: @escaping PresentLink.Connect, timing: PresentLink.Timing = PresentLink.Timing(),
                 probe: PresentLatencyProbe? = nil,
                 onState: @escaping @Sendable (PresentLink.State) -> Void = { _ in },
-                onLesson: @escaping @Sendable (PresentLessonStatus) -> Void = { _ in }) {
+                onLesson: @escaping @Sendable (PresentLessonStatus) -> Void = { _ in },
+                onEnded: @escaping @Sendable () -> Void = {}) {
         self.onLesson = onLesson
+        self.onEnded = onEnded
         self.probe = probe
         let box = WeakBox<PresentSender>()
         link = PresentLink(connect: connect, timing: timing, probe: probe, onState: onState,
@@ -455,6 +459,7 @@ public final class PresentSender: @unchecked Sendable {
 
     private func replied(_ reply: PresentReply, generation: Int) {
         if case .lesson(let status) = reply { return onLesson(status) }
+        if case .ended = reply { return onEnded() }
         lock.lock()
         defer { lock.unlock() }
         switch reply {
@@ -463,7 +468,7 @@ public final class PresentSender: @unchecked Sendable {
             readyFor = generation
         case .resnapshot(let held):
             encoder.resnapshot(heldAssets: held)
-        case .ack, .lesson, .latency:
+        case .ack, .lesson, .latency, .ended:
             break
         }
     }
@@ -523,6 +528,8 @@ public final class PresentHost: @unchecked Sendable {
     private var scene = PresentScene()
     private var active: ObjectIdentifier?
     private var activeLink: (any PresentReplying)?
+    /// The presenting link's `open` said it stops on `PresentReply.ended` (EP172).
+    private var activeTakesEnd = false
     private var currentStatus = Status.off
     private var lastHeard: TimeInterval = 0
     private var lastAck: TimeInterval = -.infinity
@@ -603,6 +610,7 @@ public final class PresentHost: @unchecked Sendable {
                 timedLink = nil
                 arrivals = []
             }
+            activeTakesEnd = update.takesEnd
             scene.linkOpened()
             scene.namesDocuments = lessonLink
             lastHeard = time
@@ -633,6 +641,7 @@ public final class PresentHost: @unchecked Sendable {
             if update.stop {
                 active = nil
                 activeLink = nil
+                activeTakesEnd = false
                 timedLink = nil
                 arrivals = []
             } else if update.timed, outcome == .applied {
@@ -660,6 +669,7 @@ public final class PresentHost: @unchecked Sendable {
         if active == ObjectIdentifier(link) {
             active = nil
             activeLink = nil
+            activeTakesEnd = false
             timedLink = nil
             arrivals = []
             if currentStatus != .off, !scene.stopped {
@@ -683,6 +693,19 @@ public final class PresentHost: @unchecked Sendable {
         if let changed { onChange(changed.0, changed.1) }
     }
 
+    /// The teacher closed the presentation on the Mac (EP172): tells the presenting iPad, whose link said it takes it,
+    /// to stop presenting. Its stop then ends the presentation here as any stop does. A link that is down, or an iPad
+    /// from before EP172, is told nothing and keeps presenting, as before. Returns whether the iPad was told.
+    @discardableResult
+    public func end() -> Bool {
+        lock.lock()
+        let link = activeTakesEnd ? activeLink : nil
+        lock.unlock()
+        guard let link, let bytes = try? PresentCodec.encode(PresentReply.ended) else { return false }
+        link.reply(bytes)
+        return true
+    }
+
     /// Stop showing the presentation on the Mac, for example from the Companion's menu. The iPad's next link
     /// presents again.
     public func dismiss() {
@@ -690,6 +713,7 @@ public final class PresentHost: @unchecked Sendable {
         let link = activeLink
         active = nil
         activeLink = nil
+        activeTakesEnd = false
         timedLink = nil
         arrivals = []
         currentStatus = .off
