@@ -767,8 +767,8 @@ final class CompanionLessonModel: ObservableObject {
     }
 
     /// The current file has saved media: any "not recording" warning ends where it started.
-    private func verify(_ recording: Recording) {
-        guard !recording.segmentProven, recording.segmentBytes > 0 else { return }
+    private func verify(_ recording: Recording, writer: LessonSegmentWriter) {
+        guard !recording.segmentProven, recording.segmentBytes > 0, writer.holdsPlayableMedia else { return }
         recording.segmentProven = true
         recording.anyProven = true
         recording.failures = 0
@@ -780,23 +780,27 @@ final class CompanionLessonModel: ObservableObject {
         lessonLog.info("\(LessonFolder.videoName(segment: recording.segment), privacy: .public) is saving")
     }
 
-    /// The current file stopped keeping the lesson. It is closed with what it holds; one that holds nothing is deleted
-    /// and taken off the list, and its name used again. The warning shows at once, and the next file is tried after
-    /// `retryDelay` (at once when this one had saved media).
+    /// The current file stopped keeping the lesson. It is closed with what it holds; a failed writer's file that holds
+    /// nothing playable is deleted and taken off the list, and its name used again. The warning shows at once, and the
+    /// next file is tried after `retryDelay` (at once when this one had saved media).
     private func failSegment(_ recording: Recording, writer: LessonSegmentWriter, at now: CMTime, because problem: String) {
         let name = writer.url.lastPathComponent
         let dead = writer.failure != nil
         let bytes = max(recording.segmentBytes, writer.bytesOnDisk)
+        // The file saved nothing when it has no bytes, or, from a failed writer, which writes nothing more, bytes no
+        // player can play: with the microphone sending nothing at first, the picture can reach the disk before the
+        // encoder refuses the first sound, the silence filled in (EP150).
+        let savedNothing = bytes == 0 || (dead && !writer.holdsPlayableMedia)
         lessonLog.error("\(name, privacy: .public) stopped saving after \(bytes) bytes: \(problem, privacy: .public)")
         recording.writer = nil
         recording.sink.use(nil)
-        if bytes == 0, dead {
-            // A failed writer writes nothing more, so its empty file can go now.
+        if savedNothing, dead {
+            // Nothing in it plays and nothing more comes, so the file goes now.
             try? FileManager.default.removeItem(at: writer.url)
             recording.log.dropFile(name)
             recording.segment -= 1
         } else {
-            recording.log.endFile(at: date(bytes == 0 ? now : recording.segmentGrewAt, in: recording))
+            recording.log.endFile(at: date(savedNothing ? now : recording.segmentGrewAt, in: recording))
         }
         // A failed writer lands no frame (appendVideo refuses), so only a live one is waited for.
         let flight = dead ? nil : recording.flight
@@ -805,9 +809,10 @@ final class CompanionLessonModel: ObservableObject {
             await flight?.drained(within: limit)
             _ = await writer.finish()
         }
-        notRecording(recording, from: bytes == 0 ? recording.segmentStart : recording.segmentGrewAt, at: now)
-        // The encoder failed on an empty file before any file of the lesson saved media: try the next with a rate it always takes.
-        if !recording.anyProven, dead, bytes == 0, let safe = options.safeAudioBitRate, recording.settings.audioBitRate != safe {
+        notRecording(recording, from: savedNothing ? recording.segmentStart : recording.segmentGrewAt, at: now)
+        // The encoder failed on a file that saved nothing before any file of the lesson saved media: try the next with
+        // a rate it always takes.
+        if !recording.anyProven, dead, savedNothing, let safe = options.safeAudioBitRate, recording.settings.audioBitRate != safe {
             lessonLog.notice("Trying AAC \(safe) bit/s instead of \(recording.settings.audioBitRate)")
             recording.settings.fixedAudioBitRate = safe
             recording.log.useAudioBitRate(safe)
@@ -1076,7 +1081,7 @@ final class CompanionLessonModel: ObservableObject {
             if let problem = segmentProblem(recording, writer: writer, at: now, steady: steady) {
                 failSegment(recording, writer: writer, at: now, because: problem)
             } else {
-                verify(recording)
+                verify(recording, writer: writer)
             }
         } else if now >= recording.retryAt ?? now {
             resumeSegment(recording, at: now)

@@ -601,6 +601,35 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertGreaterThan(try videoFiles(in: folder).first?.size ?? 0, 0)
     }
 
+    /// The same refusal once the picture has reached the disk (EP150; the test above failed so about one run in 30).
+    /// The first sound is the silence filled in a second in, and frames written many times a second land first, so the
+    /// refused file is not empty yet holds nothing a player can play. It goes at once, as an empty one does: the next
+    /// file takes its name and the safe rate, and the lesson ends with that one file.
+    func testAnEncoderRefusalAfterThePictureReachedTheDiskLeavesOnlyTheLessonFile() async throws {
+        var options = options()
+        options.settings.fixedAudioBitRate = 384_000
+        options.keepAlive = 1 / Double(options.maxFrameRate)
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya])
+        microphones.channels = 2
+        microphones.deliversAudio = false
+        let lesson = CompanionLessonModel(options: options, microphones: microphones)
+        lesson.start()
+        try await waitUntil { lesson.status.state == .recording }
+        let folder = try XCTUnwrap(lesson.folder)
+        try await waitUntil(timeout: 8) { lesson.status.warning?.hasPrefix("Recording stopped") == true }
+        try await waitUntil(timeout: 10) { lesson.status.warning == nil || lesson.status.warning?.hasPrefix("Recording stopped") == false }
+        try await pause(2)
+        await lesson.finish()
+        XCTAssertEqual(lesson.fileAttempts, 2, "one refused file, then one at the safe rate")
+        let record = try LessonRecord.read(from: folder)
+        XCTAssertEqual(record.status, .complete)
+        XCTAssertEqual(record.audio.bitRate, LessonAudioBitRate.safe)
+        XCTAssertEqual(record.files.map(\.name), ["lesson.mp4"])
+        XCTAssertEqual(try videoFiles(in: folder).map(\.name), ["lesson.mp4"])
+        let playable = await CompanionLessonModel.playable([folder.appendingPathComponent("lesson.mp4")])
+        XCTAssertTrue(playable)
+    }
+
     /// A microphone that opens but never sends a buffer (on 16 Nov the BOYA's capture never started): the Mac and the
     /// iPad say no sound is coming in after `startupLimit` (6 s), not the minute a silent microphone is given. The
     /// picture still records, with silence, and the lesson is complete.
