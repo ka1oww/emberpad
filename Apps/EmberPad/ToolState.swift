@@ -454,6 +454,11 @@ final class ToolState {
 
     func closePalette() { paletteOpen = false }
 
+    /// EP175: the floating palette button is on the worksheet only while Pencil double-tap is set to the tool palette.
+    /// Hidden, its place is kept for when it comes back, and anything else that opens the palette (the iPad's own
+    /// palette preferences, a squeeze) still opens it there.
+    var showsPaletteButton: Bool { settings.pencilDoubleTap == .toolPalette }
+
     func setPencilDoubleTap(_ choice: PencilDoubleTap) { update { $0.pencilDoubleTap = choice } }
 
     /// Leaves the floating palette button at `place` (EP169).

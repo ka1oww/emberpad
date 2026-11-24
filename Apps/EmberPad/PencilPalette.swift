@@ -2,7 +2,8 @@ import SwiftUI
 import UIKit
 
 /// EP169: the Pencil tool palette, GoodNotes' pop-up bar for the writing hand. A round button floats over the worksheet
-/// (near the bottom right until it is dragged elsewhere) showing the current tool with a dot of its colour. A tap on
+/// (near the bottom right until it is dragged elsewhere) showing the current tool with a dot of its colour; EP175: only
+/// while Pencil double-tap is set to the tool palette (`ToolState.showsPaletteButton`). A tap on
 /// it, a Pencil double-tap when the teacher chose the palette for it, or the iPad's own palette preferences for a double-tap or an
 /// Apple Pencil Pro squeeze open a two-row bar beside it: pen, highlighter, eraser and lasso on top; the current
 /// tool's colours, then its three widths (the eraser's three sizes) below. Every pick goes through `ToolState` as the

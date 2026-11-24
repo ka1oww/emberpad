@@ -599,7 +599,10 @@ extension EditorScreen {
                         // Carried, it passes over the Teacher copy's pull tab rather than under it.
                         .zIndex(toolbarCarry.isCarrying ? 1 : 0)
                     // EP169: the Pencil tool palette's button floats over the page, under the Teacher copy panel.
-                    PencilPaletteButtonLayer(tools: tools, toolbar: toolRowFrame, dock: dock)
+                    // EP175: only while Pencil double-tap is set to the tool palette.
+                    if tools.showsPaletteButton {
+                        PencilPaletteButtonLayer(tools: tools, toolbar: toolRowFrame, dock: dock)
+                    }
                 }
                 // iPad main scene only: the external scene never draws this, and it has no answer URL.
                 if let session {

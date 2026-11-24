@@ -6,7 +6,8 @@ import XCTest
 /// A pick there applies at once and the toolbar shows the same tool and colour; the bar stays open for more picks and
 /// closes when a touch lands on the page outside it, which neither writes nor moves the page. The button is carried
 /// wherever it is dragged and is still there after the app is quit and opened again. On the build before EP169 there is
-/// no button and these fail at the first check.
+/// no button and these fail at the first check. EP175: the button is there only while the pen's Pencil double-tap
+/// setting is Tool palette, so the tests that use it choose that first, through the pen's settings as a teacher does.
 final class PencilPaletteUITests: XCTestCase {
     private var app: XCUIApplication!
 
@@ -54,7 +55,56 @@ final class PencilPaletteUITests: XCTestCase {
         return XCTWaiter().wait(for: [gone], timeout: timeout) == .completed
     }
 
+    /// EP175: chooses `choice` for Pencil double-tap in the pen's settings (a second tap on the selected pen opens
+    /// them), then closes the settings with a finger tap on the page beside them, which neither writes nor moves it.
+    private func setDoubleTap(_ choice: String) {
+        let pen = toolbar.buttons["Fountain pen"]
+        XCTAssertTrue(pen.waitForExistence(timeout: 10))
+        XCTAssertTrue(pen.isSelected, "the pen is the tool, so a tap on it opens its settings")
+        let picker = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Pencil double-tap")).firstMatch
+        for _ in 0..<3 where !picker.waitForExistence(timeout: 3) { pen.tap() }
+        XCTAssertTrue(picker.waitForExistence(timeout: 10), "the pen's settings offer Pencil double-tap")
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<6 where !picker.isHittable { list.swipeUp() }
+        picker.tap()
+        // The palette button is labelled "Tool palette" too, so the menu's choice is told apart from it.
+        let option = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@", choice, "PencilPaletteButton")).firstMatch
+        XCTAssertTrue(option.waitForExistence(timeout: 10), "the choice \(choice) is offered")
+        option.tap()
+        XCTAssertTrue(waitGone(option), "the menu closes once \(choice) is picked")
+        let shown = NSPredicate { _, _ in picker.label.contains(choice) || (picker.value as? String)?.contains(choice) == true }
+        XCTAssertEqual(XCTWaiter().wait(for: [expectation(for: shown, evaluatedWith: nil)], timeout: 5), .completed,
+                       "Pencil double-tap shows \(choice): \(picker.label) \(String(describing: picker.value))")
+        // On the right of the page, clear of the settings, which hang below the pen at the tool row's left end, and of
+        // the palette button at the bottom right.
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.45)).tap()
+        XCTAssertTrue(waitGone(picker), "the pen's settings close")
+    }
+
+    func testTheButtonIsOnlyOnTheWorksheetWhileDoubleTapIsTheToolPalette() throws {
+        // The default, Eraser (iPad setting): no button over the worksheet.
+        XCTAssertTrue(toolbar.buttons["Fountain pen"].waitForExistence(timeout: 10))
+        sleep(1)
+        XCTAssertFalse(button.exists, "no palette button with Pencil double-tap on the eraser, the default")
+        keep(app.screenshot(), "1 default, no palette button")
+
+        // Tool palette: the button shows straight away, without the worksheet being opened again.
+        setDoubleTap("Tool palette")
+        XCTAssertTrue(button.waitForExistence(timeout: 10), "set to Tool palette, the button floats over the worksheet")
+        let place = button.frame
+        XCTAssertGreaterThan(place.midX, window.frame.midX, "at its place, the bottom right")
+        XCTAssertGreaterThan(place.midY, window.frame.midY)
+        keep(app.screenshot(), "2 tool palette, the button shows")
+
+        // Back to the eraser: it goes at once.
+        setDoubleTap("Eraser (iPad setting)")
+        XCTAssertTrue(waitGone(button), "set back to the eraser, the button goes")
+        XCTAssertFalse(app.otherElements["PencilPalette"].exists, "and no palette is open")
+        keep(app.screenshot(), "3 eraser again, no palette button")
+    }
+
     func testTheButtonOpensThePaletteAndAPickMatchesTheToolbarAndATouchOnThePageClosesItWithoutWriting() throws {
+        setDoubleTap("Tool palette")
         XCTAssertTrue(button.waitForExistence(timeout: 10), "a palette button floats over the worksheet")
         let page = window.frame
         let place = button.frame
@@ -115,6 +165,7 @@ final class PencilPaletteUITests: XCTestCase {
     }
 
     func testTheButtonStaysWhereItIsDraggedAcrossLaunches() throws {
+        setDoubleTap("Tool palette")
         XCTAssertTrue(button.waitForExistence(timeout: 10), "a palette button floats over the worksheet")
         let start = button.frame
         // Carried by a finger to the left of the page, a little above the middle.
