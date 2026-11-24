@@ -1968,6 +1968,11 @@ struct StressPhase {
 extension StressInk {
     /// A page full of ink (EP126), as a worked page in class is: 18 rows of long writing in two columns, a highlight
     /// across every third row, and a box round every sixth row's answer and a ring round the next. About 600 strokes.
+    ///
+    /// All of it is written by hand (EP173): the pressure changes along each stroke and the samples come unevenly, as
+    /// the Pencil's do once PencilKit has thinned them. Ink with one pressure and even timing is a line or shape
+    /// EmberPad drew itself (`LassoGeometry.isMadeLine`), which the lasso picks up when any part of it is inside the
+    /// loop (EP162), so a page of it would not be handwriting to the lasso.
     static func heavyPage() -> [PKStroke] {
         let words = ["the warm sun rose", "under a tall mountain", "data notes and laws", "she drew a long line",
                      "now add the moles", "write it down slowly"]
@@ -1975,9 +1980,12 @@ extension StressInk {
         var date = 1_700_000_100.0
         func stroke(_ points: [CGPoint], ink: PKInk, width: CGFloat) -> PKStroke {
             date += 1
-            let control = points.enumerated().map { k, p in
-                PKStrokePoint(location: p, timeOffset: Double(k) / 240, size: CGSize(width: width, height: width), opacity: 1,
-                              force: 1, azimuth: 0, altitude: .pi / 2)
+            let phase = Double(strokes.count) * 0.37
+            var time: TimeInterval = 0
+            let control = points.enumerated().map { k, p -> PKStrokePoint in
+                if k > 0 { time += 0.003 + 0.004 * abs(sin(Double(k) * 1.7 + phase)) }
+                return PKStrokePoint(location: p, timeOffset: time, size: CGSize(width: width, height: width), opacity: 1,
+                                     force: 0.6 + 0.3 * sin(Double(k) * 0.4 + phase), azimuth: 0.4, altitude: 1.1)
             }
             return PKStroke(ink: ink, path: PKStrokePath(controlPoints: control, creationDate: Date(timeIntervalSince1970: date)))
         }
