@@ -1151,6 +1151,12 @@ final class DeviceDrawingStressTests: XCTestCase {
     /// real one), the drag rests at each boundary, finger still down, until PDFKit has posted the page change. And
     /// `scrollIsMoving` stands in for the scroll view's tracking (a test cannot set `isTracking`), and the scroll stops
     /// dead, with no deceleration.
+    ///
+    /// EP174: a page shows its ink whenever it is on the screen. Each page coming on the screen during the drag has its
+    /// ink view in the window that same turn, and after the Pencil's stroke each page off the screen is brought on it at
+    /// the drag's speed and must show every stroke saved on it. PDFKit lets go of a page far from the screen (on an
+    /// iPad, page 3 once the scroll is back on page 1), so `finish` counts such a page from that look, never from a
+    /// canvas that is no longer there; a page on the screen at the check is still counted from its canvas.
     func test24_FingerScrollAcrossPages() throws {
         let heavy = StressInk.heavyPage()
         let scenario = try StressScenario(tool: "scroll.fingerAcrossPages", title: "Scrolling across pages with a finger", self,
@@ -1216,7 +1222,13 @@ final class DeviceDrawingStressTests: XCTestCase {
                 .map { controller.session.pdf.index(for: $0) } ?? -1
         }
         var reportedMidScroll = 0
+        // Each time a page comes on the screen during the drag, whether its ink view (its canvas) is in the window that
+        // same turn (EP174). Only where the pages lie and whether a canvas is in the window are read here, never a
+        // drawing, so the frame gaps measured are the drag's own.
+        let pageCount = controller.session.pdf.pageCount
+        var arrivals: [(page: Int, inkView: Bool, offset: CGFloat)] = []
         StressPage.pump(0.3)
+        var onScreen = Set((0..<pageCount).filter(scenario.pageIsOnScreen))
         let drag = scenario.frameGaps {
             moving = true
             for (from, to) in [(top, bottom), (bottom, top)] {
@@ -1229,6 +1241,11 @@ final class DeviceDrawingStressTests: XCTestCase {
                     arrived = travelled >= abs(to - start)
                     scroll.contentOffset.y = arrived ? to : start + (to > start ? travelled : -travelled)
                     StressPage.pump(1.0 / 120)
+                    let shownNow = Set((0..<pageCount).filter(scenario.pageIsOnScreen))
+                    for index in shownNow.subtracting(onScreen).sorted() {
+                        arrivals.append((index, scenario.page.canvas(index)?.window != nil, scroll.contentOffset.y))
+                    }
+                    onScreen = shownNow
                     let now = pageUnderCentre()
                     guard now != page, now >= 0 else { continue }
                     crossings.append((page, now, CACurrentMediaTime()))
@@ -1263,6 +1280,12 @@ final class DeviceDrawingStressTests: XCTestCase {
                            worst <= StressBounds.scrollCrossingFrameGap,
                            String(format: "longest frame gap %.1f ms, bound %.1f ms", worst * 1000, StressBounds.scrollCrossingFrameGap * 1000))
         }
+        scenario.check("a page comes on the screen during the drag", !arrivals.isEmpty, "\(arrivals.count) pages came on the screen")
+        for (n, arrival) in arrivals.enumerated() {
+            scenario.check("page \(arrival.page + 1) has its ink view the moment it comes on the screen (arrival \(n + 1))",
+                           arrival.inkView,
+                           String(format: "canvas in the window: %@, at offset %.0f", arrival.inkView ? "yes" : "no", arrival.offset))
+        }
         scenario.metrics["scroll.dragWorstFrameGapMs"] = drag.worst * 1000
         scenario.metrics["scroll.settleWorstFrameGapMs"] = stop.worst * 1000
         scenario.check("the page pill waits for the scroll to stop", reportedMidScroll == 0,
@@ -1278,6 +1301,49 @@ final class DeviceDrawingStressTests: XCTestCase {
         scenario.pen(StressInk.samples(StressInk.squiggle(at: origin, seed: 24), speed: 420, seed: 24), "after the scroll", page: landed)
         var expected = [0: scenario.bystanderCount + heavy.count, 1: heavy.count, 2: heavy.count]
         expected[landed, default: 0] += 1
+
+        // Every page off the screen now is brought on it as the finger brings it, and must show all its ink there
+        // (EP174): PDFKit lets go of a page far from the screen, so its ink is read where a student would see it.
+        scenario.settle()
+        let rest = scroll.contentOffset.y
+        func glide(to target: CGFloat) {
+            moving = true
+            let start = scroll.contentOffset.y, began = CACurrentMediaTime()
+            var arrived = false
+            while !arrived {
+                let travelled = min(abs(target - start), speed * CGFloat(CACurrentMediaTime() - began))
+                arrived = travelled >= abs(target - start)
+                scroll.contentOffset.y = arrived ? target : start + (target > start ? travelled : -travelled)
+                StressPage.pump(1.0 / 120)
+            }
+            moving = false
+            StressPage.pump(0.3)
+        }
+        for index in (0..<pageCount).filter({ !scenario.pageIsOnScreen($0) }) {
+            // The page's top to the top of the screen, as near as the scroll goes.
+            scenario.note("page \(index + 1), off the screen, brought on it to read its ink")
+            glide(to: min(max(scroll.contentOffset.y + scenario.pageFrame(index).minY - pdfView.bounds.minY, top), bottom))
+            let began = CACurrentMediaTime()
+            while !(scenario.pageIsOnScreen(index) && scenario.page.canvas(index)?.window != nil), CACurrentMediaTime() - began < 2 {
+                StressPage.pump(0.016)
+            }
+            scenario.settle()
+            let canvas = scenario.page.canvas(index)
+            // The test's own reading, not the app's: kept out of the main thread's stalls.
+            let (shown, clear) = StressHarnessTime.measure {
+                let strokes = canvas?.drawing.strokes ?? []
+                return (strokes, strokes.filter { InkKeepsEveryStrokeTests.alpha($0.ink.color) == 0 }.count)
+            }
+            let saved = scenario.page.saved(index).count
+            let inView = canvas.map { $0.window != nil && pdfView.bounds.intersects($0.convert($0.bounds, to: pdfView)) } ?? false
+            scenario.inkSeenOnScreen(page: index, strokes: shown.count, clear: clear)
+            let count = expected[index, default: 0]
+            scenario.check("page \(index + 1) shows all its ink when scrolled into view",
+                           inView && shown.count == saved && saved == count,
+                           "canvas on the screen: \(inView ? "yes" : "no"), \(shown.count) on it, \(saved) saved, \(count) expected")
+        }
+        scenario.note("back to page \(landed + 1) for the checks")
+        glide(to: rest)
         scenario.finish(expectedStrokes: expected)
     }
 
@@ -1315,6 +1381,7 @@ final class StressScenario {
     private var notes: [String] = []
     private var removals: [(id: Int, lift: CFTimeInterval, label: String, screen: [Double]?)] = []
     private var removalRecords: [StressRemoval] = []
+    private var inkWhenOnScreen: [Int: (strokes: Int, clear: Int)] = [:]
 
     private func removal(_ id: Int, lift: CFTimeInterval, _ label: String) -> (id: Int, lift: CFTimeInterval, label: String, screen: [Double]?) {
         let mark = sampler.mark(id)
@@ -1394,6 +1461,23 @@ final class StressScenario {
     func fit(_ ys: [CGFloat], below: CGFloat = 0) -> [CGFloat] {
         let shown = shownPart()
         return shown.isNull ? ys : StressGate.fit(ys, below: below, above: shown.maxY - StressGate.rowMargin)
+    }
+
+    /// Where page `index` lies in the PDF view, whether or not PDFKit holds a view for it.
+    func pageFrame(_ index: Int) -> CGRect {
+        guard let pdfPage = controller.session.pdf.page(at: index) else { return .null }
+        let pdfView = controller.pdfView
+        return pdfView.convert(pdfPage.bounds(for: pdfView.displayBox), from: pdfPage)
+    }
+
+    /// Whether any of page `index` is on the screen.
+    func pageIsOnScreen(_ index: Int) -> Bool { controller.pdfView.bounds.intersects(pageFrame(index)) }
+
+    /// Records what page `index`'s canvas showed while the page was on the screen (EP174). `finish` counts a page
+    /// from here only when, at its check, the page is off the screen and PDFKit has let its canvas go, as PDFKit does
+    /// with a page far from the screen; a page on the screen is always counted from its canvas there and then.
+    func inkSeenOnScreen(page index: Int, strokes: Int, clear: Int) {
+        inkWhenOnScreen[index] = (strokes, clear)
     }
 
     /// The centre of what the screen shows of `index`, in page points.
@@ -1695,6 +1779,9 @@ final class StressScenario {
         if let expectedStrokes {
             for (index, count) in expectedStrokes.sorted(by: { $0.key < $1.key }) {
                 let saved = page.saved(index), shown = page.shown(index)
+                // A page off the screen whose canvas PDFKit has let go is counted from what its canvas showed when the
+                // scenario last brought it on the screen (EP174); with no such count it shows nothing, and fails.
+                let released = page.canvas(index) == nil && !pageIsOnScreen(index) ? inkWhenOnScreen[index] : nil
                 // The two pieces a partial erase leaves can share their stroke's ID, so where each begins tells them apart.
                 let unique = Set(saved.map { stroke -> String in
                     let first = stroke.path.first.map { $0.location.applying(stroke.transform) } ?? .zero
@@ -1702,8 +1789,13 @@ final class StressScenario {
                     let mask = stroke.mask?.bounds ?? .null
                     return "\(InkStrokeID(stroke).hashValue) \(Int(first.x * 10)) \(Int(first.y * 10)) \(mask)"
                 }).count
-                let clear = shown.filter { InkKeepsEveryStrokeTests.alpha($0.ink.color) == 0 }.count
-                var detail = "\(saved.count) saved, \(shown.count) on the page, \(unique) distinct, \(count) expected"
+                let clear = released?.clear ?? shown.filter { InkKeepsEveryStrokeTests.alpha($0.ink.color) == 0 }.count
+                let onPage = released?.strokes ?? shown.count
+                var detail = "\(saved.count) saved, \(onPage) on the page, \(unique) distinct, \(count) expected"
+                if let released {
+                    detail += " (off the screen at the check, its canvas let go by PDFKit: \(released.strokes) on its canvas when"
+                        + " scrolled into view)"
+                }
                 if saved.count < count {
                     // Names the strokes written here that no saved stroke passes near, so a loss says which one.
                     let removed = Set(removals.map(\.id))
@@ -1716,7 +1808,7 @@ final class StressScenario {
                     }.map(\.label)
                     if !lost.isEmpty { detail += "; not on the page: \(lost.prefix(6).joined(separator: ", "))" }
                 }
-                check("page \(index + 1): no stroke lost or doubled", saved.count == count && shown.count == count && unique == count,
+                check("page \(index + 1): no stroke lost or doubled", saved.count == count && onPage == count && unique == count,
                       detail)
                 check("page \(index + 1): no stroke left clear", clear == 0, "\(clear) strokes left in the live pen's clear ink")
             }
