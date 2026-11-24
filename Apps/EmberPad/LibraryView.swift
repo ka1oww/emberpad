@@ -191,6 +191,9 @@ struct LibraryView: View {
 #endif
         }
         .listStyle(.sidebar)
+        // The sidebar is `surface2` (design 5.1), the same as its footer, so the two read as one column.
+        .scrollContentBackground(.hidden)
+        .background(Theme.surface2)
         .buttonStyle(.plain)
         .navigationSplitViewColumnWidth(min: 300, ideal: 300, max: 300)
         .navigationTitle("")

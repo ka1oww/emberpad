@@ -866,8 +866,8 @@ struct AnswersHiddenState: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.ultraThinMaterial)
         .background(Theme.privateBg.opacity(0.55))
+        .background(.ultraThinMaterial)
         .accessibilityElement(children: .combine)
     }
 }

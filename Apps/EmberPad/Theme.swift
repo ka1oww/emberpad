@@ -163,6 +163,8 @@ enum Theme {
     static let meta = Font.footnote
     /// Page meta under the title: caption 12.
     static let pageMeta = Font.caption
+    /// The student view's few words on black ("Paused"): 26 semibold white (design 5.1.1, 5.5).
+    static let studentMessage = Font.system(size: 26, weight: .semibold)
 
     /// Sidebar section headers: 13 semibold uppercase with +0.04em tracking, in `text2`.
     static func sidebarSectionHeader(_ title: String) -> some View {

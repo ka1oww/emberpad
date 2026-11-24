@@ -467,6 +467,9 @@ struct EditorScreen: View {
             // EP101: the tool palette floats over the page (see `pageArea`), so the page keeps the whole worksheet.
             pageArea
         }
+        // `canvas`, as behind the pages (design 5.2), down through the strip under the home indicator, which showed the
+        // system's white (black in dark mode).
+        .background(Theme.canvas.ignoresSafeArea(edges: .bottom))
         // Not in onAppear: that runs inside the library's no-animation push, which would settle the page at once.
         .task {
             guard !pageEntered else { return }
