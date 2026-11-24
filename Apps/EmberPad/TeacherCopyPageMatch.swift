@@ -1,5 +1,6 @@
 import Foundation
 import PDFKit
+import EmberSyncKit
 
 /// EP158: which Teacher copy page answers each page of its Student worksheet, found from the pages' own words.
 ///
@@ -137,5 +138,22 @@ actor TeacherCopyPageMatches {
             try? data.write(to: file, options: .atomic)
         }
         return match
+    }
+}
+
+/// Which Teacher copy page answers a Student page. EP130 paired them by PDF page number; EP158 pairs them by the
+/// pages' words (`TeacherCopyPageMatch`) wherever those match, and by number only where they do not. EP177's flip
+/// asks here (`CopyFlipLanding`).
+enum TeacherCopyAnswerPage {
+    /// The Student page's own PDF page, or nil for a page added in Ember Slate, which no Teacher page answers.
+    static func pdfPage(for page: PageEntry?) -> Int? {
+        guard let page else { return 0 }
+        return page.pdfPage
+    }
+
+    /// EP158: the Teacher page answering Student PDF page `studentPage`: the one holding the words at its top, else the
+    /// page of the same number (not held to the Teacher copy's pages).
+    static func teacherPage(forStudent studentPage: Int, match: TeacherCopyPageMatch?) -> Int {
+        match?.teacherPage(forStudent: studentPage) ?? studentPage
     }
 }

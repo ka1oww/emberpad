@@ -505,7 +505,7 @@ struct StressPalette: View {
     let tools: ToolState
 
     var body: some View {
-        ToolbarFloatLayout(dock: tools.settings.toolbarDock, along: tools.settings.toolbarAlong, tabSide: .trailing) {
+        ToolbarFloatLayout(dock: tools.settings.toolbarDock, along: tools.settings.toolbarAlong) {
             ToolbarStrip(tools: tools, dock: tools.settings.toolbarDock)
         }
     }

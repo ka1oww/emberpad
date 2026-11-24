@@ -105,21 +105,6 @@ final class ToolbarDockTests: XCTestCase {
         XCTAssertEqual(ToolbarDockDrag.along(for: .zero, on: .top, in: .zero), ToolbarDockDrag.defaultAlong)
     }
 
-    /// Down the side the Teacher copy's pull tab is on, the palette floats beside the tab, never over it.
-    func testThePaletteKeepsClearOfTheTeacherCopyTab() {
-        let tab = TeacherCopyCardGeometry.tabSize.width
-        XCTAssertEqual(ToolbarDockDrag.room(for: .trailing, in: area, tabSide: .trailing),
-                       CGRect(x: 0, y: 74, width: 1194 - tab, height: 760))
-        XCTAssertEqual(ToolbarDockDrag.room(for: .leading, in: area, tabSide: .leading),
-                       CGRect(x: tab, y: 74, width: 1194 - tab, height: 760))
-        XCTAssertEqual(ToolbarDockDrag.room(for: .leading, in: area, tabSide: .trailing), area)
-        XCTAssertEqual(ToolbarDockDrag.room(for: .trailing, in: area, tabSide: .leading), area)
-        for side in TeacherCopyPanelSide.allCases {
-            XCTAssertEqual(ToolbarDockDrag.room(for: .top, in: area, tabSide: side), area, "the top stays centred on the page")
-            XCTAssertEqual(ToolbarDockDrag.room(for: .bottom, in: area, tabSide: side), area)
-        }
-    }
-
     func testRowsAndColumns() {
         XCTAssertFalse(ToolbarDock.top.isVertical)
         XCTAssertFalse(ToolbarDock.bottom.isVertical)

@@ -348,33 +348,6 @@ final class TeachTests: XCTestCase {
 
     // MARK: - Presenting
 
-    func testTheClassSeesTheStudentPageOnATeachPageWhileTheTeacherCopyIsShown() throws {
-        let plain = try StudentMirrorFixture.session(.student, pages: 3, root: root.appendingPathComponent("student"))
-        let source = try XCTUnwrap(plain.pdf.page(at: 0))
-        let made = try XCTUnwrap(TeachPage.excerpt(lasso: Self.mirrorQuestionLoop, entry: .pdf(0), page: source))
-        let teach = PageEntry(id: "teach-1", pdfPage: nil, template: .a3Squared, hasInk: false, excerpt: made.excerpt)
-        let manifest = PageManifest(pages: [.pdf(0), teach, .pdf(1), .pdf(2)])
-        try WorksheetPages.apply(manifest, to: plain.pdf)
-        let session = DocumentSession(record: plain.record, pdf: plain.pdf, originalURL: plain.originalURL, pages: manifest,
-                                      drawings: [:], store: try LibraryStore(root: root.appendingPathComponent("added")))
-        XCTAssertTrue(session.pdf.page(at: 1)?.string?.contains("Q1. Synthetic question text") == true)
-        let answers = root.appendingPathComponent("answers.pdf")
-        try StudentMirrorFixture.worksheetPDF(pages: 3, role: .teacher).write(to: answers)
-        let state = PresentationState()
-        state.mainSceneActive = true
-        state.student.opened(session.record)
-        state.showPrivateAnswers(answers, owner: UUID())
-        let model = state.student
-        model.framing = .fullPage
-        model.publish(session: session, pageIndex: 1, canvasSize: Self.a3)
-        state.setClassCopy(.teacher, worksheet: session.record)
-        XCTAssertEqual(model.classCopy.shown, .student, "a Teach page has no Teacher page to show")
-        XCTAssertNil(model.teacherFrame)
-        guard case .page(let page) = model.presented.screen else { return XCTFail("a page is shown") }
-        XCTAssertEqual(page.role, .student)
-        XCTAssertEqual(page.pages.map(\.pageIndex), [1])
-    }
-
     /// Present on Mac sends a copy of the page in view. An added page is taken from a one-page PDF of its own, which
     /// the worksheet keeps: without it the copy, of Teach and of plain paper alike, saved blank.
     func testAddedPagesReachTheMacAsDrawn() throws {

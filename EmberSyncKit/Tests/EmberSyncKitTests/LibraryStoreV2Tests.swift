@@ -124,17 +124,22 @@ struct LibraryStoreV2Tests {
         #expect(try await store.document(teacher.id).pairedDocumentID == student.id)
     }
 
-    @Test func teacherCopyRefusesInkAndChangedTeacherReplacesInPlace() async throws {
+    /// EP177: a Teacher copy takes ink of its own, kept apart from its Student copy's. Cleared again, it is uninked, so
+    /// a changed Teacher copy still replaces it in place.
+    @Test func teacherCopyKeepsItsOwnInkAndUninkedChangedTeacherReplacesInPlace() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try LibraryStore(root: root)
         let student = try await importEntry(publishedEntry("paper-1", .student), into: store)
         let teacher = try await importEntry(publishedEntry("paper-1", .teacher), into: store)
-        await #expect(throws: LibraryError.teacherCopyReadOnly) {
-            try await store.saveDrawing(Data("ink".utf8), documentID: teacher.id, page: 0, hasInk: true)
-        }
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(teacher.id.uuidString + "/page-0.drawing").path))
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(teacher.id.uuidString + "/ink/pdf-0.drawing").path))
+        try await store.saveDrawing(Data("teacher ink".utf8), documentID: teacher.id, page: 0, hasInk: true)
+        let teacherInk = root.appendingPathComponent(teacher.id.uuidString + "/ink/pdf-0.drawing")
+        #expect(try Data(contentsOf: teacherInk) == Data("teacher ink".utf8))
+        #expect(try await store.document(teacher.id).hasInk == true)
+        #expect(try await store.document(student.id).hasInk == false, "the Student copy gets none of it")
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(student.id.uuidString + "/ink/pdf-0.drawing").path))
+
+        try await store.saveDrawing(Data(), documentID: teacher.id, page: 0, hasInk: false)
         #expect(try await store.document(teacher.id).hasInk == false)
 
         let changed = try await importEntry(publishedEntry("paper-1", .teacher, bytes: "corrected answers"), into: store)
@@ -142,6 +147,18 @@ struct LibraryStoreV2Tests {
         #expect(try Data(contentsOf: root.appendingPathComponent(teacher.id.uuidString + "/original.pdf")) == Data("corrected answers".utf8))
         #expect(try await store.previousVersions().map(\.documentID) == [teacher.id])
         #expect(try await store.document(student.id).pairedDocumentID == teacher.id)
+    }
+
+    /// EP177: a Teacher copy still keeps its pages as delivered: no page edit reaches it.
+    @Test func teacherCopyStillRefusesPageEdits() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LibraryStore(root: root)
+        _ = try await importEntry(publishedEntry("paper-1", .student), into: store)
+        let teacher = try await importEntry(publishedEntry("paper-1", .teacher), into: store)
+        await #expect(throws: LibraryError.teacherCopyReadOnly) {
+            try await store.insertPage(.a4Squared, at: 0, documentID: teacher.id)
+        }
     }
 
     @Test func pairLinkFollowsPaperKeyAcrossRebuildsWithoutMovingInk() async throws {

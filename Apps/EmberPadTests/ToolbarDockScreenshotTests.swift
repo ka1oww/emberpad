@@ -10,7 +10,7 @@ import EmberSyncKit
 /// floating tool palette moved to each edge by the drag phases its recogniser reports (the real finger's touches are
 /// driven end to end by `EmberPadUITests`). In every position the palette floats over the same full-size page against
 /// that edge, the tools still set the PencilKit tool on the pages, every tool's settings popover opens on the page
-/// side, the Teacher copy edge swipe stays on, and the place is kept for the next worksheet. Screenshots are attached
+/// side, and the place is kept for the next worksheet. Screenshots are attached
 /// and written to `EP100_SHOTS_DIR` when the runner has it (`TEST_RUNNER_EP100_SHOTS_DIR`), else to the temporary
 /// directory.
 @MainActor
@@ -18,12 +18,10 @@ final class ToolbarDockScreenshotTests: XCTestCase {
     private var root: URL!
     private var hostWindow: UIWindow?
     private var suiteName = ""
-    private var savedTeacherPanel: Data?
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("ep100-shots-\(UUID().uuidString)", isDirectory: true)
         suiteName = "EmberPadTests.ToolbarDockEditor.\(UUID().uuidString)"
-        savedTeacherPanel = UserDefaults.standard.data(forKey: TeacherCopyCardState.defaultsKey)
     }
 
     override func tearDownWithError() throws {
@@ -32,17 +30,12 @@ final class ToolbarDockScreenshotTests: XCTestCase {
         hostWindow = nil
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         UserDefaults.standard.removeObject(forKey: LastWorksheet.defaultsKey)
-        if let savedTeacherPanel { UserDefaults.standard.set(savedTeacherPanel, forKey: TeacherCopyCardState.defaultsKey) }
-        else { UserDefaults.standard.removeObject(forKey: TeacherCopyCardState.defaultsKey) }
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: root)
     }
 
     func testTheToolRowDocksOnEveryEdgeAndEverythingStillWorks() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        // The Teacher copy starts hidden off the right edge, so its edge swipe is live.
-        UserDefaults.standard.set(try JSONEncoder().encode(TeacherCopyCardState.Stored(isOpen: false, side: .trailing)),
-                                  forKey: TeacherCopyCardState.defaultsKey)
         let (library, id) = try await makePairedLibrary()
         let window = try makeWindow()
         let tools = ToolState(defaults: defaults)
@@ -97,10 +90,9 @@ final class ToolbarDockScreenshotTests: XCTestCase {
             // It lands where it was let go along the edge (carried by its centre, the palette is centred on the drop).
             let row = try XCTUnwrap(Self.toolRowFrame(in: window))
             let expected = ToolbarDockDrag.frame(for: dock, along: ToolbarDockDrag.along(for: drop, on: dock, in: page),
-                                                 size: row.size, in: ToolbarDockDrag.room(for: dock, in: page, tabSide: .trailing))
+                                                 size: row.size, in: page)
             XCTAssertEqual(row.midX, expected.midX, accuracy: 1, name)
             XCTAssertEqual(row.midY, expected.midY, accuracy: 1, name)
-            try checkEdgeSwipe(dock: dock, in: window)
             try save(window, name)
             try await checkTools(tools, renderer: renderer, host: host, dock: dock, window: window, popoverShot: popoverShot)
         }
@@ -165,30 +157,15 @@ final class ToolbarDockScreenshotTests: XCTestCase {
             XCTAssertEqual(row.width, ToolbarStrip.columnWidth, accuracy: 1)
             XCTAssertEqual(row.minX, page.minX + m, accuracy: 1)
         case .trailing:
-            // The hidden Teacher copy's pull tab is on the right: the palette sits beside it, never over it.
+            // EP177: no Teacher copy pull tab is left on the right, so the palette floats a margin in, as on the left.
             XCTAssertEqual(row.width, ToolbarStrip.columnWidth, accuracy: 1)
-            XCTAssertEqual(row.maxX, page.maxX - TeacherCopyCardGeometry.tabSize.width - m, accuracy: 1)
+            XCTAssertEqual(row.maxX, page.maxX - m, accuracy: 1)
         }
         if dock.isVertical {
             XCTAssertGreaterThan(row.height, row.width, "\(dock): upright down the side")
         } else {
             XCTAssertLessThan(row.width, page.width - 2 * m + 1, "\(dock): as long as its tools, not edge to edge")
         }
-    }
-
-    /// The hidden Teacher copy's edge swipe still starts at the screen's right edge, outside the palette floating
-    /// there.
-    private func checkEdgeSwipe(dock: ToolbarDock, in window: UIWindow) throws {
-        let swipe = try XCTUnwrap(window.gestureRecognizers?.compactMap { $0 as? TeacherCopyEdgeSwipeRecognizer }.first)
-        XCTAssertTrue(swipe.isEnabled, "\(dock): the panel is hidden, so its edge swipe is on")
-        XCTAssertEqual(swipe.side, .trailing)
-        let body = swipe.body()
-        XCTAssertEqual(body.maxX, window.bounds.maxX, accuracy: 1, "\(dock): the body runs to the screen's edge")
-        XCTAssertTrue(TeacherCopySlide.edgeSwipeStarts(atX: window.bounds.maxX - 4, side: .trailing,
-                                                      bodyMinX: body.minX, bodyMaxX: body.maxX),
-                      "\(dock): a finger at the screen's right edge pulls the panel")
-        let row = try XCTUnwrap(Self.toolRowFrame(in: window))
-        XCTAssertLessThan(row.maxX, window.bounds.maxX - 4, "\(dock): and it lands beside the palette, not on it")
     }
 
     /// Every tool selects on its button's action and sets the pages' PencilKit tool; every tool's settings popover

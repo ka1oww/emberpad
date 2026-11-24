@@ -3,7 +3,7 @@ import PDFKit
 import UIKit
 
 /// EP121: where a PDF was left in view (its page, the point of that page at the view's top-left corner, and its zoom),
-/// so a notebook or the Teacher copy panel opens again exactly there, as GoodNotes reopens a notebook on the page you
+/// so a notebook or its Teacher copy opens again exactly there, as GoodNotes reopens a notebook on the page you
 /// left it on.
 struct ReadingPosition: Codable, Equatable {
     /// The zero-based page at the view's top-left corner.
@@ -72,23 +72,13 @@ struct ReadingPosition: Codable, Equatable {
         view.go(to: PDFDestination(page: page, at: point))
     }
 
-    /// EP138: where a Teacher copy slid open on `page` goes. Already on that page (held to the document's pages), it
-    /// stays exactly where it is; otherwise it moves to the top of that page, keeping its zoom.
-    /// With no `pageCount` the page is held to the document's pages only when it is restored.
-    func opening(onPage page: Int, pageCount: Int? = nil) -> ReadingPosition {
-        let target = pageCount.map { min(max(page, 0), max($0 - 1, 0)) } ?? max(page, 0)
-        if pageIndex(pageCount: pageCount ?? .max) == target { return self }
-        return ReadingPosition(page: target, pageID: nil, x: -.greatestFiniteMagnitude, y: .greatestFiniteMagnitude, zoom: zoom,
-                               zoomBasis: zoomBasis)
-    }
-
     /// Zoom closer to the fitted scale than this is the fitted scale.
     static let zoomTolerance = 0.01
 }
 
 /// EP121: the one per-document store of reading positions, keyed by the document's library id. A notebook's position
 /// and its Teacher copy's (keyed by the Teacher copy's own id) live here, so leaving a notebook, opening another,
-/// closing the Teacher copy panel or relaunching never loses either. Anything that keeps a per-notebook place reads and
+/// flipping to the Teacher copy and back (EP177) or relaunching never loses either. Anything that keeps a per-notebook place reads and
 /// writes this store rather than keeping its own.
 struct ReadingPositions {
     static let defaultsKey = "readingPositions.v1"
@@ -103,13 +93,6 @@ struct ReadingPositions {
         guard stored[id.uuidString] != position else { return }
         stored[id.uuidString] = position
         if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.defaultsKey) }
-    }
-
-    /// EP138: the Teacher copy `id` is slid open on `page`: its remembered place moves there (see
-    /// `ReadingPosition.opening`), so the answers built for this opening restore onto the student copy's page.
-    func open(_ id: UUID, onPage page: Int) {
-        let left = position(for: id) ?? ReadingPosition(page: 0, x: 0, y: .greatestFiniteMagnitude, zoom: 1)
-        save(left.opening(onPage: page), for: id)
     }
 
     private func all() -> [String: ReadingPosition] {

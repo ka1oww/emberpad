@@ -114,7 +114,6 @@ final class WorksheetZoomTests: XCTestCase {
         XCTAssertEqual(left.zoom, 1.5, accuracy: 0.001, "kept relative to the notes fit")
         XCTAssertEqual(ReadingPositions(defaults: store.defaults).position(for: first.session.record.id), left,
                        "the basis survives a relaunch")
-        XCTAssertEqual(left.opening(onPage: 0).zoomBasis, .notes, "and an opening on another page")
         first.window.isHidden = true
 
         let again = try host(entries, record: first.session.record, positions: store)

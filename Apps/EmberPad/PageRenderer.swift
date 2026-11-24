@@ -59,7 +59,7 @@ struct PageUndo {
 /// This is the replacement point for report option B. Ink and persistence belong to DocumentSession.
 @MainActor
 enum PageRendererFactory {
-    static func make(session: DocumentSession, student: StudentDisplayModel, tools: ToolState) -> any WorksheetPageRenderer {
+    static func make(session: DocumentSession, student: StudentDisplayModel, tools: ToolState) -> any CopyFlipRenderer {
         PDFOverlayPageController(session: session, student: student, tools: tools)
     }
 }
@@ -68,6 +68,12 @@ struct PageRendererHost: UIViewControllerRepresentable {
     let renderer: any WorksheetPageRenderer
     func makeUIViewController(context: Context) -> UIViewController { renderer.viewController }
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+}
+
+/// EP177: the Teacher button's words.
+enum CopyFlipText {
+    static let buttonIdentifier = "TeacherCopyFlip"
+    static func buttonLabel(shown: ClassCopy) -> String { shown == .teacher ? "Back to Student copy" : "Teacher copy" }
 }
 
 /// Which look the nav-bar share pill takes (design 5.2). Pure mapping, so tests
@@ -113,7 +119,7 @@ struct SharePillLabel: View {
     let state: SharePillState
     /// Portrait shortens the sharing pill to "Sharing" (design 5.2).
     var short = false
-    /// EP130: the teacher swapped the class onto the Teacher copy.
+    /// EP177: the class sees the Teacher copy the worksheet is flipped to.
     var classCopy = ClassCopy.student
 
     var body: some View {
@@ -325,20 +331,20 @@ struct EditorScreen: View {
         _chrome = StateObject(wrappedValue: chrome ?? PageChromeState())
         _search = StateObject(wrappedValue: search ?? WorksheetSearchModel())
         _tools = State(initialValue: tools ?? ToolState())
+        _flip = StateObject(wrappedValue: CopyFlip(presentation: presentation))
     }
+    /// The worksheet's Student copy and its renderer. EP177: the paired Teacher copy is `flip`'s.
     @State private var session: DocumentSession?
-    @State private var renderer: (any WorksheetPageRenderer)?
+    @State private var renderer: (any CopyFlipRenderer)?
     @State private var errorMessage: String?
     @StateObject private var chrome: PageChromeState
     /// The header's in-document search (EP63).
     @StateObject private var search: WorksheetSearchModel
     @StateObject private var pageThumbnails = PageThumbnailStore()
     @State private var tools: ToolState
-    // The card's open state and its corner per orientation, persisted across launches (design 6.3).
-    @State private var teacherCard = TeacherCopyCardState()
-    /// Identifies this editor to `PresentationState`, which only lets the editor that set the answers clear them.
-    @State private var answersOwner = UUID()
-    /// The paired Teacher copy's library id, under which the panel remembers where its answers were left (EP121).
+    /// EP177: the Student copy and its paired Teacher copy, one over the other, and which one the canvas shows.
+    @StateObject private var flip: CopyFlip
+    /// The paired Teacher copy's library id once this editor has opened it, so closing the editor closes it too.
     @State private var teacherCopyID: UUID?
     @StateObject private var flattenedExport = FlattenedExportModel()
     /// The remembered Add Page choice (EP61).
@@ -411,10 +417,10 @@ struct EditorScreen: View {
         guard !leavingForTab, !editingPages else { return }
         leavingForTab = true
         Task {
-            await renderer?.landInkBeforeLeaving(timeout: NotebookLeave.inkWait)
+            for copy in flip.renderers { await copy.landInkBeforeLeaving(timeout: NotebookLeave.inkWait) }
             if !leave() {
                 leavingForTab = false
-                renderer?.setPageInput(true)
+                for copy in flip.renderers { copy.setPageInput(true) }
             }
         }
     }
@@ -428,10 +434,20 @@ struct EditorScreen: View {
     /// iPad landscape keeps the full sharing copy; portrait and iPhone shorten it.
     private var shortPill: Bool { !(horizontalSizeClass == .regular && verticalSizeClass == .compact) }
 
+    /// EP177: the copy the canvas shows: the Student copy, or the Teacher copy the teacher flipped it to.
+    private var shownSession: DocumentSession? { flip.shown == .teacher ? flip.teacherSession ?? session : session }
+    private var shownRenderer: (any CopyFlipRenderer)? { flip.shownRenderer ?? renderer }
+
     /// Thumbnails show page content, so they follow the same main-screen policy as the pages themselves.
     private var pagesAvailable: Bool {
-        guard let session, renderer != nil, session.pdf.pageCount > 0 else { return false }
-        return presentation.policy.rendersOnMainScreen(session.record)
+        guard let shownSession, renderer != nil, shownSession.pdf.pageCount > 0 else { return false }
+        return presentation.policy.rendersOnMainScreen(shownSession.record)
+    }
+
+    /// EP177: the Teacher copy may not be drawn on the main screen now (`PresentationPolicy`): its pages leave the view
+    /// hierarchy, and while the canvas is flipped to it the placeholder stands in its place.
+    private var teacherCopyHidden: Bool {
+        flip.teacherSession.map { !presentation.policy.rendersOnMainScreen($0.record) } ?? false
     }
 
     private func pageNavigator(_ session: DocumentSession) -> some View {
@@ -440,9 +456,14 @@ struct EditorScreen: View {
                           onAction: canAddPages ? { action in pageAction(action) } : nil)
     }
 
-    /// Only a Student copy takes added pages; a Teacher copy stays exactly as delivered. Read-only mode takes no page
-    /// tools at all (EP63).
-    private var canAddPages: Bool { session?.record.role == .student && pagesAvailable && !editingPages && !chrome.readOnly }
+    /// Only a Student copy takes added pages; a Teacher copy stays exactly as delivered, so page tools are off while the
+    /// canvas is flipped to it (EP177). Read-only mode takes no page tools at all (EP63).
+    private var canAddPages: Bool {
+        flip.shown == .student && session?.record.role == .student && pagesAvailable && !editingPages && !chrome.readOnly
+    }
+
+    /// EP177: Clear Page and Clear All Ink, on whichever copy the canvas shows: the Teacher copy takes ink like any page.
+    private var canEditInk: Bool { shownSession != nil && pagesAvailable && !editingPages && !chrome.readOnly }
 
     /// Read-only (EP63) hides the tool row, as GoodNotes does.
     private var showsTools: Bool { !chrome.readOnly }
@@ -461,6 +482,7 @@ struct EditorScreen: View {
                 }
                 header
                 if let session { InkSaveBanner(session: session) }
+                if let teacher = flip.teacherSession { InkSaveBanner(session: teacher) }
             }
             // EP169: a touch on the header while the tool palette is open only closes it.
             .overlay { if showsTools && tools.paletteOpen { PencilPaletteDismissShield { tools.closePalette() } } }
@@ -490,12 +512,13 @@ struct EditorScreen: View {
                 tools.settingsTool = nil
                 tools.closePalette()
             }
-            renderer?.setReadOnly(readOnly)
+            for copy in flip.renderers { copy.setReadOnly(readOnly) }
         }
         // Matches show page text, so search follows the main-screen policy like the pages and thumbnails.
         .onChange(of: pagesAvailable) { _, available in if !available { search.close() } }
+        .onChange(of: teacherCopyHidden, initial: true) { _, hidden in flip.setTeacherHidden(hidden) }
         .alert("Go to Page", isPresented: $chrome.goToPageOpen) {
-            let count = session?.pdf.pageCount ?? 0
+            let count = shownSession?.pdf.pageCount ?? 0
             TextField(PageNumberField.range(pageCount: count), text: $goToPageText)
                 .keyboardType(.numberPad)
             Button("Go") {
@@ -503,18 +526,18 @@ struct EditorScreen: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Page \(PageNumberField.range(pageCount: session?.pdf.pageCount ?? 0))")
+            Text("Page \(PageNumberField.range(pageCount: shownSession?.pdf.pageCount ?? 0))")
         }
         .alert(ClearPageText.title(chrome.pageToClear ?? 0),
                isPresented: Binding(get: { chrome.pageToClear != nil }, set: { if !$0 { chrome.pageToClear = nil } }),
                presenting: chrome.pageToClear) { page in
-            Button("Clear Page", role: .destructive) { renderer?.clearInk(onPage: page) }
+            Button("Clear Page", role: .destructive) { shownRenderer?.clearInk(onPage: page) }
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text(ClearPageText.message)
         }
         .alert(ClearAllInkText.title, isPresented: $chrome.clearAllInkOpen) {
-            Button(ClearAllInkText.confirm, role: .destructive) { renderer?.clearAllInk(undoManager: nil) }
+            Button(ClearAllInkText.confirm, role: .destructive) { shownRenderer?.clearAllInk(undoManager: nil) }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(ClearAllInkText.message)
@@ -523,24 +546,27 @@ struct EditorScreen: View {
             do {
                 let opened = try await library.open(documentID)
                 presentation.student.opened(opened.record)
-                // The paired Teacher copy is the card's answer key; it stays in the main scene (see TeacherCopyCard).
-                let teacherCopy = await library.teacherCopy(for: opened.record)
-                let answers = teacherCopy?.url
-                guard !Task.isCancelled else { return }
-                presentation.showPrivateAnswers(answers, owner: answersOwner, answersID: teacherCopy?.record.id)
-                teacherCopyID = teacherCopy?.record.id
-                teacherCard.worksheetOpened(hasTeacherCopy: answers != nil)
                 LastWorksheet().opened(opened.record)
                 install(opened, startPage: nil)
+                // EP177: the paired Teacher copy opens too, under the worksheet, so the Teacher button turns the page
+                // over to it at once. It stays in the main scene, like every Teacher copy.
+                guard let teacherCopy = await library.teacherCopy(for: opened.record), !Task.isCancelled else {
+                    lessonWorksheetOpened(opened.record, teacherID: nil)
+                    return
+                }
+                let teacher = try? await library.open(teacherCopy.record.id)
+                if teacher != nil { teacherCopyID = teacherCopy.record.id }
+                guard !Task.isCancelled else { return }
+                guard let teacher else { return lessonWorksheetOpened(opened.record, teacherID: nil) }
+                installTeacher(teacher)
+                lessonWorksheetOpened(opened.record, teacherID: teacher.record.id)
                 // EP158: which Teacher page answers each worksheet page, by their words, read off the main thread
                 // once per pair of files and kept.
-                if let teacherCopy {
-                    let match = await TeacherCopyPageMatches.shared.match(
-                        student: opened.originalURL, studentHash: opened.record.source.sha256.rawValue,
-                        teacher: teacherCopy.url, teacherHash: teacherCopy.record.source.sha256.rawValue)
-                    guard !Task.isCancelled else { return }
-                    presentation.pageMatchFound(match, for: teacherCopy.url, owner: answersOwner)
-                }
+                let match = await TeacherCopyPageMatches.shared.match(
+                    student: opened.originalURL, studentHash: opened.record.source.sha256.rawValue,
+                    teacher: teacherCopy.url, teacherHash: teacherCopy.record.source.sha256.rawValue)
+                guard !Task.isCancelled else { return }
+                flip.matchFound(match)
             } catch { errorMessage = error.localizedDescription }
         }
         .onDisappear {
@@ -551,32 +577,42 @@ struct EditorScreen: View {
             tools.settingsTool = nil
             tools.closePalette()
             presentation.student.clear()
-            presentation.clearPrivateAnswers(owner: answersOwner)
+            presentation.lessonInk.worksheetClosed(documentID)
             session?.drawingDidChange = nil
+            flip.teacherSession?.drawingDidChange = nil
             // EP160: the page tools' actions and the renderer's Teach and page undo capture this view, whose state holds
             // the renderer, the session and `chrome`; left set, they keep the whole worksheet in memory after it closes.
             chrome.detachEditor()
+            flip.detach()
             renderer?.onTeach = nil
             renderer?.pageUndo = nil
-            Task { do { try await library.close(documentID) } catch { library.errorMessage = error.localizedDescription } }
+            let teacherID = teacherCopyID
+            Task {
+                do {
+                    try await library.close(documentID)
+                    if let teacherID { try await library.close(teacherID) }
+                } catch { library.errorMessage = error.localizedDescription }
+            }
         }
     }
 }
 
 extension EditorScreen {
-    /// The page with what floats over it: the page pill, the Teacher copy panel and the tool toast.
+    /// The page with what floats over it: the page pill and the tool toast.
     private var pageArea: some View {
             ZStack(alignment: .topLeading) {
                 Group {
-                    if let renderer, let session {
-                        if presentation.policy.rendersOnMainScreen(session.record) {
-                            // A page edit opens a new session and renderer; the id swaps the hosted controller with it.
-                            PageRendererHost(renderer: renderer).id(session.instanceID)
-                        }
-                        else {
-                            // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets no pixels.
-                            PrivatePlaceholder(text: "Teacher copy · private. Hidden while another screen shows this iPad, or while inactive.")
-                        }
+                    if renderer != nil, session != nil {
+                        // EP177: both copies, one over the other. A page edit puts a new Student renderer in the same
+                        // container.
+                        CopyFlipHost(controller: flip.controller)
+                            .overlay {
+                                if flip.shown == .teacher, teacherCopyHidden {
+                                    // The Teacher copy's pages leave the view hierarchy, so a captured main screen gets
+                                    // no pixels.
+                                    PrivatePlaceholder(text: "Teacher copy · private. Hidden while another screen shows this iPad, or while inactive.")
+                                }
+                            }
                     } else if let errorMessage { ContentUnavailableView("Unable to open worksheet", systemImage: "exclamationmark.triangle", description: Text(errorMessage)) }
                     else { ProgressView("Opening worksheet") }
                 }
@@ -584,7 +620,7 @@ extension EditorScreen {
                 // only on the way in; settled, both are identity.
                 .scaleEffect(entrance.pageScale)
                 .opacity(entrance.pageOpacity)
-                if chrome.pagePillVisible, let session, session.pdf.pageCount > 0 {
+                if chrome.pagePillVisible, let session = shownSession, session.pdf.pageCount > 0 {
                     PagePill(current: chrome.currentPage, total: session.pdf.pageCount,
                              showsPages: chrome.isShowingPages(from: .pill)) {
                         pageNavigator(session)
@@ -594,35 +630,15 @@ extension EditorScreen {
                     .padding(.bottom, showsTools && dock == .bottom ? ToolbarDockDrag.margin + ToolbarStrip.height : 0)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
-                // EP101: the tool palette floats over the page against its edge, where it was left. The Teacher copy
-                // slides over it, as Slide Over does, and its pull tab is never under it.
+                // EP101: the tool palette floats over the page against its edge, where it was left.
                 if showsTools {
-                    ToolbarFloatLayout(dock: dock, along: tools.settings.toolbarAlong, tabSide: teacherCard.side) { toolRow }
+                    ToolbarFloatLayout(dock: dock, along: tools.settings.toolbarAlong) { toolRow }
                         .transition(.opacity)
-                        // Carried, it passes over the Teacher copy's pull tab rather than under it.
                         .zIndex(toolbarCarry.isCarrying ? 1 : 0)
-                    // EP169: the Pencil tool palette's button floats over the page, under the Teacher copy panel.
+                    // EP169: the Pencil tool palette's button floats over the page.
                     // EP175: only while Pencil double-tap is set to the tool palette.
                     if tools.showsPaletteButton {
                         PencilPaletteButtonLayer(tools: tools, toolbar: toolRowFrame, dock: dock)
-                    }
-                }
-                // iPad main scene only: the external scene never draws this, and it has no answer URL.
-                if let session {
-                    ClassCopyReader(indicator: presentation.student.classCopy) { classCopy in
-                        TeacherCopyCardOverlay(content: .resolve(policy: presentation.policy,
-                                                                 mainSceneActive: presentation.mainSceneActive,
-                                                                 privateAnswerURL: presentation.privateAnswerURL),
-                                               documentTitle: session.record.title,
-                                               card: teacherCard,
-                                               hasAnswerPage: TeacherCopyAnswerPage.pdfPage(for: session.page(at: chrome.currentPage)) != nil,
-                                               answersID: teacherCopyID,
-                                               shownToClass: classCopy == .teacher,
-                                               studentPage: TeacherCopyAnswerPage.openPage(for: session.page(at: chrome.currentPage),
-                                                                                           index: chrome.currentPage,
-                                                                                           match: presentation.teacherMatch),
-                                               landing: presentation.teacherLanding.flatMap { $0.worksheetID == session.record.id ? $0 : nil },
-                                               onShownPage: { [student = presentation.student] page in student.showTeacherPage(page) })
                     }
                 }
                 // EP169: the open palette, over everything on the page, with the cover that closes it.
@@ -703,8 +719,9 @@ extension EditorScreen {
         let made = PageRendererFactory.make(session: opened, student: presentation.student, tools: tools)
         made.startPage = startPage
         made.readingPositions = ReadingPositions()
-        made.onPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
-        chrome.jumpToPage = { [weak made] page in made?.goToPage(page) }
+        flip.onShownPageChange = { [weak chrome] page in chrome?.notePageChange(page) }
+        flip.onFlip = { copy in flipped(to: copy) }
+        chrome.jumpToPage = { [weak flip] page in flip?.shownRenderer?.goToPage(page) }
         chrome.addPage = { template in addPage(template) }
         chrome.toggleBookmark = { toggleBookmark(chrome.currentPage) }
         chrome.rotatePage = { clockwise in rotatePage(clockwise: clockwise) }
@@ -713,13 +730,45 @@ extension EditorScreen {
         // EP153: only a Student copy takes added pages, so only it offers Teach.
         if opened.record.role == .student { made.onTeach = { request in teach(request) } }
         made.setReadOnly(chrome.readOnly)
-        search.highlight = { [weak made] matches, current in made?.highlightSearch(matches, current: current) }
-        search.reveal = { [weak made] match in made?.reveal(match) }
+        search.highlight = { [weak flip] matches, current in flip?.shownRenderer?.highlightSearch(matches, current: current) }
+        search.reveal = { [weak flip] match in flip?.shownRenderer?.reveal(match) }
         renderer = made
-        // EP158: swapping the class back from the Teacher copy turns this worksheet.
-        presentation.swapWorksheet = made as? any ClassSwapWorksheet
+        flip.installStudent(opened, renderer: made)
         // A page edit reopens the worksheet on a new PDF: an open search runs again on its pages.
         search.attach(opened.pdf)
+    }
+
+    /// EP177: the paired Teacher copy, open under the worksheet. It takes ink like any page, but no page edit or Teach.
+    private func installTeacher(_ teacher: DocumentSession) {
+        let made = PageRendererFactory.make(session: teacher, student: presentation.student, tools: tools)
+        made.readingPositions = ReadingPositions()
+        made.setReadOnly(chrome.readOnly)
+        flip.installTeacher(teacher, renderer: made, match: nil)
+        flip.setTeacherHidden(teacherCopyHidden)
+    }
+
+    /// EP177: the Teacher button. The canvas turns to the other copy, landing on the same question.
+    private func flipCopy() {
+        guard flip.hasTeacherCopy, !editingPages, !leavingForTab else { return }
+        tools.settingsTool = nil
+        tools.closePalette()
+        chrome.closePages()
+        flip.flip()
+    }
+
+    /// EP177: the canvas now shows `copy`: search, thumbnails and the page pill follow it.
+    private func flipped(to copy: ClassCopy) {
+        pageThumbnails.reset()
+        search.highlight?([], nil)
+        if let shownSession { search.attach(shownSession.pdf) }
+    }
+
+    /// EP177: tells the lesson's "Clear ink?" which worksheet is open, and how to clear its copies while it is.
+    private func lessonWorksheetOpened(_ record: DocumentRecord, teacherID: UUID?) {
+        presentation.lessonInk.worksheetOpened(.init(studentID: record.id, title: record.title, teacherID: teacherID)) { [weak flip] copy in
+            guard let flip else { return }
+            (copy == .student ? flip.studentRenderer : flip.teacherRenderer)?.clearInkForLessonEnd()
+        }
     }
 
     /// The page in view's entry in the manifest.
@@ -813,8 +862,9 @@ extension EditorScreen {
     }
 
     /// The Ember title bar (EP54 layout, EP57 colours): back, library sidebar, pages, search and export on the
-    /// left; the title with its menu in the centre; undo, redo, Teacher copy, bookmark, Add Page, read-only, while
-    /// presenting the class-copy swap and Freeze (EP130, EP152), the student view and More on the right. Read-only greys the bar and drops undo and redo (EP63).
+    /// left; the title with its menu in the centre; undo, redo, the Teacher copy flip (EP177, only for a worksheet with
+    /// one), bookmark, Add Page, read-only, while presenting Freeze (EP152), the student view and More on the right.
+    /// Read-only greys the bar and drops undo and redo (EP63).
     private var header: some View {
         HeaderBarLayout {
             HStack(spacing: WorksheetHeaderMetrics.iconSpacing) { leadingActions }
@@ -845,7 +895,7 @@ extension EditorScreen {
             .accessibilityLabel("Pages")
             .disabled(!pagesAvailable)
             .popover(isPresented: chrome.isShowingPages(from: .toolbar), arrowEdge: .top) {
-                if let session { pageNavigator(session) }
+                if let shownSession { pageNavigator(shownSession) }
             }
         // EP63: GoodNotes' Search, after the page grid.
         Button { search.isOpen = true } label: { HeaderIcon(symbol: "magnifyingglass") }
@@ -865,7 +915,7 @@ extension EditorScreen {
 
     @ViewBuilder
     private var titleMenu: some View {
-        if let session {
+        if let session = shownSession {
             HeaderTitleMenu(session: session, currentPage: chrome.currentPage, pagesAvailable: pagesAvailable) {
                 chrome.openPages(from: .toolbar)
             }
@@ -878,19 +928,23 @@ extension EditorScreen {
     private var trailingActions: some View {
         // Read-only hides undo and redo, as GoodNotes does (EP63).
         if !chrome.readOnly {
-            Button { renderer?.undo() } label: { HeaderIcon(symbol: "arrow.uturn.backward") }
+            Button { shownRenderer?.undo() } label: { HeaderIcon(symbol: "arrow.uturn.backward") }
                 .accessibilityLabel("Undo")
-            Button { renderer?.redo() } label: { HeaderIcon(symbol: "arrow.uturn.forward") }
+            Button { shownRenderer?.redo() } label: { HeaderIcon(symbol: "arrow.uturn.forward") }
                 .accessibilityLabel("Redo")
         }
-        Button {
-            withAnimation { teacherCard.toggle() }
-        } label: {
-            HeaderIcon(symbol: "book", isOn: teacherCard.isOpen)
+        // EP177: turns the page over to the Teacher copy and back, only on a worksheet that has one.
+        if flip.hasTeacherCopy {
+            Button { flipCopy() } label: {
+                HeaderIcon(symbol: "book", isOn: flip.shown == .teacher)
+            }
+            .accessibilityIdentifier(CopyFlipText.buttonIdentifier)
+            .accessibilityLabel(CopyFlipText.buttonLabel(shown: flip.shown))
+            .accessibilityValue(flip.shown.title)
+            .disabled(editingPages || leavingForTab)
         }
-        .accessibilityLabel(teacherCard.toggleAccessibilityLabel)
         // EP62: GoodNotes' bookmark, just before Add Page.
-        if let session {
+        if let session = shownSession {
             BookmarkHeaderButton(session: session, page: chrome.currentPage) { toggleBookmark(chrome.currentPage) }
                 .disabled(!canAddPages)
         } else {
@@ -909,9 +963,6 @@ extension EditorScreen {
         }
         .accessibilityLabel(chrome.readOnly ? "Edit" : "Read-only mode")
         .accessibilityHint(chrome.readOnly ? "Shows the tools so the pages take ink again" : "Hides the tools so the pages take no ink")
-        // EP130: while presenting, swaps what the class sees between the Student copy and the Teacher copy.
-        ClassCopySwapControl(presentation: presentation, present: presentation.present,
-                             indicator: presentation.student.classCopy, worksheet: session?.record, short: shortPill)
         // EP152: while presenting, freezes what the class sees, or unfreezes it, in one tap.
         ClassViewFreezeControl(presentation: presentation, present: presentation.present, freeze: presentation.student.freeze)
         Menu {
@@ -974,19 +1025,19 @@ extension EditorScreen {
                 goToPageText = ""
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { chrome.goToPageOpen = true }
             }
-            .disabled(session == nil || renderer == nil)
+            .disabled(shownSession == nil || renderer == nil)
             // EP120: GoodNotes' Clear Page, in its place in More, after Go to Page.
-            if let session {
-                ClearPageMenuButton(session: session, page: chrome.currentPage, enabled: canAddPages) {
+            if let session = shownSession {
+                ClearPageMenuButton(session: session, page: chrome.currentPage, enabled: canEditInk) {
                     chrome.pageToClear = chrome.currentPage
                 }
             }
         }
         // EP159: beside Clear Page, the whole worksheet's reset to its original paper, in a section of its own as it
         // is not about the page in view.
-        if let session {
+        if let session = shownSession {
             Section {
-                ClearAllInkMenuButton(session: session, enabled: canAddPages) { chrome.clearAllInkOpen = true }
+                ClearAllInkMenuButton(session: session, enabled: canEditInk) { chrome.clearAllInkOpen = true }
             }
         }
     }
@@ -1014,7 +1065,8 @@ extension EditorScreen {
 }
 
 /// More › Clear All Ink for the whole worksheet (EP159). Off while no page holds ink, as there is nothing to clear, and
-/// wherever the pages take no edits (read-only, a Teacher copy, a page edit saving), as Clear Page is.
+/// wherever the pages take no edits (read-only, a page edit saving), as Clear Page is. EP177: on the Teacher copy the
+/// worksheet is flipped to, it clears the Teacher copy's ink.
 private struct ClearAllInkMenuButton: View {
     @ObservedObject var session: DocumentSession
     let enabled: Bool
@@ -1036,7 +1088,7 @@ enum ClearAllInkText {
 }
 
 /// More › Clear Page for the page in view (EP120). Off while the page holds no ink, as there is nothing to clear, and
-/// wherever the page takes no edits (read-only, a Teacher copy, a page edit saving).
+/// wherever the page takes no edits (read-only, a page edit saving).
 private struct ClearPageMenuButton: View {
     @ObservedObject var session: DocumentSession
     let page: Int

@@ -15,7 +15,7 @@ public enum LibraryError: Error, LocalizedError, Sendable, Equatable {
         case .hashMismatch: "The worksheet changed during import. Please try again."
         case .documentInUse: "Close the open worksheet before filing its updated PDF. The delivered copy is kept for the next Inbox check."
         case .inkProtected: "This worksheet has ink, so it is kept as it is and an update is filed beside it."
-        case .teacherCopyReadOnly: "Teacher copies cannot be annotated in this version. This ink was not saved."
+        case .teacherCopyReadOnly: "A Teacher copy keeps its pages as delivered: pages cannot be added, moved or changed on it."
         case .pageNotRemovable: "Only pages added in Ember Slate can be deleted. The worksheet's own pages stay."
         case .pageKeepsItsPaper: "Only paper pages added in Ember Slate can change template. The worksheet's own pages keep theirs."
         case .pageKeepsItsSize: "A Teach page keeps its paper size and orientation. Only its paper kind and colour can change."

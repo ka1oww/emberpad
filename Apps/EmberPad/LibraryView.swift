@@ -96,6 +96,9 @@ struct LibraryView: View {
         .tint(Theme.tint)
         // EP129: the Mac's lesson recording, and EP152's Frozen badge, over every screen.
         .modifier(PresentLessonChrome(present: presentation.present, presentation: presentation))
+        // EP177: when a lesson ends, whether to clear the ink of the worksheet it used.
+        .modifier(LessonInkClearAlert(prompt: presentation.lessonInk))
+        .onAppear { presentation.lessonInk.clearStored = { [library] id in await library.clearInk(id) } }
         // EP165: Import PDF opens the Files picker straight away, PDFs only, several at once, like GoodNotes'
         // Import; each PDF becomes a notebook in the folder being viewed.
         .fileImporter(isPresented: $showImport, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in

@@ -188,14 +188,26 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     private(set) var notesFit: CGFloat?
     private var notesFitSize: CGSize = .zero
 
+    /// EP177: false while this copy lies under the one the canvas shows (`setActive`). Internal for tests.
+    private(set) var isActive = true
+    /// EP177: this copy's own undo history. Every page canvas finds it up the responder chain, so an undo on the
+    /// Student copy never reaches the Teacher copy's ink under it, nor the other way round.
+    private let ownUndoManager = UndoManager()
+    override var undoManager: UndoManager? { ownUndoManager }
+
     init(session: DocumentSession, student: StudentDisplayModel, tools: ToolState) {
         self.session = session; self.student = student; self.tools = tools
         super.init(nibName: nil, bundle: nil)
-        // The toolbar strip is the only tool source on both 17.5 and 18 (no PKToolPicker).
+        claimTools()
+    }
+    required init?(coder: NSCoder) { nil }
+
+    /// The toolbar strip is the only tool source on both 17.5 and 18 (no PKToolPicker): its tool and Clear Page reach
+    /// this copy's pages from now on.
+    func claimTools() {
         tools.onToolChange = { [weak self] tool in self?.apply(tool) }
         tools.onClearPage = { [weak self] in self?.clearPage() }
     }
-    required init?(coder: NSCoder) { nil }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -277,6 +289,11 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         pdfView.addGestureRecognizer(wholeStrokeEraserClaim)
         view.layer.addSublayer(eraserCircle)
         updateCanvasInput()
+        if !isActive {
+            // EP177: loaded under the copy the canvas shows, it takes nothing until it is flipped to.
+            pencilInteraction.isEnabled = false
+            view.isUserInteractionEnabled = false
+        }
         publishPage()
         onPageChange?(currentPage)
     }
@@ -295,7 +312,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             // EP121: a worksheet opens where it was left, in this launch or an earlier one.
             let remembered = readingPositions?.position(for: session.record.id)
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                // EP177: a copy the flip has already landed somewhere stays there.
+                guard let self, !positionRestored else { return }
                 remembered?.restore(into: pdfView, indexOfPageID: { [session] id in session.pages.pages.firstIndex { $0.id == id } },
                                     notesFit: notesFit)
                 // A remembered place puts its page's left edge at the view's; fitted, the notes stay centred.
@@ -338,11 +356,16 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         notesFitSize = size
         notesFit = fit
         guard fitted else { return }
-        // PDFKit zooms about the view's centre; the point at the top of the view stays there instead.
+        zoomKeepingTop(to: fit)
+        centreHorizontally()
+    }
+
+    /// Zooms to `scale`. PDFKit zooms about the view's centre; the point at the top of the view stays there instead.
+    private func zoomKeepingTop(to scale: CGFloat) {
         let top = CGPoint(x: pdfView.bounds.midX, y: pdfView.bounds.minY)
         let page = pdfView.page(for: top, nearest: true)
         let point = page.map { pdfView.convert(top, to: $0) }
-        pdfView.scaleFactor = fit
+        pdfView.scaleFactor = scale
         pdfView.layoutIfNeeded()
         if let page, let point, let scrollView = Self.firstScrollView(in: pdfView) {
             let inset = scrollView.adjustedContentInset
@@ -351,7 +374,6 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
             let moved = pdfView.convert(point, from: page).y - top.y
             scrollView.contentOffset.y = min(max(scrollView.contentOffset.y + moved, lowest), highest)
         }
-        centreHorizontally()
     }
 
     /// The worksheet is at its notes fit: the teacher has not zoomed.
@@ -854,8 +876,8 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         canvas.tool = tools.pencilTool
         updateCanvasInput()
         // First responder keeps undo on the touched page. Read-only leaves it unset, so no keyboard or system undo
-        // gesture reaches the ink.
-        if !readOnly { canvas.becomeFirstResponder() }
+        // gesture reaches the ink, as does lying under the copy the canvas shows (EP177).
+        if !readOnly, isActive { canvas.becomeFirstResponder() }
     }
 
     /// Read-only mode (EP63), as GoodNotes': the pages keep scrolling, zooming and following page jumps, but nothing
@@ -882,10 +904,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         }
         undoTap.isEnabled = !readOnly
         redoTap.isEnabled = !readOnly
-        pencilInteraction.isEnabled = !readOnly
+        pencilInteraction.isEnabled = !readOnly && isActive
         inkSelection.pasteMenu.longPress.isEnabled = !readOnly
         updateCanvasInput()
-        if !readOnly, let activeCanvas { activeCanvas.becomeFirstResponder() }
+        if !readOnly, isActive, let activeCanvas { activeCanvas.becomeFirstResponder() }
     }
 
     // MARK: Teach (EP153)
@@ -1030,7 +1052,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     }
 
     private func publishPage() {
-        guard publishing, let page = session.pdf.page(at: studentPage) else { return }
+        guard publishing, isActive, let page = session.pdf.page(at: studentPage) else { return }
         let size = canvases[studentPage]?.pageSpace.bounds.size ?? page.displayedSize
         // A Teacher copy publishes only the private placeholder; the snapshot type refuses its pages in both framings.
         student.publish(session: session, pageIndex: studentPage, canvasSize: size, viewport: presenterViewport())
@@ -1062,7 +1084,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// page and style; nil for anything that will not ink. Internal for tests, which have no touches.
     func liveInkTarget(at point: CGPoint, on canvas: PKCanvasView) -> UIView? {
         liveStroke = nil
-        guard publishing, canvas === activeCanvas, canvas.drawingGestureRecognizer.isEnabled,
+        guard publishing, isActive, canvas === activeCanvas, canvas.drawingGestureRecognizer.isEnabled,
               canvas.pageSpace.bounds.contains(point),
               let page = canvases.first(where: { $0.value === canvas })?.key,
               let style = LiveInkStyle(tool: canvas.tool) else { return nil }
@@ -2829,14 +2851,17 @@ extension PDFOverlayPageController {
     /// one undo step named "Clear All Ink". Every page and its paper stay, and the view stays where it is, as after
     /// Clear Page. It waits for a stroke PencilKit is still committing exactly as Clear Page does, and each cleared
     /// page saves like any other ink change. Nothing is cleared unless the undo step can be recorded.
-    func clearAllInk(undoManager: UndoManager? = nil) {
+    func clearAllInk(undoManager: UndoManager? = nil) { clearAllInk(undoManager: undoManager, evenReadOnly: false) }
+
+    /// `evenReadOnly` clears in read-only mode too: the lesson's end asked for it (EP177), not a tap on the pages.
+    func clearAllInk(undoManager: UndoManager?, evenReadOnly: Bool) {
         pendingClearPage?.cancel()
         pendingClearPage = nil
-        guard !readOnly, !session.isRetired else { return }
+        guard !readOnly || evenReadOnly, !session.isRetired else { return }
         let deadline = Date().addingTimeInterval(Self.clearPageMaxWait)
         func attempt() {
             pendingClearPage = nil
-            guard !readOnly, !session.isRetired else { return }
+            guard !readOnly || evenReadOnly, !session.isRetired else { return }
             if pencilIsDown || !inkFlights.isEmpty || isReplacingStroke, Date() < deadline {
                 let work = DispatchWorkItem { MainActor.assumeIsolated { attempt() } }
                 pendingClearPage = work
@@ -2978,28 +3003,80 @@ private final class LaserTrailTicker: NSObject {
 
 
 
-// MARK: - EP158: swapping the class to the Teacher copy and back
+// MARK: - EP177: one of the two copies the editor flips between
 
-extension PDFOverlayPageController: ClassSwapWorksheet {
-    var swapDocumentID: UUID { session.record.id }
-
-    func positionForSwap() -> ReadingPosition? {
-        ReadingPosition.capture(from: pdfView, pageID: { [session] in session.page(at: $0)?.id }, notesFit: notesFit)
+extension PDFOverlayPageController {
+    /// EP177: makes this the copy the canvas shows, or puts it under the one that is. Under, it takes no touch, Pencil,
+    /// tool or first responder and publishes nothing to the class, with every stroke and ink change it held landed
+    /// first; it stays laid out and drawn, so flipping to it shows its pages at once. Shown again, it takes the tool
+    /// row, focuses its page and publishes it to the class.
+    func setActive(_ active: Bool) {
+        guard active != isActive else { return }
+        isActive = active
+        guard isViewLoaded else { return }
+        if active {
+            claimTools()
+            view.isUserInteractionEnabled = true
+            pencilInteraction.isEnabled = !readOnly
+            apply(tools.pencilTool)
+            if let canvas = canvases[currentPage] ?? activeCanvas { focus(canvas) }
+            else {
+                studentPage = currentPage
+                publishPage()
+            }
+            onPageChange?(currentPage)
+        } else {
+            if pageSettlePending { settlePageChange(focusing: false) }
+            finishWholeStrokeErase()
+            landInkEdits()
+            finishHighlighterErase()
+            inkSelection.dismiss()
+            liveStroke = nil
+            livePen.cancel()
+            clearScribblePreview()
+            hideLaser(animated: false)
+            clearLaserTrail()
+            hideEraserCircle()
+            holdGuide.removeFromSuperlayer()
+            pencilInteraction.isEnabled = false
+            view.isUserInteractionEnabled = false
+            activeCanvas?.resignFirstResponder()
+            saveReadingPosition()
+        }
     }
 
-    /// Turns to the worksheet page printed from PDF page `pdfPage`, unless it is already the page in view (it stays
-    /// exactly where it is), or goes back exactly to a place it was.
-    @discardableResult
-    func returnFromSwap(_ place: ClassSwapReturn) -> Bool {
-        switch place {
-        case .pdfPage(let pdfPage):
-            guard let index = session.pages.pages.firstIndex(where: { $0.isOriginal && $0.pdfPage == pdfPage }) else { return false }
-            if index != currentPage { goToPage(index) }
-        case .position(let position):
-            position.restore(into: pdfView, indexOfPageID: { [session] id in session.pages.pages.firstIndex { $0.id == id } },
-                             notesFit: notesFit)
-            if isAtNotesFit { centreHorizontally() }
+    /// EP177: the page in view, its PDF page (nil for a page added in Ember Slate) and the zoom relative to the notes fit.
+    var flipPlace: CopyFlipPlace? {
+        guard isViewLoaded, session.pdf.page(at: currentPage) != nil else { return nil }
+        let entry = session.page(at: currentPage)
+        return CopyFlipPlace(page: currentPage, pdfPage: entry?.isOriginal == false ? nil : TeacherCopyAnswerPage.pdfPage(for: entry),
+                             zoom: notesFit.map { Double(pdfView.scaleFactor / $0) })
+    }
+
+    /// EP177: the index of the page printed from PDF page `pdfPage`, if this copy has one.
+    func pageIndex(ofPDFPage pdfPage: Int) -> Int? {
+        session.pages.pages.firstIndex { $0.isOriginal && $0.pdfPage == pdfPage }
+    }
+
+    /// EP177: zooms to `zoom` relative to the notes fit, keeping the top of the view where it is, and then shows page
+    /// `index` from its top, unless it is already the page in view: then it stays exactly where it is.
+    func land(onPage index: Int?, zoom: Double?) {
+        loadViewIfNeeded()
+        // The copy underneath may not have laid out yet: its fit and page frames must exist before it moves.
+        view.layoutIfNeeded()
+        if let zoom, let fit = notesFit, fit > 0 {
+            let scale = min(max(fit * CGFloat(zoom), pdfView.minScaleFactor), pdfView.maxScaleFactor)
+            if abs(scale / pdfView.scaleFactor - 1) > ReadingPosition.zoomTolerance { zoomKeepingTop(to: scale) }
         }
-        return true
+        if let index, index != currentPage, session.pdf.page(at: index) != nil { goToPage(index) }
+        // A place put now must not be undone by the remembered one this copy would restore as it first appears.
+        positionRestored = true
+        startPage = nil
+    }
+
+    /// EP177: the lesson's end asked for this copy's ink to go (`LessonInkPrompt`): every page's ink is removed as one
+    /// undo step, as Clear All Ink does, read-only or not.
+    func clearInkForLessonEnd() {
+        clearAllInk(undoManager: ownUndoManager, evenReadOnly: true)
     }
 }

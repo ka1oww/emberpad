@@ -61,7 +61,7 @@ jobs:
               -only-testing:EmberPadTests/InkKeepsEveryStrokeTests
               -only-testing:EmberPadTests/ToolbarDockScreenshotTests
               -only-testing:EmberPadTests/ScribbleOutlineSteadyTests
-              -only-testing:EmberPadTests/TeacherCopyCardTests
+              -only-testing:EmberPadTests/TeacherCopyFlipTests
               -only-testing:EmberPadTests/InkStaysDrawnTests
               -only-testing:EmberPadUITests/ClearAllInkUITests
               -only-testing:EmberPadUITests/ClearPageUITests
@@ -91,7 +91,7 @@ jobs:
               -skip-testing:EmberPadTests/InkKeepsEveryStrokeTests
               -skip-testing:EmberPadTests/ToolbarDockScreenshotTests
               -skip-testing:EmberPadTests/ScribbleOutlineSteadyTests
-              -skip-testing:EmberPadTests/TeacherCopyCardTests
+              -skip-testing:EmberPadTests/TeacherCopyFlipTests
               -skip-testing:EmberPadTests/InkStaysDrawnTests
               -skip-testing:EmberPadUITests/ClearAllInkUITests
               -skip-testing:EmberPadUITests/ClearPageUITests
@@ -106,9 +106,8 @@ jobs:
               -skip-testing:EmberPadTests/LibraryFolderTransitionTests
               -skip-testing:EmberPadTests/LassoSelectsTheSameInkTests
               -skip-testing:EmberPadTests/HoldToShapeTests
-              -skip-testing:EmberPadUITests/PresentTeacherCopyUITests
               -skip-testing:EmberPadUITests/ReadingPositionUITests
-              -skip-testing:EmberPadUITests/TeacherCopyMatchUITests
+              -skip-testing:EmberPadUITests/TeacherCopyFlipUITests
               -skip-testing:EmberPadUITests/ToolbarDragTrackingUITests
               -skip-testing:EmberPadUITests/ToolbarFingerDragUITests
               -skip-testing:EmberPadUITests/ToolbarFreeDragUITests
@@ -120,9 +119,8 @@ jobs:
               -skip-testing:EmberPadUITests/ImportPDFUITests
           - shard: 4
             selection: >-
-              -only-testing:EmberPadUITests/PresentTeacherCopyUITests
               -only-testing:EmberPadUITests/ReadingPositionUITests
-              -only-testing:EmberPadUITests/TeacherCopyMatchUITests
+              -only-testing:EmberPadUITests/TeacherCopyFlipUITests
               -only-testing:EmberPadUITests/ToolbarDragTrackingUITests
               -only-testing:EmberPadUITests/NotebookTabsUITests
               -only-testing:EmberPadTests/PDFImportTests
