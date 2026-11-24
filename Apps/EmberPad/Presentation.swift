@@ -836,13 +836,13 @@ private struct StudentScreen: View {
             Color.black
             if picture.paused {
                 if let backdrop = picture.backdrop { StudentBackdropScreen(image: backdrop, badge: "Paused") }
-                else { Text("Paused").font(.largeTitle).foregroundStyle(.white) }
+                else { Text("Paused").font(Theme.studentMessage).foregroundStyle(.white) }
             } else {
                 switch picture.content {
                 case .page(let snapshot):
                     StudentPageSurface(snapshot: snapshot, framing: picture.framing, liveInk: picture.liveInk,
                                        laser: picture.laser, laserTrail: picture.laserTrail, teacher: picture.teacherFrame)
-                case .teacherCopyPrivate: Text("Teacher copy · private").font(.largeTitle).foregroundStyle(.white)
+                case .teacherCopyPrivate: Text("Teacher copy · private").font(Theme.studentMessage).foregroundStyle(.white)
                 case .none:
                     if let backdrop = picture.backdrop { StudentBackdropScreen(image: backdrop) } else { StudentIdleMark() }
                 }

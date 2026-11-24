@@ -472,7 +472,7 @@ final class StudentBackdropTests: XCTestCase {
         let paused = try render(StudentDisplayView(model: model))
         let plainPaused = try render(ZStack {
             Color.black
-            Text("Paused").font(.largeTitle).foregroundStyle(.white)
+            Text("Paused").font(Theme.studentMessage).foregroundStyle(.white)
         }.ignoresSafeArea())
         XCTAssertEqual(paused, plainPaused)
 
