@@ -106,6 +106,26 @@ final class PencilPaletteTests: XCTestCase {
         XCTAssertFalse(tools.paletteOpen)
     }
 
+    // MARK: - The button shows only with the palette on double-tap (EP175)
+
+    func testTheButtonShowsOnlyWhileDoubleTapIsTheToolPaletteAndKeepsItsPlaceWhileHidden() {
+        let tools = ToolState(defaults: defaults)
+        XCTAssertEqual(tools.settings.pencilDoubleTap, .iPadSetting)
+        XCTAssertFalse(tools.showsPaletteButton, "with the eraser (iPad setting), the default, there is no button")
+        tools.setPencilDoubleTap(.toolPalette)
+        XCTAssertTrue(tools.showsPaletteButton, "set to the tool palette, the button shows")
+        tools.setPaletteButton(PaletteButtonPlace(x: 0.2, y: 0.35))
+        tools.setPencilDoubleTap(.iPadSetting)
+        XCTAssertFalse(tools.showsPaletteButton, "set back, it goes")
+        XCTAssertEqual(tools.settings.paletteButton, PaletteButtonPlace(x: 0.2, y: 0.35), "its place is kept while it is hidden")
+        // The iPad's own palette preference still opens the palette, where the button would be.
+        XCTAssertEqual(tools.handlePencil(.showContextualPalette, gesture: .squeeze), .openPalette)
+        XCTAssertTrue(tools.paletteOpen)
+        tools.setPencilDoubleTap(.toolPalette)
+        XCTAssertTrue(tools.showsPaletteButton)
+        XCTAssertEqual(tools.settings.paletteButton, PaletteButtonPlace(x: 0.2, y: 0.35), "and it comes back there")
+    }
+
     // MARK: - Kept across launches
 
     func testTheDoubleTapChoiceAndTheButtonsPlaceAreKept() {

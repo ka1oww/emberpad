@@ -417,7 +417,7 @@ struct ToolSettingsPopover: View {
                 } header: {
                     Text("Pen gestures")
                 } footer: {
-                    Text("Hold the Pencil still for half a second at the end of a line and it snaps straight. Circle ink with the pen, then hold still, or lift and press the circle, to select it. Scribble back and forth over ink to erase it. Pencil double-tap opens the tool palette beside its round button when set to Tool palette.")
+                    Text("Hold the Pencil still for half a second at the end of a line and it snaps straight. Circle ink with the pen, then hold still, or lift and press the circle, to select it. Scribble back and forth over ink to erase it. Set Pencil double-tap to Tool palette to show the palette's round button over the worksheet; a double-tap or a tap on the button opens the palette beside it.")
                 }
             case .highlighter:
                 colorSection(.highlighter)

@@ -45,6 +45,8 @@ final class PencilPaletteScreenshotTests: XCTestCase {
         let (library, id) = try await makeLibrary()
         let window = try makeWindow()
         let tools = ToolState(defaults: defaults)
+        // EP175: the button is on the worksheet only while Pencil double-tap is set to the tool palette.
+        tools.setPencilDoubleTap(.toolPalette)
         let chrome = PageChromeState()
         let presentation = PresentationState()
         presentation.mainSceneActive = true
