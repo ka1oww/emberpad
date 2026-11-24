@@ -117,6 +117,7 @@ jobs:
               -skip-testing:EmberPadTests/DevicePresentLatencyTests
               -skip-testing:EmberPadTests/PDFImportTests
               -skip-testing:EmberPadUITests/ImportPDFUITests
+              -skip-testing:EmberPadUITests/PencilPaletteUITests
           - shard: 4
             selection: >-
               -only-testing:EmberPadUITests/ReadingPositionUITests
@@ -125,6 +126,7 @@ jobs:
               -only-testing:EmberPadUITests/NotebookTabsUITests
               -only-testing:EmberPadTests/PDFImportTests
               -only-testing:EmberPadUITests/ImportPDFUITests
+              -only-testing:EmberPadUITests/PencilPaletteUITests
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
