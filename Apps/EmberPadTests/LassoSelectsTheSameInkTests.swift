@@ -110,6 +110,34 @@ final class LassoSelectsTheSameInkTests: XCTestCase {
         XCTAssertGreaterThan(selected, 50)
     }
 
+    /// EP173: the stress test's page full of handwriting (`StressInk.heavyPage`) is handwriting to the lasso, so the
+    /// lasso as the app runs it (lines and shapes EmberPad drew by any part, EP162) selects on it exactly what testing
+    /// every edge with the half rule does. Its ink once had one pressure and even timing, the mark of a line EmberPad
+    /// drew (`LassoGeometry.isMadeLine`), so the app took nearly every stroke on it for a held line and the heavy-page
+    /// lasso check on the iPad failed (small loop 34 strokes against 29) with nothing wrong in the lasso.
+    func testAPageOfHandwritingIsSelectedAsTestingEveryEdgeDoes() {
+        let heavy = StressInk.heavyPage()
+        let made = heavy.indices.filter { LassoGeometry.isMadeLine(heavy[$0]) }
+        XCTAssertEqual(made, [], "\(made.count) of \(heavy.count) handwritten strokes are taken for lines EmberPad drew")
+        let drawing = PKDrawing(strokes: heavy)
+        var random = SeededRandom(seed: 173)
+        var loops: [(String, [CGPoint])] = []
+        // The stress test's loops (small, medium and big) round several places on the page, and loops drawn by hand.
+        for centre in [CGPoint(x: 300, y: 400), CGPoint(x: 180, y: 260), CGPoint(x: 420, y: 620)] {
+            for radius: CGFloat in [90, 160, 230] {
+                loops.append(("circle r\(Int(radius)) at \(centre)", StressInk.circle(center: centre, radius: radius)))
+            }
+        }
+        loops += Self.loops(&random).filter { $0.1.count >= 3 }.prefix(12)
+        var selected = 0
+        for (name, loop) in loops {
+            let everyEdge = LassoSelectionBefore.selectedIndices(in: drawing, lasso: loop)
+            XCTAssertEqual(LassoGeometry.selectedIndices(in: drawing, lasso: loop, linesByAnyPart: true), everyEdge, name)
+            selected += everyEdge.count
+        }
+        XCTAssertGreaterThan(selected, 500, "the loops hold enough of the page to tell")
+    }
+
     // MARK: - Fixtures
 
     /// Loops of every kind a lasso is drawn as, and some it rarely is.
