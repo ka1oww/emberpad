@@ -169,7 +169,7 @@ final class PresentedViewTests: XCTestCase {
 
         let views = Self.allViews(in: window)
         XCTAssertTrue(views.contains { $0 is StudentPageDrawingView }, "the worksheet page is drawn")
-        // Only composited bitmaps: no live PDF view (a Teacher copy panel is one), no ink canvas, no bars or controls.
+        // Only composited bitmaps: no live PDF view (the Teacher copy is one), no ink canvas, no bars or controls.
         for view in views {
             XCTAssertFalse(view is PDFView, "\(type(of: view))")
             XCTAssertFalse(view is PKCanvasView, "\(type(of: view))")

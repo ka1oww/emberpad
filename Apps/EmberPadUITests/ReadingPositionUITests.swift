@@ -2,8 +2,8 @@ import XCTest
 
 /// EP121: a notebook and its Teacher copy open again where they were left. Scrolled down a few pages, the worksheet
 /// comes back on that page after another notebook was opened in between, and after the app was ended in the background
-/// and launched again; the Teacher copy panel comes back on its page after its worksheet was left and reopened. Before
-/// EP121 every one of these landed on page 1. Slid away and shown again, the panel opens on the student copy's page (EP138).
+/// and launched again. Before EP121 every one of these landed on page 1. The Teacher button turns the worksheet into its
+/// Teacher copy in place and back (EP177), so there is no separate panel with a position of its own.
 final class ReadingPositionUITests: XCTestCase {
     private var app: XCUIApplication!
 
@@ -55,18 +55,6 @@ final class ReadingPositionUITests: XCTestCase {
         XCTAssertTrue(shown, "\(message): \(named) shows page \(page), not \(header.value ?? "nothing")", file: file, line: line)
     }
 
-    /// The Teacher copy's answers, whose value names the page in view.
-    private var answers: XCUIElement { app.descendants(matching: .any)["Private teacher answers"].firstMatch }
-
-    private func expectTeacherPage(_ page: Int, _ message: String, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(answers.waitForExistence(timeout: 10), "\(message): the Teacher copy shows", file: file, line: line)
-        let onPage = NSPredicate(format: "value == %@", "Page \(page) of 6")
-        let shown = XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: onPage, object: answers)], timeout: 10) == .completed
-        attachScreenshot(message)
-        XCTAssertTrue(shown, "\(message): the Teacher copy shows page \(page), not \(answers.value ?? "nothing")",
-                      file: file, line: line)
-    }
-
     private func attachScreenshot(_ name: String) {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = name
@@ -74,7 +62,7 @@ final class ReadingPositionUITests: XCTestCase {
         add(shot)
     }
 
-    /// Scrolls the worksheet down with finger swipes on its left side, clear of the Teacher copy panel.
+    /// Scrolls the worksheet down with finger swipes on its left side.
     private func scrollWorksheet(swipes: Int) {
         for _ in 0..<swipes {
             let start = window.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.8))
@@ -92,9 +80,6 @@ final class ReadingPositionUITests: XCTestCase {
 
     func testANotebookReopensOnThePageItWasLeftOnAfterAnotherNotebookAndARelaunch() throws {
         open("Toolbar Drag")
-        // The Teacher copy panel is out of the way for this test.
-        let hide = app.buttons["Hide Teacher copy"].firstMatch
-        if hide.waitForExistence(timeout: 5) { hide.tap() }
         scrollWorksheet(swipes: 4)
         let left = try worksheetPage(of: "Toolbar Drag")
         XCTAssertGreaterThan(left, 2, "the worksheet scrolled a few pages down (the window is \(window.frame.size))")
@@ -115,42 +100,5 @@ final class ReadingPositionUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.otherElements["Tools"].waitForExistence(timeout: 30), "the worksheet reopened at launch")
         expectWorksheetPage(left, of: "Toolbar Drag", "the worksheet reopens where it was left after a relaunch")
-    }
-
-    /// EP138: slid open, the Teacher copy turns to the student copy's page; while it is open the two scroll on their own.
-    func testTheTeacherCopyOpensOnTheStudentPageAndThenScrollsOnItsOwn() throws {
-        open("Toolbar Drag")
-        XCTAssertTrue(answers.waitForExistence(timeout: 15), "the paired Teacher copy shows in its panel")
-        expectTeacherPage(1, "the Teacher copy starts on its first page")
-
-        // The student copy turns its pages; the open Teacher copy stays where it is.
-        scrollWorksheet(swipes: 6)
-        let student = try worksheetPage(of: "Toolbar Drag")
-        XCTAssertGreaterThan(student, 1, "the worksheet scrolled down")
-        expectTeacherPage(1, "the open Teacher copy does not follow the student copy")
-
-        // Slid away and shown again: it opens on the student copy's page, and closing moved nothing.
-        app.buttons["Hide Teacher copy"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["Show Teacher copy"].firstMatch.waitForExistence(timeout: 5))
-        sleep(1)
-        XCTAssertFalse(answers.exists, "the hidden panel has let its answers go")
-        expectWorksheetPage(student, of: "Toolbar Drag", "hiding the Teacher copy leaves the student copy where it is")
-        app.buttons["Show Teacher copy"].firstMatch.tap()
-        expectTeacherPage(student, "the Teacher copy opens on the student copy's page")
-
-        // The Teacher copy scrolls on its own; the student copy stays.
-        for _ in 0..<2 { answers.swipeDown(velocity: .fast) }
-        sleep(1)
-        let value = try XCTUnwrap(answers.value as? String)
-        let left = try XCTUnwrap(Int(value.split(separator: " ")[1]))
-        XCTAssertLessThan(left, student, "the Teacher copy scrolled back up")
-        expectWorksheetPage(student, of: "Toolbar Drag", "the student copy does not follow the Teacher copy")
-
-        // EP121: its worksheet left for another notebook and opened again with the panel showing, it is where it was left.
-        back()
-        open("Second Notebook")
-        back()
-        open("Toolbar Drag")
-        expectTeacherPage(left, "the Teacher copy reopens with its worksheet where it was left")
     }
 }
