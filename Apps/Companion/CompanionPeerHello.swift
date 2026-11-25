@@ -15,7 +15,7 @@ import SwiftUI
 /// build never shows it. Compiled out of Release builds.
 @MainActor
 final class CompanionPeerHelloModel: ObservableObject {
-    static let serviceName = "EmberPad Companion (debug)"
+    static let serviceName = "Ember Companion (debug)"
     nonisolated static let autostartKey = "EmberPeerHelloAutostart"
     /// Shows the menu section without starting the listener.
     nonisolated static let panelKey = "EmberPeerHelloPanel"

@@ -62,6 +62,8 @@ jobs:
               -only-testing:EmberPadTests/ToolbarDockScreenshotTests
               -only-testing:EmberPadTests/ScribbleOutlineSteadyTests
               -only-testing:EmberPadTests/TeacherCopyFlipTests
+              -only-testing:EmberPadTests/SidebarSelectedRowTests
+              -only-testing:EmberPadUITests/SidebarKeyboardFocusUITests
               -only-testing:EmberPadTests/InkStaysDrawnTests
               -only-testing:EmberPadUITests/ClearAllInkUITests
               -only-testing:EmberPadUITests/ClearPageUITests
@@ -118,6 +120,8 @@ jobs:
               -skip-testing:EmberPadTests/PDFImportTests
               -skip-testing:EmberPadUITests/ImportPDFUITests
               -skip-testing:EmberPadUITests/PencilPaletteUITests
+              -skip-testing:EmberPadTests/SidebarSelectedRowTests
+              -skip-testing:EmberPadUITests/SidebarKeyboardFocusUITests
           - shard: 4
             selection: >-
               -only-testing:EmberPadUITests/ReadingPositionUITests

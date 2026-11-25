@@ -135,10 +135,12 @@ struct PairingCodeView: View {
     let payload: String
     let onDone: () -> Void
 
+    static let instructions = "On the iPad, open Ember Slate, scan this code from the pairing screen (**Pair with Mac…**, or **Pair with a different Mac…** in the File Inbox menu if already paired)."
+
     var body: some View {
         VStack(spacing: 14) {
             Text("Pair iPad").font(.system(size: 15, weight: .semibold))
-            Text("On the iPad, open EmberPad, scan this code from the pairing screen (**Pair with Mac…**, or **Pair with a different Mac…** in the File Inbox menu if already paired).")
+            Text(LocalizedStringKey(Self.instructions))
                 .font(.system(size: 12)).multilineTextAlignment(.center).foregroundStyle(.secondary)
             if let image = PairingQRCode.image(for: payload) {
                 Image(nsImage: image)

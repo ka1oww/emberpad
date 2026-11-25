@@ -117,7 +117,7 @@ final class CompanionPresentModel: ObservableObject {
 
     var statusText: String {
         switch status {
-        case .off: "Not presenting. Turn on Present on Mac in EmberPad on the iPad."
+        case .off: "Not presenting. Turn on Present on Mac in Ember Slate on the iPad."
         case .connected: "Presenting from the iPad"
         case .reconnecting: "Reconnecting to the iPad…"
         }
@@ -272,11 +272,13 @@ final class CompanionPresentModel: ObservableObject {
         }
     }
 
+    static let sleepAssertionName = "Ember Companion Present on Mac"
+
     private func holdSleep() {
         guard sleepAssertion == nil else { return }
         var id = IOPMAssertionID(0)
         if IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                       "EmberPad Present on Mac" as CFString, &id) == kIOReturnSuccess {
+                                       Self.sleepAssertionName as CFString, &id) == kIOReturnSuccess {
             sleepAssertion = id
         }
     }
@@ -355,6 +357,10 @@ extension NSScreen {
 /// `CompanionPresentModel.hide()`. Swiping to another Space is not leaving.
 @MainActor
 final class PresentWindowController: NSObject, NSWindowDelegate {
+    /// The titled presentation window's title, seen in Mission Control and the Window menu. It names the iPad app by
+    /// its user-facing name (EP178).
+    nonisolated static let windowTitle = "Ember Slate Presentation"
+
     /// How the window shows the presentation.
     enum Style: Equatable {
         /// An ordinary window that the teacher can put in full screen (the Mac's own display, or its only display).
@@ -444,7 +450,7 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
         case .fullScreen:
             made = PresentTitledWindow(contentRect: screen.visibleFrame, styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
                                        backing: .buffered, defer: false)
-            made.title = "EmberPad Presentation"
+            made.title = PresentWindowController.windowTitle
             made.titleVisibility = .hidden
             made.titlebarAppearsTransparent = true
             made.collectionBehavior = [.fullScreenPrimary]
@@ -453,7 +459,7 @@ final class PresentWindowController: NSObject, NSWindowDelegate {
             let size = CGSize(width: min(1_280, screen.visibleFrame.width * 0.8), height: min(800, screen.visibleFrame.height * 0.8))
             made = PresentTitledWindow(contentRect: CGRect(origin: .zero, size: size), styleMask: [.titled, .closable, .resizable, .miniaturizable],
                                        backing: .buffered, defer: false)
-            made.title = "EmberPad Presentation"
+            made.title = PresentWindowController.windowTitle
             made.collectionBehavior = [.fullScreenPrimary]
             made.setFrame(CGRect(origin: CGPoint(x: screen.visibleFrame.midX - size.width / 2, y: screen.visibleFrame.midY - size.height / 2),
                                  size: made.frameRect(forContentRect: CGRect(origin: .zero, size: size)).size), display: false)
