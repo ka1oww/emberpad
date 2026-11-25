@@ -272,11 +272,13 @@ final class CompanionPresentModel: ObservableObject {
         }
     }
 
+    static let sleepAssertionName = "Ember Companion Present on Mac"
+
     private func holdSleep() {
         guard sleepAssertion == nil else { return }
         var id = IOPMAssertionID(0)
         if IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                       "Ember Companion Present on Mac" as CFString, &id) == kIOReturnSuccess {
+                                       Self.sleepAssertionName as CFString, &id) == kIOReturnSuccess {
             sleepAssertion = id
         }
     }

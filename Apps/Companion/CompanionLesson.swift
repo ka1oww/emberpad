@@ -1151,10 +1151,12 @@ final class CompanionLessonModel: ObservableObject {
         checkpoint(recording)
     }
 
+    static let powerAssertionName = "Ember Companion lesson recording"
+
     private func holdPower(_ recording: Recording) {
         var id = IOPMAssertionID(0)
         if IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                       "Ember Companion lesson recording" as CFString, &id) == kIOReturnSuccess {
+                                       Self.powerAssertionName as CFString, &id) == kIOReturnSuccess {
             recording.powerAssertion = id
         }
     }
@@ -1270,13 +1272,16 @@ private final class MicrophonePermission: LessonMicrophoneAuthorizer {
 struct CompanionLessonLabel: View {
     @ObservedObject var model: CompanionLessonModel
 
+    static let idleLabel = "Ember Companion"
+    static let recordingLabel = "Ember Companion, recording a lesson"
+
     var body: some View {
         switch model.status.state {
         case .recording:
             Image(systemName: model.status.warning == nil ? "record.circle" : "exclamationmark.triangle.fill")
-                .accessibilityLabel(model.status.warning ?? "Ember Companion, recording a lesson")
+                .accessibilityLabel(model.status.warning ?? Self.recordingLabel)
         default:
-            Image("MenuBarGlyph").accessibilityLabel("Ember Companion")
+            Image("MenuBarGlyph").accessibilityLabel(Self.idleLabel)
         }
     }
 }
