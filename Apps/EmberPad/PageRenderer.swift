@@ -74,6 +74,7 @@ struct PageRendererHost: UIViewControllerRepresentable {
 enum CopyFlipText {
     static let buttonIdentifier = "TeacherCopyFlip"
     static func buttonLabel(shown: ClassCopy) -> String { shown == .teacher ? "Back to Student copy" : "Teacher copy" }
+    static let buttonHint = "Swaps the Student and Teacher copies between the page and the slide-over"
 }
 
 /// Which look the nav-bar share pill takes (design 5.2). Pure mapping, so tests
@@ -344,6 +345,8 @@ struct EditorScreen: View {
     @State private var tools: ToolState
     /// EP177: the Student copy and its paired Teacher copy, one over the other, and which one the canvas shows.
     @StateObject private var flip: CopyFlip
+    /// EP186: the slide-over holding the copy the canvas is not showing; closed on every open and every swap.
+    @State private var slideOver = SlideOverState()
     /// The paired Teacher copy's library id once this editor has opened it, so closing the editor closes it too.
     @State private var teacherCopyID: UUID?
     @StateObject private var flattenedExport = FlattenedExportModel()
@@ -630,16 +633,29 @@ extension EditorScreen {
                     .padding(.bottom, showsTools && dock == .bottom ? ToolbarDockDrag.margin + ToolbarStrip.height : 0)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
-                // EP101: the tool palette floats over the page against its edge, where it was left.
+                // EP101: the tool palette floats over the page against its edge, where it was left. EP186: the
+                // slide-over slides over it, and its pull tab is never under it.
                 if showsTools {
-                    ToolbarFloatLayout(dock: dock, along: tools.settings.toolbarAlong) { toolRow }
+                    ToolbarFloatLayout(dock: dock, along: tools.settings.toolbarAlong,
+                                       tabSide: flip.hasTeacherCopy ? slideOver.side : nil) { toolRow }
                         .transition(.opacity)
+                        // Carried, it passes over the pull tab rather than under it.
                         .zIndex(toolbarCarry.isCarrying ? 1 : 0)
-                    // EP169: the Pencil tool palette's button floats over the page.
+                    // EP169: the Pencil tool palette's button floats over the page, under the slide-over.
                     // EP175: only while Pencil double-tap is set to the tool palette.
                     if tools.showsPaletteButton {
                         PencilPaletteButtonLayer(tools: tools, toolbar: toolRowFrame, dock: dock)
                     }
+                }
+                // EP186: the copy the canvas is not showing, at the side, closed until its pull tab is tapped. Main
+                // scene only: the class sees the canvas, never this.
+                if flip.hasTeacherCopy, let aside = flip.asideSession {
+                    CopySlideOverOverlay(copy: flip.shown.other, session: aside,
+                                         content: .resolve(aside.record, policy: presentation.policy,
+                                                           mainSceneActive: presentation.mainSceneActive),
+                                         state: slideOver,
+                                         landedPage: { [weak flip] in flip?.asidePage },
+                                         isEnabled: !editingPages && !leavingForTab)
                 }
                 // EP169: the open palette, over everything on the page, with the cover that closes it.
                 if showsTools { PencilPaletteBarLayer(tools: tools, toolbar: toolRowFrame, dock: dock) }
@@ -758,6 +774,8 @@ extension EditorScreen {
 
     /// EP177: the canvas now shows `copy`: search, thumbnails and the page pill follow it.
     private func flipped(to copy: ClassCopy) {
+        // EP186: the two copies trade places; the one that left the canvas waits in the slide-over, closed.
+        slideOver.close()
         pageThumbnails.reset()
         search.highlight?([], nil)
         if let shownSession { search.attach(shownSession.pdf) }
@@ -933,14 +951,18 @@ extension EditorScreen {
             Button { shownRenderer?.redo() } label: { HeaderIcon(symbol: "arrow.uturn.forward") }
                 .accessibilityLabel("Redo")
         }
-        // EP177: turns the page over to the Teacher copy and back, only on a worksheet that has one.
+        // EP177: turns the page over to the Teacher copy and back, only on a worksheet that has one. EP186: labelled
+        // Student and Teacher, so it is there to find whenever the worksheet has a pair, presenting or not, recording
+        // or not; the copy the canvas is not showing waits in the slide-over at the side.
         if flip.hasTeacherCopy {
             Button { flipCopy() } label: {
-                HeaderIcon(symbol: "book", isOn: flip.shown == .teacher)
+                CopySwapLabel(shown: flip.shown)
             }
+            .buttonStyle(.plain)
             .accessibilityIdentifier(CopyFlipText.buttonIdentifier)
             .accessibilityLabel(CopyFlipText.buttonLabel(shown: flip.shown))
             .accessibilityValue(flip.shown.title)
+            .accessibilityHint(CopyFlipText.buttonHint)
             .disabled(editingPages || leavingForTab)
         }
         // EP62: GoodNotes' bookmark, just before Add Page.
