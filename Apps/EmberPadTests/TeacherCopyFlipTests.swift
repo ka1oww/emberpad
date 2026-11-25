@@ -117,6 +117,13 @@ final class TeacherCopyFlipTests: XCTestCase {
 
     /// The flip is a short crossfade: on every display frame at least one copy is drawn whole, and the main thread never
     /// stalls longer than the stress test allows (`StressBounds.longestFrameGap`), either way.
+    ///
+    /// EP182: the stall is timed on the main thread itself, as its longest run of work without going back to wait in its
+    /// run loop: the tap, everything the flip sets off, and Core Animation's commit. The gap between display frames is
+    /// printed too but not held to the bound: on a loaded CI runner the Simulator's frames can come late while the
+    /// app's main thread waits, idle, for them. Both directions are watched before anything is checked: recording a
+    /// failed check is slow work on the main thread (0.9 and 1.1 s on CI runners), which then landed in the next
+    /// direction's watch and was reported as that flip stalling.
     func testTheFlipNeverShowsABlankFrameOrStalls() async throws {
         let (library, ids) = try await makePairedLibrary()
         let (flip, chrome, _, _) = try await openEditor(library, ids.student)
@@ -125,26 +132,46 @@ final class TeacherCopyFlipTests: XCTestCase {
         await waitFor { teacher.flipPlace?.page == 2 }
         await pause(0.5)
 
+        struct Watched {
+            let direction: String
+            let copy: ClassCopy
+            let watch: FlipFrameWatch
+            let tapCost: CFTimeInterval
+            let crossfading: Bool
+            let shown: ClassCopy
+            let stillFlipping: Bool
+        }
+        var watched: [Watched] = []
         for (direction, copy) in [("to the Teacher copy", ClassCopy.teacher), ("back to the Student copy", .student)] {
             let watch = FlipFrameWatch(flip.controller)
             await pause(0.2)
             let tapped = CACurrentMediaTime()
+            watch.tapped(at: tapped)
             flip.flip()
             let tapCost = CACurrentMediaTime() - tapped
             await pause(0.2)
-            XCTAssertTrue(flip.controller.isFlipping || watch.flippingFrames > 0, "\(direction): it crossfades")
+            let crossfading = flip.controller.isFlipping || watch.flippingFrames > 0
             await pause(0.6)
             watch.stop()
-            print(String(format: "EP177 flip %@: %d frames, %d in the crossfade, %d blank, longest gap %.1f ms, tap %.1f ms",
-                         direction, watch.frames, watch.flippingFrames, watch.blankFrames, watch.longestGap * 1000, tapCost * 1000))
-            XCTAssertEqual(flip.shown, copy)
+            watched.append(Watched(direction: direction, copy: copy, watch: watch, tapCost: tapCost, crossfading: crossfading,
+                                   shown: flip.shown, stillFlipping: flip.controller.isFlipping))
+        }
+
+        for flipped in watched {
+            let (direction, watch) = (flipped.direction, flipped.watch)
+            print(String(format: "EP177 flip %@: %d frames, %d in the crossfade, %d blank, longest gap %.1f ms, "
+                         + "longest main-thread stall %.1f ms (from %.0f ms after the tap), tap %.1f ms",
+                         direction, watch.frames, watch.flippingFrames, watch.blankFrames, watch.longestGap * 1000,
+                         watch.longestStall * 1000, watch.longestStallFromTap * 1000, flipped.tapCost * 1000))
+            XCTAssertTrue(flipped.crossfading, "\(direction): it crossfades")
+            XCTAssertEqual(flipped.shown, flipped.copy)
             XCTAssertGreaterThan(watch.frames, 30, "\(direction): frames were watched")
             XCTAssertGreaterThan(watch.flippingFrames, 3, "\(direction): the crossfade ran over several frames")
             XCTAssertEqual(watch.blankFrames, 0, "\(direction): no frame showed neither copy whole")
-            XCTAssertLessThanOrEqual(watch.longestGap, StressBounds.longestFrameGap,
-                                     String(format: "\(direction): longest frame gap %.0f ms (the tap itself took %.0f ms)",
-                                            watch.longestGap * 1000, tapCost * 1000))
-            XCTAssertFalse(flip.controller.isFlipping, "\(direction): the crossfade has finished")
+            XCTAssertLessThanOrEqual(watch.longestStall, StressBounds.longestFrameGap,
+                                     String(format: "\(direction): the main thread stalled %.0f ms (the tap itself took %.0f ms)",
+                                            watch.longestStall * 1000, flipped.tapCost * 1000))
+            XCTAssertFalse(flipped.stillFlipping, "\(direction): the crossfade has finished")
         }
         try await close(library, ids)
     }
@@ -229,7 +256,8 @@ final class TeacherCopyFlipTests: XCTestCase {
     // MARK: Helpers
 
     /// Counts display frames while a flip runs: those on which neither copy is drawn whole, those in the crossfade, and
-    /// the longest gap between two.
+    /// the longest gap between two. It also times the main thread's longest stall: its longest run of work from waking
+    /// in its run loop to going back to wait there, after Core Animation's commit (EP182).
     @MainActor
     final class FlipFrameWatch: NSObject {
         private weak var controller: CopyFlipController?
@@ -239,6 +267,12 @@ final class TeacherCopyFlipTests: XCTestCase {
         private(set) var blankFrames = 0
         private(set) var flippingFrames = 0
         private(set) var longestGap: CFTimeInterval = 0
+        private var observers: [CFRunLoopObserver] = []
+        /// When the main thread last woke, while it works; nil while it waits in its run loop.
+        private var busySince: CFTimeInterval?
+        private(set) var longestStall: CFTimeInterval = 0
+        private var longestStallStart: CFTimeInterval = 0
+        private var tap: CFTimeInterval?
 
         init(_ controller: CopyFlipController) {
             self.controller = controller
@@ -246,6 +280,43 @@ final class TeacherCopyFlipTests: XCTestCase {
             let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
             link.add(to: .main, forMode: .common)
             self.link = link
+            // The watch is made on the main thread, so it is working from now; the first wait ends that run.
+            busySince = CACurrentMediaTime()
+            // First to see the main thread wake, and last to see it go to wait, after every other observer (Core
+            // Animation commits at 2,000,000): whatever the app does on the main thread falls inside the run.
+            let woke = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue, true, CFIndex.min) {
+                [weak self] _, _ in MainActor.assumeIsolated { self?.woke() }
+            }
+            let waits = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, CFIndex.max) {
+                [weak self] _, _ in MainActor.assumeIsolated { self?.goesToWait() }
+            }
+            for observer in [woke, waits].compactMap({ $0 }) {
+                CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+                observers.append(observer)
+            }
+        }
+
+        /// The test's tap, for where the longest stall fell.
+        func tapped(at time: CFTimeInterval) { tap = time }
+
+        /// How long after the tap the longest stall began; negative before it.
+        var longestStallFromTap: CFTimeInterval { longestStallStart - (tap ?? longestStallStart) }
+
+        private func woke() {
+            if busySince == nil { busySince = CACurrentMediaTime() }
+        }
+
+        private func goesToWait() {
+            guard let busySince else { return }
+            endRun(busySince, at: CACurrentMediaTime())
+        }
+
+        private func endRun(_ start: CFTimeInterval, at end: CFTimeInterval) {
+            busySince = nil
+            if end - start > longestStall {
+                longestStall = end - start
+                longestStallStart = start
+            }
         }
 
         @objc private func tick(_ link: CADisplayLink) {
@@ -275,9 +346,13 @@ final class TeacherCopyFlipTests: XCTestCase {
             return view.subviews.lazy.compactMap { pdfView(in: $0) }.first
         }
 
+        /// Stops watching. Called on the main thread, so the run it is part of counts up to now.
         func stop() {
             link?.invalidate()
             link = nil
+            for observer in observers { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) }
+            observers = []
+            if let busySince { endRun(busySince, at: CACurrentMediaTime()) }
         }
     }
 
