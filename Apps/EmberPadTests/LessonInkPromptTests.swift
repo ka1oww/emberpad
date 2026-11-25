@@ -100,7 +100,8 @@ final class LessonInkPromptTests: XCTestCase {
         XCTAssertEqual(cleared, [.student])
     }
 
-    /// A presentation stopped mid-recording must not leave the next lesson asking about the earlier worksheet.
+    /// A lesson dropped by a stop must not be asked about by the next one: with A closed and nothing open, the second
+    /// lesson ending asks nothing, and with B open it names B and can only ever clear B.
     func testAStoppedLessonNeverLeaksIntoTheNextOnesQuestion() async {
         let a = LessonInkPrompt.Worksheet(studentID: UUID(), title: "A", teacherID: UUID())
         let b = LessonInkPrompt.Worksheet(studentID: UUID(), title: "B", teacherID: UUID())
@@ -109,9 +110,12 @@ final class LessonInkPromptTests: XCTestCase {
         prompt.clearStored = { stored.append($0) }
         prompt.worksheetOpened(a) { _ in XCTFail("A is not the lesson's worksheet") }
         prompt.lessonRecording(true)
-        prompt.worksheetClosed(a.studentID)
         prompt.lessonAbandoned()
         XCTAssertNil(prompt.asking, "stopping asks nothing")
+        prompt.worksheetClosed(a.studentID)
+        prompt.lessonRecording(true)
+        prompt.lessonRecording(false)
+        XCTAssertNil(prompt.asking, "no worksheet was open in the second lesson, so the first one's is not asked")
         prompt.worksheetOpened(b) { _ in XCTFail("closed before the end, so cleared in the store") }
         prompt.lessonRecording(true)
         prompt.worksheetClosed(b.studentID)
@@ -119,6 +123,32 @@ final class LessonInkPromptTests: XCTestCase {
         XCTAssertEqual(prompt.asking, b)
         await prompt.answer(.both).value
         XCTAssertEqual(Set(stored), Set([b.studentID, b.teacherID!]))
+    }
+
+    /// Stopping Present while the Mac records reaches the prompt: the next lesson does not ask about the earlier one's
+    /// worksheet.
+    func testStoppingPresentMidLessonDropsItsWorksheetFromThePrompt() async throws {
+        let a = LessonInkPrompt.Worksheet(studentID: UUID(), title: "A", teacherID: UUID())
+        let mac = FakeRecordingMac(boyaConnected: true)
+        let presentation = try await presenting(to: mac)
+        presentation.lessonInk.worksheetOpened(a) { _ in XCTFail("A is not the second lesson's worksheet") }
+        await waitFor { presentation.present.lesson != nil }
+        presentation.present.startLesson()
+        await waitFor { presentation.present.isRecordingLesson }
+        presentation.present.stop()
+        XCTAssertNil(presentation.lessonInk.asking, "stopping asks nothing")
+        presentation.lessonInk.worksheetClosed(a.studentID)
+
+        presentation.present.start()
+        await waitFor { presentation.present.light == .connected }
+        await waitFor { presentation.present.lesson != nil }
+        if !presentation.present.isRecordingLesson {
+            presentation.present.startLesson()
+            await waitFor { presentation.present.isRecordingLesson }
+        }
+        mac.host.setLessonStatus(PresentLessonStatus(state: .idle))
+        await waitFor { !presentation.present.isRecordingLesson }
+        XCTAssertNil(presentation.lessonInk.asking, "the first lesson's worksheet is not asked about")
     }
 
     /// No lesson, or no worksheet in it: nothing is asked.
