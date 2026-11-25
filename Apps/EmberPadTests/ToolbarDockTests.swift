@@ -105,6 +105,22 @@ final class ToolbarDockTests: XCTestCase {
         XCTAssertEqual(ToolbarDockDrag.along(for: .zero, on: .top, in: .zero), ToolbarDockDrag.defaultAlong)
     }
 
+    /// EP186: down the side the slide-over's pull tab is on, the palette floats beside the tab, never over it.
+    func testThePaletteKeepsClearOfTheSlideOverTab() {
+        let tab = SlideOverGeometry.tabSize.width
+        XCTAssertEqual(ToolbarDockDrag.room(for: .trailing, in: area, tabSide: .trailing),
+                       CGRect(x: 0, y: 74, width: 1194 - tab, height: 760))
+        XCTAssertEqual(ToolbarDockDrag.room(for: .leading, in: area, tabSide: .leading),
+                       CGRect(x: tab, y: 74, width: 1194 - tab, height: 760))
+        XCTAssertEqual(ToolbarDockDrag.room(for: .leading, in: area, tabSide: .trailing), area)
+        XCTAssertEqual(ToolbarDockDrag.room(for: .trailing, in: area, tabSide: .leading), area)
+        XCTAssertEqual(ToolbarDockDrag.room(for: .trailing, in: area, tabSide: nil), area, "no pair, no slide-over, no tab")
+        for side in SlideOverSide.allCases {
+            XCTAssertEqual(ToolbarDockDrag.room(for: .top, in: area, tabSide: side), area, "the top stays centred on the page")
+            XCTAssertEqual(ToolbarDockDrag.room(for: .bottom, in: area, tabSide: side), area)
+        }
+    }
+
     func testRowsAndColumns() {
         XCTAssertFalse(ToolbarDock.top.isVertical)
         XCTAssertFalse(ToolbarDock.bottom.isVertical)

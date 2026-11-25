@@ -226,6 +226,10 @@ final class CopyFlip: ObservableObject {
     var hasTeacherCopy: Bool { teacherSession != nil && teacherRenderer != nil }
     var shownSession: DocumentSession? { shown == .teacher ? teacherSession : studentSession }
     var shownRenderer: (any CopyFlipRenderer)? { shown == .teacher ? teacherRenderer : studentRenderer }
+    /// EP186: the copy the canvas is not showing, which waits in the slide-over at the side.
+    var asideSession: DocumentSession? { shown == .teacher ? studentSession : teacherSession }
+    /// EP186: the page the copy not shown is landed on (the question the canvas is on), where its slide-over opens.
+    var asidePage: Int? { (shown == .teacher ? studentRenderer : teacherRenderer)?.flipPlace?.page }
     var renderers: [any CopyFlipRenderer] { [studentRenderer, teacherRenderer].compactMap { $0 } }
 
     /// The Student copy's renderer, on open and after every page edit. A page edit happens only on the Student copy.

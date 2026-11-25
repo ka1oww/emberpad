@@ -20,7 +20,8 @@ enum UITestLaunch {
     static let keepArgument = "-EmberPadUITestKeepLibrary"
     static let secondTitle = "Second Notebook"
     /// EP130: launched with this as well, the worksheet behaves as if it were being presented (the Simulator has no Mac
-    /// to present to), so the header offers the swap between the Student copy and the Teacher copy.
+    /// to present to), so the header shows what it shows only while presenting. (EP186: the Student/Teacher swap shows
+    /// whether presenting or not.)
     static let presentingArgument = "-EmberPadUITestPresenting"
     static let notebookPages = 6
     /// EP158: launched with this as well, the worksheet is six questions, one to a page, and its Teacher copy is nine

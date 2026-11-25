@@ -33,6 +33,9 @@ Keychain refused the pairing (-34018)" or "Signing expiry unknown"; a signed bui
 | `../screenshots/ep177/flip-teacher.png` | Flipped in place to the Teacher copy | 5.3 |
 | `../screenshots/ep177/flip-teacher-ink.png` | Teacher copy written on | 5.3 |
 | `../screenshots/ep177/clear-ink-alert.png` | Clear ink? alert when a lesson ends | 5.3 |
+| `../screenshots/ep186/swap-student.png` | Student copy on the page, the Student/Teacher swap in the header, the Teacher copy closed at the side | 5.3 |
+| `../screenshots/ep186/swap-teacher.png` | Swapped: Teacher copy on the page, Student copy closed at the side | 5.3 |
+| `../screenshots/ep186/slide-over-open.png` | Student copy open in the slide-over beside the Teacher copy | 5.3 |
 | `tool-pen-settings.png` | Pen selected, its settings open | 5.4 |
 | `tool-highlighter-settings.png` | Highlighter selected, its settings open | 5.4 |
 | `tool-eraser-settings.png` | Eraser selected, its settings open | 5.4 |

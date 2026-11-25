@@ -10,7 +10,7 @@ import EmberSyncKit
 /// floating tool palette moved to each edge by the drag phases its recogniser reports (the real finger's touches are
 /// driven end to end by `EmberPadUITests`). In every position the palette floats over the same full-size page against
 /// that edge, the tools still set the PencilKit tool on the pages, every tool's settings popover opens on the page
-/// side, and the place is kept for the next worksheet. Screenshots are attached
+/// side, the palette keeps clear of the slide-over's pull tab (EP186), and the place is kept for the next worksheet. Screenshots are attached
 /// and written to `EP100_SHOTS_DIR` when the runner has it (`TEST_RUNNER_EP100_SHOTS_DIR`), else to the temporary
 /// directory.
 @MainActor
@@ -18,10 +18,12 @@ final class ToolbarDockScreenshotTests: XCTestCase {
     private var root: URL!
     private var hostWindow: UIWindow?
     private var suiteName = ""
+    private var savedSlideOver: Data?
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("ep100-shots-\(UUID().uuidString)", isDirectory: true)
         suiteName = "EmberPadTests.ToolbarDockEditor.\(UUID().uuidString)"
+        savedSlideOver = UserDefaults.standard.data(forKey: SlideOverState.defaultsKey)
     }
 
     override func tearDownWithError() throws {
@@ -30,12 +32,16 @@ final class ToolbarDockScreenshotTests: XCTestCase {
         hostWindow = nil
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         UserDefaults.standard.removeObject(forKey: LastWorksheet.defaultsKey)
+        if let savedSlideOver { UserDefaults.standard.set(savedSlideOver, forKey: SlideOverState.defaultsKey) }
+        else { UserDefaults.standard.removeObject(forKey: SlideOverState.defaultsKey) }
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: root)
     }
 
     func testTheToolRowDocksOnEveryEdgeAndEverythingStillWorks() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        // EP186: the slide-over holding the Teacher copy is on the right, closed, its pull tab on the right edge.
+        UserDefaults.standard.set(try JSONEncoder().encode(SlideOverState.Stored(side: .trailing)), forKey: SlideOverState.defaultsKey)
         let (library, id) = try await makePairedLibrary()
         let window = try makeWindow()
         let tools = ToolState(defaults: defaults)
@@ -90,7 +96,7 @@ final class ToolbarDockScreenshotTests: XCTestCase {
             // It lands where it was let go along the edge (carried by its centre, the palette is centred on the drop).
             let row = try XCTUnwrap(Self.toolRowFrame(in: window))
             let expected = ToolbarDockDrag.frame(for: dock, along: ToolbarDockDrag.along(for: drop, on: dock, in: page),
-                                                 size: row.size, in: page)
+                                                 size: row.size, in: ToolbarDockDrag.room(for: dock, in: page, tabSide: .trailing))
             XCTAssertEqual(row.midX, expected.midX, accuracy: 1, name)
             XCTAssertEqual(row.midY, expected.midY, accuracy: 1, name)
             try save(window, name)
@@ -157,9 +163,9 @@ final class ToolbarDockScreenshotTests: XCTestCase {
             XCTAssertEqual(row.width, ToolbarStrip.columnWidth, accuracy: 1)
             XCTAssertEqual(row.minX, page.minX + m, accuracy: 1)
         case .trailing:
-            // EP177: no Teacher copy pull tab is left on the right, so the palette floats a margin in, as on the left.
+            // EP186: the closed slide-over's pull tab is on the right: the palette sits beside it, never over it.
             XCTAssertEqual(row.width, ToolbarStrip.columnWidth, accuracy: 1)
-            XCTAssertEqual(row.maxX, page.maxX - m, accuracy: 1)
+            XCTAssertEqual(row.maxX, page.maxX - SlideOverGeometry.tabSize.width - m, accuracy: 1)
         }
         if dock.isVertical {
             XCTAssertGreaterThan(row.height, row.width, "\(dock): upright down the side")
