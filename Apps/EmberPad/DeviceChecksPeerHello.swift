@@ -125,7 +125,7 @@ enum DeviceChecksPeerHelloLog {
         return formatter
     }()
 
-    /// e.g. `2026-11-03T12:00:00Z peerHello service="EmberPad Companion (debug)" result=ok
+    /// e.g. `2026-11-03T12:00:00Z peerHello service="Ember Companion (debug)" result=ok
     /// bytes=50000000 seconds=2.000 mbps=25.0 echoMs=2.0 verified=true pathInterface=awdl0`.
     static func line(date: Date, service: String, state: DeviceChecksPeerHelloModel.RunState) -> String {
         let prefix = "\(timestampFormatter.string(from: date)) peerHello service=\(quoted(service))"

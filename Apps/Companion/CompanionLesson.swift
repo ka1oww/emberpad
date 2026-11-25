@@ -1154,7 +1154,7 @@ final class CompanionLessonModel: ObservableObject {
     private func holdPower(_ recording: Recording) {
         var id = IOPMAssertionID(0)
         if IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                       "EmberPad lesson recording" as CFString, &id) == kIOReturnSuccess {
+                                       "Ember Companion lesson recording" as CFString, &id) == kIOReturnSuccess {
             recording.powerAssertion = id
         }
     }
@@ -1274,9 +1274,9 @@ struct CompanionLessonLabel: View {
         switch model.status.state {
         case .recording:
             Image(systemName: model.status.warning == nil ? "record.circle" : "exclamationmark.triangle.fill")
-                .accessibilityLabel(model.status.warning ?? "EmberPad, recording a lesson")
+                .accessibilityLabel(model.status.warning ?? "Ember Companion, recording a lesson")
         default:
-            Image("MenuBarGlyph").accessibilityLabel("EmberPad")
+            Image("MenuBarGlyph").accessibilityLabel("Ember Companion")
         }
     }
 }
