@@ -125,7 +125,7 @@ final class TeacherCopyFlipTests: XCTestCase {
     /// alongside the frame gap. Known limit: on a slow runner the Simulator's frames can still arrive late while the
     /// app's main thread waits idle (103 and 145 ms to the Teacher copy, with the tap taking 5 to 7 ms), so the frame
     /// gap can still miss the bound there.
-        func testTheFlipNeverShowsABlankFrameOrStalls() async throws {
+    func testTheFlipNeverShowsABlankFrameOrStalls() async throws {
         let (library, ids) = try await makePairedLibrary()
         let (flip, chrome, _, _) = try await openEditor(library, ids.student)
         try await show(page: 1, chrome)
