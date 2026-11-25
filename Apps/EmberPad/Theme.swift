@@ -144,7 +144,7 @@ enum Theme {
     static let headerTitleColor = text
     /// The title bar in read-only mode (EP63): grey, as GoodNotes greys its bar, so it is plain the pages take no ink.
     static let headerBarReadOnly = surface2
-    /// A pressed-in look for a header toggle that is on (the Teacher copy panel).
+    /// A pressed-in look for a header toggle that is on (the Teacher button while on the Teacher copy).
     static let headerBarActive = accentSoft
     /// The tool row under the header bar, on the same surface as the bar.
     static let toolRow = surface

@@ -126,17 +126,6 @@ enum ToolbarDockDrag {
         }
     }
 
-    /// What the palette floats in against `dock`: the worksheet, less the Teacher copy pull tab on `tabSide`, so a
-    /// palette down that side sits beside the tab and never hides it.
-    static func room(for dock: ToolbarDock, in worksheet: CGRect, tabSide: TeacherCopyPanelSide) -> CGRect {
-        let tab = TeacherCopyCardGeometry.tabSize.width
-        switch (dock, tabSide) {
-        case (.leading, .leading): return CGRect(x: worksheet.minX + tab, y: worksheet.minY, width: max(worksheet.width - tab, 0), height: worksheet.height)
-        case (.trailing, .trailing): return CGRect(x: worksheet.minX, y: worksheet.minY, width: max(worksheet.width - tab, 0), height: worksheet.height)
-        default: return worksheet
-        }
-    }
-
     /// The snap into place: a quick spring with no visible bounce, or under Reduce Motion a short fade.
     static func snapAnimation(reduceMotion: Bool) -> Animation {
         reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.36, dampingFraction: 0.86)
@@ -144,19 +133,18 @@ enum ToolbarDockDrag {
 }
 
 /// EP101: lays the floating palette out over the worksheet: offered the worksheet less its margins, then placed by
-/// `ToolbarDockDrag.frame`, against `dock`'s edge, `along` it, clear of the Teacher copy pull tab on `tabSide`. Only
-/// the palette takes touches; the rest of the area is the page's.
+/// `ToolbarDockDrag.frame`, against `dock`'s edge, `along` it. Only the palette takes touches; the rest of the area is
+/// the page's. (Before EP177 it also kept clear of the Teacher copy panel's pull tab, which the flip replaced.)
 struct ToolbarFloatLayout: Layout {
     var dock: ToolbarDock
     var along: Double
-    var tabSide: TeacherCopyPanelSide
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         proposal.replacingUnspecifiedDimensions()
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let area = ToolbarDockDrag.room(for: dock, in: bounds, tabSide: tabSide)
+        let area = bounds
         let room = ProposedViewSize(width: max(area.width - 2 * ToolbarDockDrag.margin, 0),
                                     height: max(area.height - 2 * ToolbarDockDrag.margin, 0))
         for palette in subviews {
@@ -253,7 +241,7 @@ final class ToolbarDragRecognizer: UIGestureRecognizer, UIGestureRecognizerDeleg
 
     init() {
         super.init(target: nil, action: nil)
-        allowedTouchTypes = SlideOverSwipeRecognizer.fingerOnly
+        allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
         delegate = self
     }
 

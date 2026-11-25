@@ -85,8 +85,8 @@ public enum SyncAction: Equatable, Sendable {
 ///
 /// A document's identity is its source path plus role, and its role never changes. Rules, in order:
 /// 1. Same path and role: same bytes are unchanged (or relinked when only publication metadata changed);
-///    new bytes add a version beside an inked copy and replace an uninked copy in place. A Teacher copy is never
-///    inked in v1, so a changed Teacher copy replaces in place.
+///    new bytes add a version beside an inked copy and replace an uninked copy in place. A Teacher copy takes ink
+///    since EP177, so an inked Teacher copy keeps its ink on its own version too.
 /// 2. A Teacher copy at a new path follows its paper key to the one uninked Teacher document with that key, relinked
 ///    when the bytes match and replaced in place otherwise.
 /// 3. Otherwise identical bytes of the same role relink when unambiguous (Student rename or class move).

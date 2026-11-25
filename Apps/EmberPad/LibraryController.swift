@@ -421,10 +421,6 @@ final class LibraryController: ObservableObject {
         return session
     }
 
-    /// The stored original of the Teacher copy paired with a Student worksheet: the Teacher copy card's answer key.
-    /// `nil` for a Teacher copy itself, an unpaired worksheet, or a pairing whose file cannot be read.
-    func teacherCopyURL(for record: DocumentRecord) async -> URL? { await teacherCopy(for: record)?.url }
-
     /// EP158: the paired Teacher copy's original PDF and its record (whose SHA-256 names its page match), if any.
     func teacherCopy(for record: DocumentRecord) async -> (url: URL, record: DocumentRecord)? {
         guard record.role == .student, let pairedID = record.pairedDocumentID,
@@ -493,6 +489,24 @@ final class LibraryController: ObservableObject {
             let stored = try await store.setBookmark(isBookmarked, pageID: pageID, documentID: id)
             sessions[id]?.takeBookmarks(from: stored)
         } catch { showError(error.localizedDescription) }
+    }
+
+    /// EP177: removes every page's ink of document `id`, which no editor shows (the lesson's end asked for it). Pages,
+    /// added ones too, stay. Saved like any ink change; an editor that has it open clears it through its own pages.
+    func clearInk(_ id: UUID) async {
+        do {
+            if let session = sessions[id] ?? closedSessions.object(forKey: id as NSUUID) {
+                for page in session.pages.pages.indices where !session.drawing(on: page).strokes.isEmpty {
+                    session.update(PKDrawing(), page: page)
+                }
+                try await session.flush()
+            } else {
+                for page in try await store.pageManifest(documentID: id).pages where page.hasInk {
+                    try await store.saveDrawing(PKDrawing().dataRepresentation(), documentID: id, pageID: page.id, hasInk: false)
+                }
+            }
+        } catch { showError(error.localizedDescription) }
+        await refresh()
     }
 
     func close(_ id: UUID) async throws {

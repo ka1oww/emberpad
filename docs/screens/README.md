@@ -23,19 +23,16 @@ Keychain refused the pairing (-34018)" or "Signing expiry unknown"; a signed bui
 | `library-signing-unknown.png` | Signing expiry unknown | 5.1.1 Unknown |
 | `library-archived.png` | Archived selected | 5.1 |
 | `library-sharing.png` | Library while sharing to the student view | 5.1, 5.2 |
-| `worksheet.png` | Worksheet, landscape, Teacher copy closed | 5.2 |
+| `worksheet.png` | Worksheet, landscape | 5.2 |
 | `worksheet-dark.png` | The same, dark mode | 5.2, 3 |
 | `worksheet-portrait.png` | Worksheet, portrait | 5.2 |
 | `share-pill-sharing.png` | Header share pill: sharing | 5.2 |
 | `share-pill-paused.png` | Header share pill: paused | 5.2 |
 | `share-pill-mirrored.png` | Header share pill: screen mirrored, answers hidden | 5.2 |
-| `teacher-copy-open.png` | Teacher copy open beside the worksheet, landscape | 5.3 |
-| `teacher-copy-open-portrait.png` | Teacher copy open, portrait | 5.3 |
-| `teacher-copy-open-dark.png` | Teacher copy open, dark mode | 5.3, 3 |
-| `teacher-copy-closed-tab.png` | Teacher copy closed, its edge tab | 5.3 |
-| `teacher-copy-answers-hidden.png` | Answers hidden while the screen is captured | 5.3 |
-| `teacher-copy-answers-hidden-dark.png` | The same, dark mode | 5.3, 3 |
-| `teacher-copy-not-paired.png` | No Teacher copy paired yet | 5.3 |
+| `../screenshots/ep177/flip-student.png` | Student copy with the Teacher button | 5.3 |
+| `../screenshots/ep177/flip-teacher.png` | Flipped in place to the Teacher copy | 5.3 |
+| `../screenshots/ep177/flip-teacher-ink.png` | Teacher copy written on | 5.3 |
+| `../screenshots/ep177/clear-ink-alert.png` | Clear ink? alert when a lesson ends | 5.3 |
 | `tool-pen-settings.png` | Pen selected, its settings open | 5.4 |
 | `tool-highlighter-settings.png` | Highlighter selected, its settings open | 5.4 |
 | `tool-eraser-settings.png` | Eraser selected, its settings open | 5.4 |
@@ -50,5 +47,5 @@ Keychain refused the pairing (-34018)" or "Signing expiry unknown"; a signed bui
 | `companion-dark.png` | The same, dark mode | 5.7, 3 |
 
 Where the build follows GoodNotes rather than the design board (the header and notebook tabs, the floating tool
-palette, the Teacher copy as a docked side panel rather than a floating card, ink colours and sizes, and the Companion
+palette, the Teacher copy flipping in place, ink colours and sizes, and the Companion
 layout), the pictures show the build as it is. The EP-20 pull request lists each of these choices.

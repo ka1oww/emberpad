@@ -119,12 +119,8 @@ final class TeacherCopyPageMatchTests: XCTestCase {
         XCTAssertFalse(match.matchesAnything)
         XCTAssertEqual(match.teacherPages, Array(repeating: nil, count: 6))
         XCTAssertNil(match.studentPage(forTeacher: 3))
-        // With no match the panel keeps EP138's page number, and the swap goes where the panel was last left.
+        // With no match the page number answers.
         XCTAssertEqual(TeacherCopyAnswerPage.teacherPage(forStudent: 4, match: match), 4)
-        XCTAssertEqual(TeacherCopyAnswerPage.swapPage(forStudent: 4, match: match, lastTeacherPage: 2, pageCount: 7), 2)
-        XCTAssertEqual(TeacherCopyAnswerPage.swapPage(forStudent: 4, match: match, lastTeacherPage: nil, pageCount: 7), 4)
-        XCTAssertEqual(TeacherCopyAnswerPage.swapPage(forStudent: 8, match: match, lastTeacherPage: nil, pageCount: 7), 6,
-                       "held to the Teacher copy's pages")
     }
 
     func testAPageOfOnlyAnswerSpaceFollowsThePageBeforeIt() throws {
@@ -174,20 +170,5 @@ final class TeacherCopyPageMatchTests: XCTestCase {
         let changed = await TeacherCopyPageMatches(folder: folder).match(student: studentURL, studentHash: "s1",
                                                                           teacher: teacherURL, teacherHash: "t2")
         XCTAssertFalse(changed.matchesAnything)
-    }
-
-    // MARK: The page the panel shows
-
-    @MainActor
-    func testThePanelShowsThePageShowingTheMostOfItself() {
-        let bounds = CGRect(x: 0, y: 0, width: 380, height: 700)
-        let pages = (0..<3).map { (page: $0, frame: CGRect(x: 0, y: CGFloat($0) * 560 - 250, width: 380, height: 540)) }
-        XCTAssertEqual(RememberingPDFView.mostShown(pages, in: bounds), 1, "page 2 fills most of the view")
-        // Two whole pages in view: the first, except at the very end of the answers, where it is the last.
-        let small = (0..<3).map { (page: $0, frame: CGRect(x: 0, y: CGFloat($0) * 300, width: 200, height: 280)) }
-        let tall = CGRect(x: 0, y: 300, width: 380, height: 700)
-        XCTAssertEqual(RememberingPDFView.mostShown(small, in: tall), 1)
-        XCTAssertEqual(RememberingPDFView.mostShown(small, in: tall, atEnd: true), 2)
-        XCTAssertNil(RememberingPDFView.mostShown([], in: bounds))
     }
 }

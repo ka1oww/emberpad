@@ -8,11 +8,11 @@ import Foundation
 /// It describes the screen; it carries no pixels. Committed ink is named by page and ink revision, so a sender can
 /// attach each page's `PKDrawing.dataRepresentation()` once per revision instead of with every scroll frame.
 /// It holds no title, folder, subject, answer URL or chrome state: the library and a Teacher copy reach it only as
-/// the bare `.idle` and `.teacherCopyPrivate` cases, unless the teacher swaps the class onto the Teacher copy (EP130),
-/// when a page arrives marked `role == .teacher`.
+/// the bare `.idle` and `.teacherCopyPrivate` cases, unless the teacher flips the worksheet to its Teacher copy
+/// (EP177; EP130 swapped only the class's view), when a page arrives marked `role == .teacher`.
 public struct PresentedView: Equatable, Codable, Sendable {
-    /// Whose pages a `.page` shows (EP130). The class sees the Student copy unless the teacher swaps it onto the
-    /// Teacher copy. Anything that keeps or passes frames on (a lesson recording) must hold back `.teacher` pages:
+    /// Whose pages a `.page` shows (EP130). The class sees the Student copy unless the teacher flips the worksheet to
+    /// its Teacher copy (EP177). Anything that keeps or passes frames on (a lesson recording) must hold back `.teacher` pages:
     /// `showsTeacherCopy` says whether this view is one.
     public enum Role: String, Equatable, Codable, Sendable {
         case student, teacher

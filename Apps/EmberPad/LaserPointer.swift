@@ -34,11 +34,11 @@ enum LaserDotStyle {
     }
 }
 
-/// The laser dot for the student view. Like `StudentLiveInk`, its only initializer takes a session whose record is a
-/// Student copy, so a Teacher copy's laser cannot be built, let alone shown. Private setters keep initializers in
-/// other files from filling it any other way.
+/// The laser dot for the student view. Like `StudentLiveInk`, its only initializer takes a session the class may see,
+/// so a Teacher copy's laser cannot be built, let alone shown, unless the teacher has flipped the worksheet to it
+/// (EP177). Private setters keep initializers in other files from filling it any other way.
 struct StudentLaserPointer: Equatable {
-    private(set) var document: StudentSafeDocument
+    private(set) var document: ClassShownDocument
     private(set) var sessionID: UUID
     /// The page the dot is on and where, in that page's ink space (page points, top-left origin).
     private(set) var pageIndex: Int
@@ -46,8 +46,8 @@ struct StudentLaserPointer: Equatable {
     var documentID: UUID { document.id }
 
     @MainActor
-    init(session: DocumentSession, pageIndex: Int, location: CGPoint) throws {
-        guard let document = StudentSafeDocument(session.record) else { throw StudentViewError.teacherCopyIsPrivate }
+    init(session: DocumentSession, pageIndex: Int, location: CGPoint, flip: TeacherCopyFlip? = nil) throws {
+        guard let document = ClassShownDocument(session, flip: flip) else { throw StudentViewError.teacherCopyIsPrivate }
         guard session.pdf.page(at: pageIndex) != nil else { throw LibraryError.pageOutOfRange }
         self.document = document
         sessionID = session.instanceID
@@ -314,10 +314,11 @@ final class LaserTrailLayer: CALayer {
     }
 }
 
-/// The laser trail for the student view. Built only from a Student copy, like `StudentLaserPointer`, so a Teacher
-/// copy's trail cannot reach it. Points are in page ink space, keyed by page index.
+/// The laser trail for the student view. Built only from a session the class may see, like `StudentLaserPointer`, so a
+/// Teacher copy's trail reaches it only through the teacher's flip (EP177). Points are in page ink space, keyed by page
+/// index.
 struct StudentLaserTrail: Equatable {
-    private(set) var document: StudentSafeDocument
+    private(set) var document: ClassShownDocument
     private(set) var sessionID: UUID
     private(set) var trail = LaserTrail<Int>()
     /// The clock time this trail was last brought up to date; the student view draws its fade at this time.
@@ -325,8 +326,8 @@ struct StudentLaserTrail: Equatable {
     var documentID: UUID { document.id }
 
     @MainActor
-    init(session: DocumentSession, time: TimeInterval) throws {
-        guard let document = StudentSafeDocument(session.record) else { throw StudentViewError.teacherCopyIsPrivate }
+    init(session: DocumentSession, time: TimeInterval, flip: TeacherCopyFlip? = nil) throws {
+        guard let document = ClassShownDocument(session, flip: flip) else { throw StudentViewError.teacherCopyIsPrivate }
         self.document = document
         sessionID = session.instanceID
         self.time = time

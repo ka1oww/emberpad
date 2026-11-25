@@ -52,9 +52,6 @@ final class StatusBarTapUITests: XCTestCase {
 
     func testATapOnTheStatusBarLeavesTheWorksheetOnItsPage() throws {
         open("Toolbar Drag")
-        // The Teacher copy panel is out of the way, as it was on the iPad.
-        let hide = app.buttons["Hide Teacher copy"].firstMatch
-        if hide.waitForExistence(timeout: 5) { hide.tap() }
 
         // Finger swipes down the worksheet, on its left side.
         for _ in 0..<5 {

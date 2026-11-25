@@ -48,7 +48,8 @@ final class PresentEndToEndTests: XCTestCase {
             EditorScreen(documentID: id, library: library, presentation: presentation, chrome: chrome)
         }.tint(Theme.tint))
         window.rootViewController = host
-        await wait { library.liveSession(for: id) != nil && chrome.jumpToPage != nil && presentation.privateAnswerURL != nil }
+        await wait { library.liveSession(for: id) != nil && chrome.jumpToPage != nil
+            && presentation.lessonInk.openWorksheet?.teacherID != nil }
         let session = try XCTUnwrap(library.liveSession(for: id))
         await wait { presentation.student.snapshot != nil }
 

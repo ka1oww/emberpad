@@ -18,12 +18,10 @@ final class PencilPaletteScreenshotTests: XCTestCase {
     private var root: URL!
     private var hostWindow: UIWindow?
     private var suiteName = ""
-    private var savedTeacherPanel: Data?
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("ep169-shots-\(UUID().uuidString)", isDirectory: true)
         suiteName = "EmberPadTests.PencilPaletteEditor.\(UUID().uuidString)"
-        savedTeacherPanel = UserDefaults.standard.data(forKey: TeacherCopyCardState.defaultsKey)
     }
 
     override func tearDownWithError() throws {
@@ -32,16 +30,12 @@ final class PencilPaletteScreenshotTests: XCTestCase {
         hostWindow = nil
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         UserDefaults.standard.removeObject(forKey: LastWorksheet.defaultsKey)
-        if let savedTeacherPanel { UserDefaults.standard.set(savedTeacherPanel, forKey: TeacherCopyCardState.defaultsKey) }
-        else { UserDefaults.standard.removeObject(forKey: TeacherCopyCardState.defaultsKey) }
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
         try? FileManager.default.removeItem(at: root)
     }
 
     func testThePaletteOpensBesideItsButtonAppliesPicksAndAPencilOnThePageClosesItWithoutWriting() async throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        UserDefaults.standard.set(try JSONEncoder().encode(TeacherCopyCardState.Stored(isOpen: false, side: .trailing)),
-                                  forKey: TeacherCopyCardState.defaultsKey)
         let (library, id) = try await makeLibrary()
         let window = try makeWindow()
         let tools = ToolState(defaults: defaults)

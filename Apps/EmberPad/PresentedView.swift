@@ -42,14 +42,6 @@ extension StudentPicture {
         case .none: return (PresentedView(screen: .idle), [])
         case .teacherCopyPrivate: return (PresentedView(screen: .teacherCopyPrivate), [])
         case .page(let snapshot):
-            // EP130: the Teacher copy the teacher chose to show, marked as the teacher's so a recording holds it back.
-            if let teacher = teacherFrame {
-                return (PresentedView(screen: .page(.init(
-                    documentID: teacher.documentID, framing: framing.rawValue, focusedPageIndex: teacher.focusedPageIndex,
-                    visibleRect: teacher.visibleRect, margin: teacher.margin,
-                    pages: teacher.slices.map { .init(pageIndex: $0.pageIndex, frame: $0.frame, inkRevision: 0) },
-                    liveStrokes: [], laser: nil, laserTrail: [], role: .teacher))), [])
-            }
             guard let framed = snapshot.framed(framing) else { return (PresentedView(screen: .idle), []) }
             let shown = Set(framed.slices.map(\.pageIndex))
             let strokes = liveInk.flatMap { $0.belongs(to: snapshot) ? $0.strokes.strokes : nil } ?? []
@@ -68,7 +60,10 @@ extension StudentPicture {
                 laser: laser.map { .init(pageIndex: $0.pageIndex, location: $0.location) },
                 laserTrail: (trail?.trail.pieces(now: trail?.time ?? 0) ?? []).filter { shown.contains($0.place) }.map {
                     .init(pageIndex: $0.place, from: $0.from, to: $0.to, opacity: $0.opacity)
-                }))), strokes.filter { shown.contains($0.pageIndex) })
+                },
+                // EP177: a Teacher copy the teacher flipped the worksheet to is marked as the teacher's, so a lesson
+                // recording holds it back.
+                role: snapshot.role == .teacher ? .teacher : .student))), strokes.filter { shown.contains($0.pageIndex) })
         }
     }
 }

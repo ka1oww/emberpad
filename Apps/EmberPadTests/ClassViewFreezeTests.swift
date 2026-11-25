@@ -256,22 +256,21 @@ final class ClassViewFreezeTests: XCTestCase {
         XCTAssertTrue(PresentController.input(from: model, paper: paper, ink: ink).pages.isEmpty)
     }
 
-    /// Swapping the class onto the Teacher copy while frozen keeps the frozen Student page until the unfreeze, and the
-    /// swap control says so; unfrozen, the class sees the Teacher copy exactly as EP130 swaps it, marked as the
-    /// teacher's and without ink.
-    func testUnfreezingOntoARevealedTeacherCopyFollowsEP130() throws {
-        let (state, session) = try presentingOnAProjector(withAnswers: true)
+    /// EP177: flipping the canvas to the Teacher copy while frozen keeps the frozen Student page until the unfreeze;
+    /// unfrozen, the class sees the Teacher copy as the canvas shows it, marked as the teacher's and with its ink.
+    func testUnfreezingOntoAFlippedTeacherCopyShowsWhatTheCanvasShows() throws {
+        let (state, session) = try presentingOnAProjector()
+        let teacher = try teacherCopy(inkedOn: 1)
         let model = state.student
-        session.update(PKDrawing(strokes: [PresentControllerTests.stroke(from: CGPoint(x: 80, y: 200), to: CGPoint(x: 400, y: 260))]), page: 1)
         model.publish(session: session, pageIndex: 1, canvasSize: letter, viewport: viewport(page: 1, top: 100))
         let frozen = model.presented
         state.setFrozen(true)
 
-        XCTAssertEqual(state.setClassCopy(.teacher, worksheet: session.record), .teacher)
+        XCTAssertTrue(state.flip(to: teacher, from: session.record))
+        model.publish(session: teacher, pageIndex: 1, canvasSize: letter, viewport: viewport(page: 1, top: 100))
         XCTAssertEqual(model.presented, frozen, "the class still sees the frozen Student page")
         XCTAssertFalse(model.presented.showsTeacherCopy)
-        XCTAssertEqual(model.classCopy.shown, .student, "the swap control says what the class sees")
-        XCTAssertTrue(model.classCopy.revealing)
+        XCTAssertEqual(model.classCopy.shown, .student, "the share pill says what the class sees")
 
         state.setFrozen(false)
         XCTAssertTrue(model.presented.showsTeacherCopy)
@@ -279,27 +278,37 @@ final class ClassViewFreezeTests: XCTestCase {
         guard case .page(let page) = model.presented.screen else { return XCTFail("a page is shown") }
         XCTAssertEqual(page.role, .teacher)
         XCTAssertEqual(page.focusedPageIndex, 1)
-        XCTAssertEqual(page.pages.map(\.inkRevision), [0], "the Teacher copy shows no ink")
-        XCTAssertTrue(page.liveStrokes.isEmpty)
+        XCTAssertNotEqual(page.pages.map(\.inkRevision), [0], "the Teacher copy shows its ink")
+        // A lesson's record lists it as EP130 did: under the worksheet's id, with the role teacher.
+        var named = PresentLessonDocument(session.record)
+        named.role = .teacher
+        XCTAssertEqual(model.openDocument, named)
+        state.flipBack(to: session.record)
+        XCTAssertEqual(model.openDocument, PresentLessonDocument(session.record))
     }
 
-    /// Frozen on a Teacher copy the teacher showed the class, a projector joining unfreezes and puts the class back on
-    /// the Student copy, as every new presentation starts (EP130): the frozen answers are never shown to a new screen.
-    func testANewPresentationNeverStartsFrozenOrOnAFrozenTeacherCopy() throws {
-        let (state, session) = try presentingOnAProjector(withAnswers: true)
+    /// EP177: frozen on the Teacher copy the canvas was flipped to, a projector joining unfreezes. A new presentation
+    /// never starts frozen, and it shows what the canvas shows, here the Teacher copy, as the teacher chose to.
+    func testANewPresentationNeverStartsFrozenAndShowsWhatTheCanvasShows() throws {
+        let (state, session) = try presentingOnAProjector()
+        let teacher = try teacherCopy(inkedOn: 0)
         let model = state.student
         model.publish(session: session, pageIndex: 0, canvasSize: letter)
-        state.setClassCopy(.teacher, worksheet: session.record)
+        XCTAssertTrue(state.flip(to: teacher, from: session.record))
+        model.publish(session: teacher, pageIndex: 0, canvasSize: letter)
         XCTAssertTrue(model.presented.showsTeacherCopy)
         state.setFrozen(true)
         XCTAssertTrue(model.isFrozen)
 
         state.externalSceneCount = 0 // The projector leaves...
         XCTAssertFalse(model.isFrozen)
-        XCTAssertFalse(model.presented.showsTeacherCopy)
         state.externalSceneCount = 1 // ...and a new one joins.
         XCTAssertFalse(model.isFrozen, "a new presentation never starts frozen")
-        XCTAssertFalse(model.presented.showsTeacherCopy, "and starts on the Student copy")
+        XCTAssertTrue(model.presented.showsTeacherCopy, "and shows the Teacher copy the canvas is on")
+
+        state.flipBack(to: session.record)
+        model.publish(session: session, pageIndex: 0, canvasSize: letter)
+        XCTAssertFalse(model.presented.showsTeacherCopy, "flipped back, the class is on the Student copy again")
     }
 
     // MARK: When the freeze clears
@@ -392,20 +401,22 @@ final class ClassViewFreezeTests: XCTestCase {
 
     // MARK: Fixtures
 
-    /// A presentation state with a projector showing the student view, on a 3-page Student worksheet; with its paired
-    /// Teacher copy when `withAnswers`.
-    private func presentingOnAProjector(withAnswers: Bool = false) throws -> (PresentationState, DocumentSession) {
+    /// A presentation state with a projector showing the student view, on a 3-page Student worksheet.
+    private func presentingOnAProjector() throws -> (PresentationState, DocumentSession) {
         let state = PresentationState()
         state.mainSceneActive = true
         state.externalSceneCount = 1
         let session = try StudentMirrorFixture.session(.student, pages: 3, root: root.appendingPathComponent("student"))
         state.student.opened(session.record)
-        if withAnswers {
-            let answers = root.appendingPathComponent("answers.pdf")
-            try StudentMirrorFixture.worksheetPDF(pages: 3, role: .teacher).write(to: answers)
-            state.showPrivateAnswers(answers, owner: UUID())
-        }
         return (state, session)
+    }
+
+    /// The worksheet's paired Teacher copy, open, with a stroke on page `inkedOn`.
+    private func teacherCopy(inkedOn page: Int) throws -> DocumentSession {
+        let teacher = try StudentMirrorFixture.session(.teacher, pages: 3, root: root.appendingPathComponent("teacher"))
+        teacher.update(PKDrawing(strokes: [PresentControllerTests.stroke(from: CGPoint(x: 80, y: 200), to: CGPoint(x: 400, y: 260))]),
+                       page: page)
+        return teacher
     }
 
     /// A presentation state presenting to `mac` over an in-memory link, on a 3-page Student worksheet.

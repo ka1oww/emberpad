@@ -165,7 +165,7 @@ public actor LibraryStore {
         var record = try read(documentID)
         var manifest = try pageManifest(for: record)
         guard let index = manifest.index(of: pageID) else { throw LibraryError.pageOutOfRange }
-        guard !hasInk || record.role == .student else { throw LibraryError.teacherCopyReadOnly }
+        // EP177: a Teacher copy takes ink too, once the teacher flips the worksheet to it. Its pages stay as delivered.
         let entry = manifest.pages[index]
         let url = inkURL(documentID, pageID)
         if files.fileExists(atPath: url.path) { try Self.requireRegularFile(url) }

@@ -7,8 +7,7 @@ import EmberSyncKit
 @testable import EmberPad
 
 /// EP61 proof: the real editor, hosted in the app's main scene with a synthetic paired worksheet. Opens Add Page in
-/// the header, adds A3 squared paper after page 2 from the popover's recent row, and shows the new page, the Teacher copy's
-/// "No answer page", the thumbnails' "+" tile and More Templates. Screenshots are attached and written to
+/// the header, adds A3 squared paper after page 2 from the popover's recent row, and shows the new page, the thumbnails' "+" tile and More Templates. Screenshots are attached and written to
 /// `EP61_SHOTS_DIR` when the test runner has it (`TEST_RUNNER_EP61_SHOTS_DIR`), else to the temporary directory.
 @MainActor
 final class AddPageScreenshotTests: XCTestCase {
@@ -40,7 +39,8 @@ final class AddPageScreenshotTests: XCTestCase {
             EditorScreen(documentID: id, library: library, presentation: presentation, chrome: chrome)
         }.tint(Theme.tint))
         window.rootViewController = host
-        await wait { library.liveSession(for: id) != nil && chrome.jumpToPage != nil && presentation.privateAnswerURL != nil }
+        await wait { library.liveSession(for: id) != nil && chrome.jumpToPage != nil
+            && presentation.lessonInk.openWorksheet?.teacherID != nil }
         let first = try XCTUnwrap(library.liveSession(for: id))
         first.update(PKDrawing(strokes: [Self.stroke(from: CGPoint(x: 80, y: 180), to: CGPoint(x: 480, y: 230))]), page: 2)
         // The jump can land before the PDF view has laid out its pages, so it is repeated until page 2 is in view.

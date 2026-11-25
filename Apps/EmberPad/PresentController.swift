@@ -9,7 +9,7 @@ import EmberSyncKit
 /// is sent, and no connection is made, until the teacher turns it on.
 ///
 /// What is sent comes only from `StudentDisplayModel`: a Teacher copy reaches it only as `.teacherCopyPrivate`, which
-/// carries no page, paper or ink, unless the teacher swaps the class onto it (EP130), when its pages go marked
+/// carries no page, paper or ink, unless the teacher flips the worksheet to it (EP177), when its pages and ink go marked
 /// `role == .teacher`. The display link reads the model once a frame and `PresentSender` encodes and sends
 /// the difference off the main thread, so the canvas never waits for the radio.
 ///
@@ -205,6 +205,7 @@ final class PresentController: ObservableObject {
         isOn = false
         light = .off
         lesson = nil
+        onLessonAbandoned?()
         macRecords = false
         pendingLesson = nil
         confirmingStop = false
@@ -398,10 +399,18 @@ final class PresentController: ObservableObject {
         stop()
     }
 
+    /// EP177: told when the Mac starts (true) or ends (false) recording a lesson, whether the teacher started or ended
+    /// it here or in Ember Companion.
+    var onLessonRecording: ((Bool) -> Void)?
+    /// Told when the presentation stops, so a lesson still recording on the Mac is not asked about later.
+    var onLessonAbandoned: (() -> Void)?
+
     private func lessonChanged(_ status: PresentLessonStatus) {
         guard isOn else { return }
         macRecords = true
+        let wasRecording = isRecordingLesson
         lesson = status
+        if wasRecording != isRecordingLesson { onLessonRecording?(isRecordingLesson) }
         if let pending = pendingLesson, status.handledCommand == pending.id {
             pendingLesson = nil
             // A Start the Mac could not carry out (microphone access off, say) is said at once, not only in the menu.
@@ -416,19 +425,8 @@ final class PresentController: ObservableObject {
     static func input(from student: StudentPicture, paper: PresentPaperCache, ink: PresentInkCache) -> PresentInput {
         // EP142: the strokes in progress come beside the view, so a frame never copies or compares a whole stroke.
         let (view, strokes) = student.presentedParts
-        // EP130: the Teacher copy the teacher chose to show has paper but no ink, under its own session, so the Mac
-        // drops the worksheet's ink rather than drawing it on the answers.
-        if view.showsTeacherCopy, !student.paused, let teacher = student.teacherFrame {
-            var pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)] = [:]
-            for slice in teacher.slices {
-                guard let ready = paper.paper(for: slice.page) else { continue }
-                let asset = ready.asset
-                pages[slice.pageIndex] = (PresentPageRef(pageIndex: slice.pageIndex, asset: asset.hash, size: ready.size),
-                                          { @Sendable in asset })
-            }
-            return PresentInput(view: view, session: teacher.documentID, pages: pages)
-        }
-        // Only a shown Student page has paper and ink; Paused, the library and an opened Teacher copy have none.
+        // Only a shown page has paper and ink: a Student page, or a Teacher copy page the worksheet was flipped to
+        // (EP177), each under its own session. Paused, the library and the private placeholder have none.
         guard case .page = view.screen, !student.paused, let snapshot = student.snapshot,
               let framed = snapshot.framed(student.framing) else { return PresentInput(view: view) }
         var pages: [Int: (ref: PresentPageRef, asset: @Sendable () -> PresentAsset?)] = [:]
