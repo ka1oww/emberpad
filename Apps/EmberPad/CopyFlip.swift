@@ -87,8 +87,18 @@ final class CopyFlipController: UIViewController {
     /// How long the crossfade takes.
     static let flipDuration: TimeInterval = 0.2
 
+    /// Sends touches to the copy in front, so flipping never toggles a copy's own interaction.
+    private final class Container: UIView {
+        weak var front: UIView?
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            guard isUserInteractionEnabled, !isHidden, alpha > 0.01, self.point(inside: point, with: event) else { return nil }
+            guard let front, front.superview === self else { return super.hitTest(point, with: event) }
+            return front.hitTest(convert(point, to: front), with: event) ?? self
+        }
+    }
+
     override func loadView() {
-        let container = UIView()
+        let container = Container()
         container.backgroundColor = .emberCanvas
         container.clipsToBounds = true
         view = container
@@ -171,6 +181,8 @@ final class CopyFlipController: UIViewController {
             guard let child = controller?.viewIfLoaded else { continue }
             child.layer.zPosition = copy == shown ? 1 : 0
             if copy != shown { child.layer.removeAnimation(forKey: "copyFlip") }
+            child.accessibilityElementsHidden = copy != shown
+            if copy == shown { (view as? Container)?.front = child }
         }
     }
 }

@@ -292,7 +292,6 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         if !isActive {
             // EP177: loaded under the copy the canvas shows, it takes nothing until it is flipped to.
             pencilInteraction.isEnabled = false
-            view.isUserInteractionEnabled = false
         }
         publishPage()
         onPageChange?(currentPage)
@@ -866,7 +865,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         tools.handlePencil(UIPencilInteraction.preferredSqueezeAction, gesture: .squeeze)
     }
 
-    func focus(_ canvas: PKCanvasView) {
+    func focus(_ canvas: PKCanvasView, takingFirstResponderLater: Bool = false) {
         activeCanvas = canvas
         if let page = canvases.first(where: { $0.value === canvas })?.key {
             studentPage = page
@@ -877,7 +876,16 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         updateCanvasInput()
         // First responder keeps undo on the touched page. Read-only leaves it unset, so no keyboard or system undo
         // gesture reaches the ink, as does lying under the copy the canvas shows (EP177).
-        if !readOnly, isActive { canvas.becomeFirstResponder() }
+        if !readOnly, isActive {
+            if takingFirstResponderLater {
+                DispatchQueue.main.async { [weak self, weak canvas] in
+                    guard let self, let canvas, self.isActive, !self.readOnly, self.activeCanvas === canvas else { return }
+                    canvas.becomeFirstResponder()
+                }
+            } else {
+                canvas.becomeFirstResponder()
+            }
+        }
     }
 
     /// Read-only mode (EP63), as GoodNotes': the pages keep scrolling, zooming and following page jumps, but nothing
@@ -3016,10 +3024,9 @@ extension PDFOverlayPageController {
         guard isViewLoaded else { return }
         if active {
             claimTools()
-            view.isUserInteractionEnabled = true
             pencilInteraction.isEnabled = !readOnly
             apply(tools.pencilTool)
-            if let canvas = canvases[currentPage] ?? activeCanvas { focus(canvas) }
+            if let canvas = canvases[currentPage] ?? activeCanvas { focus(canvas, takingFirstResponderLater: true) }
             else {
                 studentPage = currentPage
                 publishPage()
@@ -3039,8 +3046,12 @@ extension PDFOverlayPageController {
             hideEraserCircle()
             holdGuide.removeFromSuperlayer()
             pencilInteraction.isEnabled = false
-            view.isUserInteractionEnabled = false
-            activeCanvas?.resignFirstResponder()
+            if let canvas = activeCanvas, canvas.isFirstResponder {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.isActive, canvas.isFirstResponder else { return }
+                    canvas.resignFirstResponder()
+                }
+            }
             saveReadingPosition()
         }
     }
