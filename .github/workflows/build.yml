@@ -118,6 +118,8 @@ jobs:
               -skip-testing:EmberPadTests/PDFImportTests
               -skip-testing:EmberPadUITests/ImportPDFUITests
               -skip-testing:EmberPadUITests/PencilPaletteUITests
+              -skip-testing:EmberPadTests/SidebarSelectedRowTests
+              -skip-testing:EmberPadUITests/SidebarKeyboardFocusUITests
           - shard: 4
             selection: >-
               -only-testing:EmberPadUITests/ReadingPositionUITests
@@ -127,6 +129,8 @@ jobs:
               -only-testing:EmberPadTests/PDFImportTests
               -only-testing:EmberPadUITests/ImportPDFUITests
               -only-testing:EmberPadUITests/PencilPaletteUITests
+              -only-testing:EmberPadTests/SidebarSelectedRowTests
+              -only-testing:EmberPadUITests/SidebarKeyboardFocusUITests
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
