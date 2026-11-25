@@ -115,16 +115,17 @@ final class TeacherCopyFlipTests: XCTestCase {
         try await close(library, ids)
     }
 
-    /// The flip is a short crossfade: on every display frame at least one copy is drawn whole, and the main thread never
-    /// stalls longer than the stress test allows (`StressBounds.longestFrameGap`), either way.
+    /// The flip is a short crossfade: on every display frame at least one copy is drawn whole, and neither the gap
+    /// between display frames nor the main thread's longest run of work exceeds the stress test's bound
+    /// (`StressBounds.longestFrameGap`), either way.
     ///
-    /// EP182: the stall is timed on the main thread itself, as its longest run of work without going back to wait in its
-    /// run loop: the tap, everything the flip sets off, and Core Animation's commit. The gap between display frames is
-    /// printed too but not held to the bound: on a loaded CI runner the Simulator's frames can come late while the
-    /// app's main thread waits, idle, for them. Both directions are watched before anything is checked: recording a
-    /// failed check is slow work on the main thread (0.9 and 1.1 s on CI runners), which then landed in the next
-    /// direction's watch and was reported as that flip stalling.
-    func testTheFlipNeverShowsABlankFrameOrStalls() async throws {
+    /// EP182: both directions are watched before anything is checked. Recording a failed check is slow work on the main
+    /// thread (0.9 and 1.1 s on CI runners), which used to land in the second direction's watch and be reported as that
+    /// flip stalling. The main-thread stall (the longest run without going back to wait in the run loop) is asserted
+    /// alongside the frame gap. Known limit: on a slow runner the Simulator's frames can still arrive late while the
+    /// app's main thread waits idle (103 and 145 ms to the Teacher copy, with the tap taking 5 to 7 ms), so the frame
+    /// gap can still miss the bound there.
+        func testTheFlipNeverShowsABlankFrameOrStalls() async throws {
         let (library, ids) = try await makePairedLibrary()
         let (flip, chrome, _, _) = try await openEditor(library, ids.student)
         try await show(page: 1, chrome)
@@ -168,6 +169,9 @@ final class TeacherCopyFlipTests: XCTestCase {
             XCTAssertGreaterThan(watch.frames, 30, "\(direction): frames were watched")
             XCTAssertGreaterThan(watch.flippingFrames, 3, "\(direction): the crossfade ran over several frames")
             XCTAssertEqual(watch.blankFrames, 0, "\(direction): no frame showed neither copy whole")
+            XCTAssertLessThanOrEqual(watch.longestGap, StressBounds.longestFrameGap,
+                                     String(format: "\(direction): longest frame gap %.0f ms (the tap itself took %.0f ms)",
+                                            watch.longestGap * 1000, flipped.tapCost * 1000))
             XCTAssertLessThanOrEqual(watch.longestStall, StressBounds.longestFrameGap,
                                      String(format: "\(direction): the main thread stalled %.0f ms (the tap itself took %.0f ms)",
                                             watch.longestStall * 1000, flipped.tapCost * 1000))
