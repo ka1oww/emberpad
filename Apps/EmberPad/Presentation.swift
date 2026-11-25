@@ -523,6 +523,7 @@ final class PresentationState: ObservableObject {
         let present = PresentController(student: student)
         present.onRunningChange = { [weak self] in self?.presentingChanged() }
         present.onLessonRecording = { [weak self] on in self?.lessonInk.lessonRecording(on) }
+        present.onLessonAbandoned = { [weak self] in self?.lessonInk.lessonAbandoned() }
         return present
     }()
     /// EP177: "Clear ink?" when a lesson ends, for the worksheet it used.

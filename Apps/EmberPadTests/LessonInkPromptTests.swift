@@ -100,6 +100,27 @@ final class LessonInkPromptTests: XCTestCase {
         XCTAssertEqual(cleared, [.student])
     }
 
+    /// A presentation stopped mid-recording must not leave the next lesson asking about the earlier worksheet.
+    func testAStoppedLessonNeverLeaksIntoTheNextOnesQuestion() async {
+        let a = LessonInkPrompt.Worksheet(studentID: UUID(), title: "A", teacherID: UUID())
+        let b = LessonInkPrompt.Worksheet(studentID: UUID(), title: "B", teacherID: UUID())
+        let prompt = LessonInkPrompt()
+        var stored: [UUID] = []
+        prompt.clearStored = { stored.append($0) }
+        prompt.worksheetOpened(a) { _ in XCTFail("A is not the lesson's worksheet") }
+        prompt.lessonRecording(true)
+        prompt.worksheetClosed(a.studentID)
+        prompt.lessonAbandoned()
+        XCTAssertNil(prompt.asking, "stopping asks nothing")
+        prompt.worksheetOpened(b) { _ in XCTFail("closed before the end, so cleared in the store") }
+        prompt.lessonRecording(true)
+        prompt.worksheetClosed(b.studentID)
+        prompt.lessonRecording(false)
+        XCTAssertEqual(prompt.asking, b)
+        await prompt.answer(.both).value
+        XCTAssertEqual(Set(stored), Set([b.studentID, b.teacherID!]))
+    }
+
     /// No lesson, or no worksheet in it: nothing is asked.
     func testNothingIsAskedWithoutALessonOrAWorksheet() {
         let prompt = LessonInkPrompt()

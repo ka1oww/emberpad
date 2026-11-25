@@ -205,6 +205,7 @@ final class PresentController: ObservableObject {
         isOn = false
         light = .off
         lesson = nil
+        onLessonAbandoned?()
         macRecords = false
         pendingLesson = nil
         confirmingStop = false
@@ -401,6 +402,8 @@ final class PresentController: ObservableObject {
     /// EP177: told when the Mac starts (true) or ends (false) recording a lesson, whether the teacher started or ended
     /// it here or in Ember Companion.
     var onLessonRecording: ((Bool) -> Void)?
+    /// Told when the presentation stops, so a lesson still recording on the Mac is not asked about later.
+    var onLessonAbandoned: (() -> Void)?
 
     private func lessonChanged(_ status: PresentLessonStatus) {
         guard isOn else { return }

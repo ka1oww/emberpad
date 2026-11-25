@@ -92,6 +92,13 @@ final class LessonInkPrompt: ObservableObject {
         }
     }
 
+    /// The presentation stopped while a lesson may have been recording: that lesson is dropped, unasked, so the next one
+    /// starts on the worksheet then open.
+    func lessonAbandoned() {
+        recording = false
+        used = nil
+    }
+
     /// The teacher's answer. Only the asked worksheet's copies are cleared; Keep clears nothing. The question goes at
     /// once; a copy no editor has open is cleared in the store by the task returned, which tests wait on.
     @discardableResult
