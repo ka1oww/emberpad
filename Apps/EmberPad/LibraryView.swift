@@ -162,6 +162,7 @@ struct LibraryView: View {
                     SidebarSelectRow(title: "All subjects", systemImage: "square.grid.2x2",
                                      count: totalCount, selected: library.sidebarSelection == .allSubjects)
                 }
+                .listRowBackground(Color.clear)
                 if rows.isEmpty {
                     Text("No subjects yet")
                         .font(Theme.meta)
@@ -173,6 +174,7 @@ struct LibraryView: View {
                                              count: rows.first(where: { $0.name == name })?.count ?? 0,
                                              selected: library.sidebarSelection == .subject(name))
                         }
+                        .listRowBackground(Color.clear)
                     }
                 }
             } header: {
@@ -183,6 +185,7 @@ struct LibraryView: View {
                     SidebarSelectRow(title: "Archived", systemImage: "archivebox",
                                      count: archivedCount, selected: library.sidebarSelection == .archived)
                 }
+                .listRowBackground(Color.clear)
             } header: {
                 Theme.sidebarSectionHeader("Library")
             }
@@ -858,7 +861,7 @@ private struct SidebarSelectRow: View {
         .padding(.vertical, 6)
         .background(selected ? Theme.accent : Color.clear,
                     in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .listRowBackground(Color.clear)
+        .background(SidebarCellChrome())
     }
 }
 
