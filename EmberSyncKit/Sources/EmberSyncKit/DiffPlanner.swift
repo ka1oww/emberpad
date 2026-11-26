@@ -21,6 +21,11 @@ public struct DocumentRecord: Identifiable, Equatable, Codable, Sendable {
     /// The current copy of the opposite role with the same paper key, from `DiffPlanner.pairs(in:)`.
     /// Pairing comes only from the manifest's publication record, never from file names.
     public var pairedDocumentID: UUID?
+    /// EP188: a grid notebook started on the iPad (A3 squared paper), which lives only there. It never reaches the
+    /// Mac: the planner leaves it out of every delivery (no relink, replace, version or archive), and neither the ink
+    /// backup nor the imported-PDF upload sends it. Written as `gridNotebook` only when true, so every other
+    /// `doc.json` keeps the exact bytes it had.
+    public let isGridNotebook: Bool
 
     /// Fixed for the lifetime of a document: a role change files a new document and never moves ink.
     public var role: DocumentRole { source.role }
@@ -29,11 +34,12 @@ public struct DocumentRecord: Identifiable, Equatable, Codable, Sendable {
     public var paperKey: PaperKey? { source.paperKey }
     /// Listed only under **Archived**: archived on this iPad, or delivered with the manifest's archived mark.
     public var showsAsArchived: Bool { status == .archived || source.isArchived }
-    var identity: DocumentIdentity { source.identity }
+    /// A grid notebook's identity never equals a delivered copy's, so no delivery can land on it.
+    var identity: DocumentIdentity { DocumentIdentity(source: source.source, role: role, isGridNotebook: isGridNotebook) }
 
     public init(id: UUID = UUID(), source: ManifestEntry, pageCount: Int, importedAt: Date,
                 hasInk: Bool = false, status: DocumentStatus = .current, title: String? = nil, isUpdated: Bool = false,
-                pairedDocumentID: UUID? = nil) {
+                pairedDocumentID: UUID? = nil, isGridNotebook: Bool = false) {
         self.id = id
         self.formatVersion = Self.currentFormatVersion
         self.source = source
@@ -45,10 +51,12 @@ public struct DocumentRecord: Identifiable, Equatable, Codable, Sendable {
         self.isUpdated = isUpdated
         self.inkPages = []
         self.pairedDocumentID = pairedDocumentID
+        self.isGridNotebook = isGridNotebook
     }
 
     enum CodingKeys: String, CodingKey {
         case formatVersion, id, source, title, pageCount, importedAt, hasInk, status, isUpdated, inkPages, pairedDocumentID
+        case isGridNotebook = "gridNotebook"
     }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -68,6 +76,25 @@ public struct DocumentRecord: Identifiable, Equatable, Codable, Sendable {
         isUpdated = try c.decode(Bool.self, forKey: .isUpdated)
         inkPages = try c.decode(Set<Int>.self, forKey: .inkPages)
         pairedDocumentID = try c.decodeIfPresent(UUID.self, forKey: .pairedDocumentID)
+        isGridNotebook = try c.decodeIfPresent(Bool.self, forKey: .isGridNotebook) ?? false
+        // A grid notebook is made on the iPad, so it never carries a publication record.
+        guard !isGridNotebook || source.publication == nil else { throw LibraryError.invalidDocument }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(formatVersion, forKey: .formatVersion)
+        try c.encode(id, forKey: .id)
+        try c.encode(source, forKey: .source)
+        try c.encode(title, forKey: .title)
+        try c.encode(pageCount, forKey: .pageCount)
+        try c.encode(importedAt, forKey: .importedAt)
+        try c.encode(hasInk, forKey: .hasInk)
+        try c.encode(status, forKey: .status)
+        try c.encode(isUpdated, forKey: .isUpdated)
+        try c.encode(inkPages, forKey: .inkPages)
+        try c.encodeIfPresent(pairedDocumentID, forKey: .pairedDocumentID)
+        if isGridNotebook { try c.encode(true, forKey: .isGridNotebook) }
     }
 }
 
@@ -92,10 +119,12 @@ public enum SyncAction: Equatable, Sendable {
 /// 3. Otherwise identical bytes of the same role relink when unambiguous (Student rename or class move).
 /// 4. Otherwise the entry imports new, and current documents left unmatched are archived, never deleted.
 /// No rule replaces an inked document, moves ink to other bytes, or changes a document's role.
+/// Grid notebooks (EP188) live only on the iPad and are left out of the plan altogether: no action ever names one.
 public enum DiffPlanner {
     public static let previousRetention: TimeInterval = 30 * 86_400
 
-    public static func plan(remote: Manifest, local: [DocumentRecord], now: Date) throws -> [SyncAction] {
+    public static func plan(remote: Manifest, local all: [DocumentRecord], now: Date) throws -> [SyncAction] {
+        let local = all.filter { !$0.isGridNotebook }
         let candidates = local.filter { $0.status != .olderVersion }
         let current = candidates.filter { $0.status == .current }
         guard Set(local.map(\.id)).count == local.count,

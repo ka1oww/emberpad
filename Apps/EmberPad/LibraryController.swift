@@ -546,6 +546,39 @@ final class LibraryController: ObservableObject {
         }
     }
 
+    // MARK: - Grid notebooks (EP188)
+
+    /// The library's New › Grid Notebook: a notebook of A3 squared paper that lives on this iPad only, filed under
+    /// Grid Notebooks and ready to write on. Its ink and pages save as any worksheet's do; it is never recorded for
+    /// the Mac's Imports folder, and the sync never sends it (see `GridNotebook`). Returns its id, or nil when it could
+    /// not be made, with the reason shown.
+    func newGridNotebook() async -> UUID? {
+        do {
+            let record = try await store.createGridNotebook(pdf: PaperTemplateRenderer.pdfData(for: GridNotebook.template))
+            await refresh()
+            return record.id
+        } catch {
+            showError(error.localizedDescription)
+            return nil
+        }
+    }
+
+    /// Renames grid notebook `id` (a card's Rename…).
+    func renameGridNotebook(_ id: UUID, to title: String) async {
+        do { try await store.renameGridNotebook(id, to: title) } catch { showError(error.localizedDescription) }
+        await refresh()
+    }
+
+    /// Deletes grid notebook `id`, its pages and its ink, from this iPad (a card's Delete…). There is no other copy.
+    func deleteGridNotebook(_ id: UUID) async {
+        do {
+            try await store.deleteGridNotebook(id)
+            sessions[id] = nil
+            closedSessions.removeObject(forKey: id as NSUUID)
+        } catch { showError(error.localizedDescription) }
+        await refresh()
+    }
+
     // MARK: - Importing PDFs (EP165)
 
     /// Where an import lands now: the folder the teacher is viewing, or the "Imports" subject from All subjects and

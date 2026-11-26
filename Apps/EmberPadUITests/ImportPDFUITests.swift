@@ -1,7 +1,7 @@
 import XCTest
 
 /// EP165: Import PDF from inside a folder, through UIKit's real event delivery and the system Files picker: open the
-/// "UI Test" folder, tap Import PDF (+), choose the synthetic PDF in On My iPad › Ember Slate
+/// "UI Test" folder, tap New (+) › Import PDF, choose the synthetic PDF in On My iPad › Ember Slate
 /// (`-EmberPadUITestImportPDF`), and Open. The PDF must become a notebook in that folder, named after its file, with
 /// no class form on the way and no "Unfiled" subject made for it, and it must open like any worksheet. Before EP165,
 /// Import asked for a class that defaulted to "Unfiled", so the PDF landed outside the folder being viewed.
@@ -87,8 +87,12 @@ final class ImportPDFUITests: XCTestCase {
         }
         XCTAssertTrue(existing.waitForExistence(timeout: 15), "the UI Test folder is open")
 
+        // EP188: + is the New menu, which holds Import PDF beside Grid Notebook.
+        let newMenu = app.buttons["New"]
+        XCTAssertTrue(newMenu.waitForExistence(timeout: 10), "the library toolbar has New (+)")
+        newMenu.tap()
         let importButton = app.buttons["Import PDF"]
-        XCTAssertTrue(importButton.waitForExistence(timeout: 10), "the library toolbar has Import PDF")
+        XCTAssertTrue(importButton.waitForExistence(timeout: 10), "New offers Import PDF")
         importButton.tap()
         XCTAssertFalse(app.textFields["Class folder"].waitForExistence(timeout: 2), "no class form before the picker")
     }

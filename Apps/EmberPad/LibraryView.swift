@@ -147,6 +147,16 @@ struct LibraryView: View {
         showImport = true
     }
 
+    /// EP188: New › Grid Notebook. The notebook opens straight onto its first page, and Grid Notebooks is the folder
+    /// the library shows when it closes.
+    private func startGridNotebook() {
+        Task {
+            guard let id = await library.newGridNotebook() else { return }
+            library.sidebarSelection = .subject(GridNotebook.subject)
+            navigator.openFromCard(id, reduceMotion: reduceMotion)
+        }
+    }
+
     // MARK: - Sidebar
 
     private var sidebar: some View {
@@ -287,7 +297,13 @@ struct LibraryView: View {
                 if library.isImporting {
                     ProgressView()
                 } else {
-                    Button("Import PDF", systemImage: "plus") { startImport() }
+                    // EP188: + is GoodNotes' New: a grid notebook to teach on, or Import PDF (EP165).
+                    Menu {
+                        Button("Grid Notebook", systemImage: "squareshape.split.3x3") { startGridNotebook() }
+                        Button("Import PDF", systemImage: "square.and.arrow.down") { startImport() }
+                    } label: {
+                        Label("New", systemImage: "plus")
+                    }
                 }
             }
         }
@@ -529,17 +545,18 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.text)
             Text(library.showingArchived
                  ? "Archived worksheets appear here."
-                 : "Import a PDF with +, or let the Mac drop them into the Inbox overnight.")
+                 : "Start a grid notebook or import a PDF with +, or let the Mac drop them into the Inbox overnight.")
                 .font(Theme.meta)
                 .foregroundStyle(Theme.text2)
                 .multilineTextAlignment(.center)
             if !library.showingArchived {
-                Button("Import PDF") { startImport() }
-                    .font(.system(.body, weight: .semibold))
-                    .padding(.horizontal, 20).padding(.vertical, 10)
-                    .background(Theme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .foregroundStyle(Theme.onAccent)
-                    .disabled(library.isImporting)
+                HStack(spacing: 12) {
+                    Button("New Grid Notebook") { startGridNotebook() }
+                    Button("Import PDF") { startImport() }
+                }
+                .font(.system(.body, weight: .semibold))
+                .buttonStyle(EmptyStateButtonStyle())
+                .disabled(library.isImporting)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 320)
@@ -873,6 +890,10 @@ private struct LibraryCardCell: View {
     /// Opens the worksheet with the document transition (EP87).
     var onOpen: () -> Void = {}
     @StateObject private var flattenedExport = FlattenedExportModel()
+    /// EP188: a grid notebook's Rename… and Delete….
+    @State private var renaming = false
+    @State private var draftTitle = ""
+    @State private var confirmDelete = false
 
     var body: some View {
         // Subscribes the card to thumbnail arrivals for this document version.
@@ -882,7 +903,14 @@ private struct LibraryCardCell: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            if library.showingArchived {
+            if record.isGridNotebook {
+                // EP188: a grid notebook is the teacher's own, on this iPad only: renamed and deleted here, never archived.
+                Button("Rename…", systemImage: "pencil") {
+                    draftTitle = record.title
+                    renaming = true
+                }
+                Button("Delete…", systemImage: "trash", role: .destructive) { confirmDelete = true }
+            } else if library.showingArchived {
                 // A copy below a hidden source folder stays under Archived even when restored, so it offers no Unarchive.
                 if record.status == .archived && !LibraryFolders.isUnderHiddenSourceFolder(record.source) {
                     Button("Unarchive", systemImage: "arrow.uturn.backward") {
@@ -901,10 +929,31 @@ private struct LibraryCardCell: View {
             }
             .disabled(record.role != .student || flattenedExport.isExporting)
         }
+        .alert("Rename Grid Notebook", isPresented: $renaming) {
+            TextField("Name", text: $draftTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") { Task { await library.renameGridNotebook(record.id, to: draftTitle) } }
+        }
+        .confirmationDialog("Delete \u{201C}\(record.title)\u{201D}?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete Grid Notebook", role: .destructive) { Task { await library.deleteGridNotebook(record.id) } }
+        } message: {
+            Text("Its pages and ink are deleted from this iPad. Grid notebooks are never sent to your Mac, so there is no other copy.")
+        }
         .flattenedExportSheet(flattenedExport)
         .task(id: ThumbnailCache.key(for: record)) {
             await thumbnails.thumbnail(for: record)
         }
+    }
+}
+
+/// The empty library's buttons: accent capsules, as Import PDF's was.
+private struct EmptyStateButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 20).padding(.vertical, 10)
+            .background(Theme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .foregroundStyle(Theme.onAccent)
+            .opacity(configuration.isPressed ? 0.8 : 1)
     }
 }
 
