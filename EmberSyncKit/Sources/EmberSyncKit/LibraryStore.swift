@@ -111,7 +111,7 @@ public actor LibraryStore {
     public func addVersion(olderDocumentID: UUID, data: Data, entry: ManifestEntry, pageCount: Int, now: Date = Date()) throws -> DocumentRecord {
         try validate(data, entry: entry, pageCount: pageCount)
         var older = try read(olderDocumentID)
-        guard older.status == .current, older.identity == entry.identity else { throw LibraryError.invalidDocument }
+        guard older.status == .current, older.identity == entry.identity, !older.isGridNotebook else { throw LibraryError.invalidDocument }
         let record = DocumentRecord(source: entry, pageCount: pageCount, importedAt: now,
                                     title: Self.updatedTitle(entry, date: now), isUpdated: true)
         // If creation fails, the older folder remains readable; roll its badge back when possible.
@@ -128,7 +128,7 @@ public actor LibraryStore {
     public func replaceDocument(_ documentID: UUID, data: Data, entry: ManifestEntry, pageCount: Int, now: Date = Date()) throws -> DocumentRecord {
         try validate(data, entry: entry, pageCount: pageCount)
         let existing = try read(documentID)
-        guard existing.role == entry.role, existing.status != .olderVersion else { throw LibraryError.invalidDocument }
+        guard existing.role == entry.role, existing.status != .olderVersion, !existing.isGridNotebook else { throw LibraryError.invalidDocument }
         guard !existing.hasInk else { throw LibraryError.inkProtected }
         guard documentPins[documentID, default: 0] == 0 else { throw LibraryError.documentInUse }
         guard try !documents().contains(where: { $0.id != documentID && $0.status == .current && $0.identity == entry.identity })
@@ -190,6 +190,47 @@ public actor LibraryStore {
             record.hasInk = manifest.hasTeacherContent
             try write(record)
         }
+    }
+
+    // MARK: Grid notebooks (EP188)
+
+    /// Starts a grid notebook: a new Student document of one page whose `original.pdf` is `pdf`, the one-page A3
+    /// squared paper (`GridNotebook.template`) the app draws, filed in `GridNotebook.subject` and named
+    /// `GridNotebook.defaultTitle`, or `title` when given, with a ` (2)` suffix when another notebook has that name.
+    /// It is flagged `isGridNotebook`, so it stays on the iPad (see `GridNotebook`).
+    @discardableResult
+    public func createGridNotebook(pdf: Data, title: String? = nil, now: Date = Date()) throws -> DocumentRecord {
+        guard !pdf.isEmpty else { throw LibraryError.invalidDocument }
+        let id = UUID()
+        let source = try SourcePath(classFolder: GridNotebook.subject, relativePath: id.uuidString + ".pdf")
+        let entry = try ManifestEntry(source: source, sha256: .digest(pdf), size: Int64(pdf.count), modifiedAt: now)
+        let base = title.flatMap(GridNotebook.cleanTitle) ?? GridNotebook.defaultTitle
+        let record = DocumentRecord(id: id, source: entry, pageCount: 1, importedAt: now,
+                                    title: GridNotebook.uniqueTitle(base, existing: try documents()), isGridNotebook: true)
+        try create(record, pdf: pdf)
+        return try read(id)
+    }
+
+    /// Renames grid notebook `documentID`. Only a grid notebook can be renamed: every other document's name comes
+    /// from the Mac or its file. Returns the renamed record.
+    @discardableResult
+    public func renameGridNotebook(_ documentID: UUID, to title: String) throws -> DocumentRecord {
+        var record = try read(documentID)
+        guard record.isGridNotebook else { throw LibraryError.invalidDocument }
+        guard let cleaned = GridNotebook.cleanTitle(title) else { throw LibraryError.invalidDocument }
+        guard cleaned != record.title else { return record }
+        record.title = GridNotebook.uniqueTitle(cleaned, existing: try documents().filter { $0.id != documentID })
+        try write(record)
+        return record
+    }
+
+    /// Deletes grid notebook `documentID`, its pages and its ink, from the iPad. Only a grid notebook can be deleted,
+    /// and not while it is open.
+    public func deleteGridNotebook(_ documentID: UUID) throws {
+        let record = try read(documentID)
+        guard record.isGridNotebook else { throw LibraryError.invalidDocument }
+        guard documentPins[documentID, default: 0] == 0 else { throw LibraryError.gridNotebookOpen }
+        try files.removeItem(at: folder(documentID))
     }
 
     // MARK: Pages (EP61)
@@ -458,6 +499,8 @@ public actor LibraryStore {
 
     public func relink(documentID: UUID, entry: ManifestEntry) throws {
         var record = try read(documentID)
+        // A grid notebook lives only on the iPad (EP188): no delivered copy ever takes it over.
+        guard !record.isGridNotebook else { throw LibraryError.invalidDocument }
         guard record.source.sha256 == entry.sha256 else { throw LibraryError.hashMismatch }
         guard record.role == entry.role else { throw LibraryError.invalidDocument }
         let hasCurrentCollision = try documents().contains {

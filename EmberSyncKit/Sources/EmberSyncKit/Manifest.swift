@@ -3,7 +3,7 @@ import CryptoKit
 
 public enum LibraryError: Error, LocalizedError, Sendable, Equatable {
     case invalidPath, invalidHash, invalidManifest, invalidDocument, documentMissing, pageOutOfRange, hashMismatch, documentInUse
-    case inkProtected, teacherCopyReadOnly, pageNotRemovable, pageKeepsItsPaper, pageKeepsItsSize
+    case inkProtected, teacherCopyReadOnly, pageNotRemovable, pageKeepsItsPaper, pageKeepsItsSize, gridNotebookOpen
     public var errorDescription: String? {
         switch self {
         case .invalidPath: "The worksheet path is not a safe relative path."
@@ -19,6 +19,7 @@ public enum LibraryError: Error, LocalizedError, Sendable, Equatable {
         case .pageNotRemovable: "Only pages added in Ember Slate can be deleted. The worksheet's own pages stay."
         case .pageKeepsItsPaper: "Only paper pages added in Ember Slate can change template. The worksheet's own pages keep theirs."
         case .pageKeepsItsSize: "A Teach page keeps its paper size and orientation. Only its paper kind and colour can change."
+        case .gridNotebookOpen: "Close this grid notebook before deleting it."
         }
     }
 }
@@ -202,6 +203,8 @@ public struct Publication: Equatable, Sendable {
 struct DocumentIdentity: Hashable {
     let source: SourcePath
     let role: DocumentRole
+    /// EP188: an iPad-only grid notebook, which no delivered copy can ever share an identity with.
+    var isGridNotebook = false
 }
 
 public struct ManifestEntry: Equatable, Codable, Sendable {

@@ -76,7 +76,8 @@ public struct ImportRegistry: Codable, Equatable, Sendable {
 }
 
 /// The PDFs imported on the iPad, offered to the Mac's Imports folder: each notebook's original PDF (never its ink),
-/// once per pairing, in name order. A notebook since deleted, or larger than a PUT may be, is left out. Its ledger
+/// once per pairing, in name order. A notebook since deleted, or larger than a PUT may be, is left out, and so is a
+/// grid notebook (EP188), which is never recorded here but stays on the iPad even if it were. Its ledger
 /// (the backup ledger's format, in its own file) is written only after the Mac confirms a copy.
 public actor ImportUploadQueue: InkBackupSource {
     private let store: LibraryStore
@@ -101,7 +102,8 @@ public actor ImportUploadQueue: InkBackupSource {
         }
         while let item = pending?.first {
             pending?.removeFirst()
-            guard let record = try? await store.document(item.id), let url = try? await store.originalURL(documentID: item.id),
+            guard let record = try? await store.document(item.id), !record.isGridNotebook,
+                  let url = try? await store.originalURL(documentID: item.id),
                   let data = try? Data(contentsOf: url), !data.isEmpty, UInt64(data.count) <= WireProtocol.maxPutBytes
             else { continue }
             let hash = ContentHash.digest(data)

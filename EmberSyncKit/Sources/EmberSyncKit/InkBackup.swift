@@ -202,9 +202,10 @@ public protocol InkBackupSource: Sendable {
     func confirmed(_ upload: InkBackupUpload) async
 }
 
-/// The iPad's backup source: Student copies with ink, in a stable order, each offered as its ink package and then
-/// its flattened PDF, skipping whatever the ledger says the Mac already holds for the current ink. Ink is read from
-/// the library's saved drawings (the sync saves open pages first), never from the screen, and is only read.
+/// The iPad's backup source: Student copies with ink (never a grid notebook, which stays on the iPad; EP188), in a
+/// stable order, each offered as its ink package and then its flattened PDF, skipping whatever the ledger says the Mac
+/// already holds for the current ink. Ink is read from the library's saved drawings (the sync saves open pages first),
+/// never from the screen, and is only read.
 public actor InkBackupQueue: InkBackupSource {
     /// Renders the flattened PDF from the record, its pages and their drawings (keyed by page index in reading
     /// order). Throwing skips that copy this time.
@@ -231,7 +232,7 @@ public actor InkBackupQueue: InkBackupSource {
     public func next() async -> InkBackupUpload? {
         if pending == nil {
             let documents = (try? await store.documents()) ?? []
-            pending = documents.filter { $0.role == .student && $0.hasInk }
+            pending = documents.filter { $0.role == .student && $0.hasInk && !$0.isGridNotebook }
                 .sorted { ($0.subject, $0.title, $0.id.uuidString) < ($1.subject, $1.title, $1.id.uuidString) }
         }
         while queued.isEmpty, let record = pending?.first {
