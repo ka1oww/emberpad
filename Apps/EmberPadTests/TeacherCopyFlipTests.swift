@@ -161,9 +161,9 @@ final class TeacherCopyFlipTests: XCTestCase {
         for flipped in watched {
             let (direction, watch) = (flipped.direction, flipped.watch)
             print(String(format: "EP177 flip %@: %d frames, %d in the crossfade, %d blank, longest gap %.1f ms, "
-                         + "longest main-thread stall %.1f ms (from %.0f ms after the tap), tap %.1f ms",
+                         + "longest main-thread stall %.1f ms (%.1f ms of it on the CPU, from %.0f ms after the tap), tap %.1f ms",
                          direction, watch.frames, watch.flippingFrames, watch.blankFrames, watch.longestGap * 1000,
-                         watch.longestStall * 1000, watch.longestStallFromTap * 1000, flipped.tapCost * 1000))
+                         watch.longestStall * 1000, watch.longestStallCPU * 1000, watch.longestStallFromTap * 1000, flipped.tapCost * 1000))
             XCTAssertTrue(flipped.crossfading, "\(direction): it crossfades")
             XCTAssertEqual(flipped.shown, flipped.copy)
             XCTAssertGreaterThan(watch.frames, 30, "\(direction): frames were watched")
@@ -173,8 +173,8 @@ final class TeacherCopyFlipTests: XCTestCase {
                                      String(format: "\(direction): longest frame gap %.0f ms (the tap itself took %.0f ms)",
                                             watch.longestGap * 1000, flipped.tapCost * 1000))
             XCTAssertLessThanOrEqual(watch.longestStall, StressBounds.longestFrameGap,
-                                     String(format: "\(direction): the main thread stalled %.0f ms (the tap itself took %.0f ms)",
-                                            watch.longestStall * 1000, flipped.tapCost * 1000))
+                                     String(format: "\(direction): the main thread stalled %.0f ms, %.0f ms of it on the CPU (the tap itself took %.0f ms)",
+                                            watch.longestStall * 1000, watch.longestStallCPU * 1000, flipped.tapCost * 1000))
             XCTAssertFalse(flipped.stillFlipping, "\(direction): the crossfade has finished")
         }
         try await close(library, ids)
@@ -274,7 +274,12 @@ final class TeacherCopyFlipTests: XCTestCase {
         private var observers: [CFRunLoopObserver] = []
         /// When the main thread last woke, while it works; nil while it waits in its run loop.
         private var busySince: CFTimeInterval?
+        /// The main thread's own CPU time when it last woke (EP190).
+        private var busyCPUSince: CFTimeInterval = 0
         private(set) var longestStall: CFTimeInterval = 0
+        /// How much of the longest stall the main thread spent running on a CPU (EP190). Far less than the stall means it
+        /// was waiting (blocked, or not scheduled) rather than working.
+        private(set) var longestStallCPU: CFTimeInterval = 0
         private var longestStallStart: CFTimeInterval = 0
         private var tap: CFTimeInterval?
 
@@ -286,6 +291,7 @@ final class TeacherCopyFlipTests: XCTestCase {
             self.link = link
             // The watch is made on the main thread, so it is working from now; the first wait ends that run.
             busySince = CACurrentMediaTime()
+            busyCPUSince = Self.threadCPUTime()
             // First to see the main thread wake, and last to see it go to wait, after every other observer (Core
             // Animation commits at 2,000,000): whatever the app does on the main thread falls inside the run.
             let woke = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue, true, CFIndex.min) {
@@ -307,7 +313,10 @@ final class TeacherCopyFlipTests: XCTestCase {
         var longestStallFromTap: CFTimeInterval { longestStallStart - (tap ?? longestStallStart) }
 
         private func woke() {
-            if busySince == nil { busySince = CACurrentMediaTime() }
+            if busySince == nil {
+                busySince = CACurrentMediaTime()
+                busyCPUSince = Self.threadCPUTime()
+            }
         }
 
         private func goesToWait() {
@@ -320,7 +329,13 @@ final class TeacherCopyFlipTests: XCTestCase {
             if end - start > longestStall {
                 longestStall = end - start
                 longestStallStart = start
+                longestStallCPU = Self.threadCPUTime() - busyCPUSince
             }
+        }
+
+        /// The calling thread's CPU time, in seconds. The run loop observers run on the main thread.
+        private static func threadCPUTime() -> CFTimeInterval {
+            CFTimeInterval(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1_000_000_000
         }
 
         @objc private func tick(_ link: CADisplayLink) {
