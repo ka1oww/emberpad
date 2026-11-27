@@ -103,7 +103,7 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
     /// EP98: the strokes the latest landing on `page` gave an undo step of their own before PencilKit had made its
     /// own for them, and the watch for PencilKit's steps, made late, which then take back only those strokes or
     /// nothing, and are dropped. The watch's plain wait is `lateInkStepWait`, and past it only while steps are still
-    /// owed (EP168); the strokes are remembered until their late steps are dropped, by the idle watch or by the page's next landing, however long after (EP107).
+    /// owed, or may still come (EP168, EP180); the strokes are remembered until their late steps are dropped, by the idle watch or by the page's next landing, however long after (EP107).
     private var lateInkSteps: LateInkSteps?
     private struct LateInkSteps {
         let page: Int
@@ -115,6 +115,10 @@ final class PDFOverlayPageController: UIViewController, WorksheetPageRenderer, @
         /// EP168: every page's drawing revision (`scribbleRevisions`) as the landing, and the watch's own drops
         /// since, left it. Past `lateInkStepWait` the watch acts only while the pages are still so.
         var revisions: [Int: Int]
+        /// EP180: the landing stopped counting empty steps PencilKit still owed for strokes an earlier landing put
+        /// back (`emptyInkStepsOwed`). They can still come, after this landing and past `lateInkStepWait`, so the
+        /// watch goes on for them too.
+        let mayStillCome: Bool
     }
     /// EP168: the names PencilKit gives the undo steps for its ink, as met by the landings' pops ("Added strokes").
     private var pencilKitStepNames: Set<String> = []
@@ -2376,10 +2380,12 @@ extension PDFOverlayPageController {
             let stillOwed = lateInkSteps?.page == page ? lateInkSteps : nil
             // EP146: an empty step owed since an earlier landing was met by this one, or never comes; only those for
             // the strokes put back now are still watched for.
+            // EP180: those no longer counted can still come, so the watch goes on for them.
+            let forgotten = emptyInkStepsOwed > putBack.count
             emptyInkStepsOwed = min(emptyInkStepsOwed, putBack.count)
             expectLateInkSteps(page: page, strokes: (stillOwed?.strokes ?? []).union(landed.map(InkStrokeID.init)),
                                ownSteps: (stillOwed?.ownSteps ?? []).union(steps.map(\.actionName)),
-                               undoManager: undoManager)
+                               mayStillCome: forgotten, undoManager: undoManager)
         }
     }
 
@@ -2404,18 +2410,23 @@ extension PDFOverlayPageController {
     /// landing left it. Once anything else changes a page, or another step closes (a search field's typing shares
     /// the window's undo stack and changes no page), it ends: it never tries (undoes and redoes) a step for new ink,
     /// or takes one that is not ink.
+    /// EP180: a landing stops counting the steps an earlier landing's put-back strokes are still owed (EP146), and
+    /// with none counted the watch ended at its wait, or there was none: on a starved run loop PencilKit made two of
+    /// them after the next landing, and they stayed on top (122 steps for 120 strokes on CI). The watch now goes on
+    /// for them too, on the same terms, until the page's next landing. A drop the watch before it had queued then
+    /// keeps the new watch on.
     private func expectLateInkSteps(page: Int, strokes: Set<InkStrokeID>, ownSteps: Set<String> = [],
-                                    undoManager: UndoManager) {
+                                    mayStillCome: Bool = false, undoManager: UndoManager) {
         if let observer = lateInkSteps?.observer { NotificationCenter.default.removeObserver(observer) }
         lateInkSteps = nil
-        guard !strokes.isEmpty || emptyInkStepsOwed > 0 else { return }
+        guard !strokes.isEmpty || emptyInkStepsOwed > 0 || mayStillCome else { return }
         let until = CACurrentMediaTime() + Self.lateInkStepWait
         let observer = NotificationCenter.default.addObserver(forName: .NSUndoManagerDidCloseUndoGroup, object: undoManager,
                                                               queue: nil) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, undoManager.groupingLevel == 0, !undoManager.isUndoing, !undoManager.isRedoing else { return }
                 let inTime = CACurrentMediaTime() < until
-                guard inTime || (self.emptyInkStepsOwed > 0 && self.lateInkStepsPagesAreAsLeft
+                guard inTime || ((self.emptyInkStepsOwed > 0 || mayStillCome) && self.lateInkStepsPagesAreAsLeft
                                  && self.pencilKitStepNames.contains(undoManager.undoActionName)) else {
                     return self.stopWatchingForLateInkSteps()
                 }
@@ -2426,7 +2437,9 @@ extension PDFOverlayPageController {
                     self.dropEmptySteps(undoManager, on: canvas, page: page)
                     // The drops' own changes leave the pages as the landing left them.
                     if asLeft { self.lateInkSteps?.revisions = self.scribbleRevisions }
-                    if self.lateInkSteps?.strokes.isEmpty == true, self.emptyInkStepsOwed == 0 {
+                    // EP180: the watch now on, which a landing since may have set for steps that may still come.
+                    if self.lateInkSteps?.strokes.isEmpty == true, self.emptyInkStepsOwed == 0,
+                       self.lateInkSteps?.mayStillCome != true {
                         self.expectLateInkSteps(page: page, strokes: [], undoManager: undoManager)
                     }
                 }
@@ -2434,7 +2447,7 @@ extension PDFOverlayPageController {
         }
         // A stroke that landed with no edit, or again lower down, has an "Ink" step.
         lateInkSteps = LateInkSteps(page: page, strokes: strokes, ownSteps: ownSteps.union([PendingInkEdit.inkActionName]),
-                                    observer: observer, revisions: scribbleRevisions)
+                                    observer: observer, revisions: scribbleRevisions, mayStillCome: mayStillCome)
     }
 
     /// Whether every page's drawing is as the latest landing, and the watch's own drops since, left it (EP168).
