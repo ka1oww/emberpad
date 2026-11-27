@@ -78,9 +78,12 @@ public struct PresentLessonStatus: Equatable, Codable, Sendable {
     public var message: String?
     /// The last iPad command the Mac has acted on.
     public var handledCommand: UUID?
+    /// EP189: whether the Mac is ready to record, for the iPad's Ready to teach. Nil from a Companion older than this.
+    public var readiness: PresentLessonReadiness?
 
     public init(state: State, startedAt: Date? = nil, micName: String? = nil, micIsFallback: Bool = false,
-                warning: String? = nil, message: String? = nil, handledCommand: UUID? = nil) {
+                warning: String? = nil, message: String? = nil, handledCommand: UUID? = nil,
+                readiness: PresentLessonReadiness? = nil) {
         self.state = state
         self.startedAt = startedAt
         self.micName = micName
@@ -88,7 +91,48 @@ public struct PresentLessonStatus: Equatable, Codable, Sendable {
         self.warning = warning
         self.message = message
         self.handledCommand = handledCommand
+        self.readiness = readiness
     }
 
     public static let idle = PresentLessonStatus(state: .idle)
+}
+
+/// EP189: what the Mac can tell before a lesson starts, for the iPad's Ready to teach: the microphone, macOS's
+/// permission to record it, and the room left for recordings. It rides every lesson status, so an older iPad simply
+/// does not read it.
+public struct PresentLessonReadiness: Equatable, Codable, Sendable {
+    public enum MicAccess: String, Codable, Sendable {
+        case allowed
+        /// macOS has not asked yet. Ember Companion asks at launch, never first under a presentation.
+        case notAsked
+        case off
+    }
+
+    /// The BOYA's name while it is plugged into the Mac; nil while it is not.
+    public var preferredMic: String?
+    /// The Mac has its built-in microphone to fall back on.
+    public var hasBuiltInMic: Bool
+    public var micAccess: MicAccess
+    /// Free space where lessons are saved; nil when the Mac could not tell.
+    public var freeBytes: Int64?
+    /// What one hour of lesson takes at the recording's settings.
+    public var bytesPerHour: Int64
+
+    public init(preferredMic: String?, hasBuiltInMic: Bool, micAccess: MicAccess, freeBytes: Int64?, bytesPerHour: Int64) {
+        self.preferredMic = preferredMic
+        self.hasBuiltInMic = hasBuiltInMic
+        self.micAccess = micAccess
+        self.freeBytes = freeBytes
+        self.bytesPerHour = bytesPerHour
+    }
+
+    /// Hours of lesson the free space holds; nil when the Mac could not tell.
+    public var hoursOfRoom: Double? {
+        freeBytes.map { Double(max(0, $0)) / Double(max(1, bytesPerHour)) }
+    }
+
+    /// What one hour of lesson takes at `settings`: the picture and the sound at their bit rates.
+    public static func bytesPerHour(videoBitRate: Int, audioBitRate: Int) -> Int64 {
+        Int64(videoBitRate + audioBitRate) / 8 * 3_600
+    }
 }

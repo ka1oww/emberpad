@@ -356,6 +356,11 @@ final class CompanionLessonModel: ObservableObject {
     private var endWhileStarting: UUID?
     private var scene: PresentScene?
     private var presenting = PresentHost.Status.off
+    /// EP189: the Mac's last word on whether it is ready to record, carried on every status for Ready to teach.
+    private(set) var readiness: PresentLessonReadiness?
+    /// EP189: refreshes `readiness` while the iPad presents, so a BOYA plugged in or space freed shows within seconds.
+    private var readinessWatch: Task<Void, Never>?
+    static let readinessInterval: TimeInterval = 10
     private var sleepObservers: [NSObjectProtocol] = []
 
     /// A file that has not grown for this long, or a track not taken for `mediaLimit`, is not keeping the lesson.
@@ -552,7 +557,50 @@ final class CompanionLessonModel: ObservableObject {
     private func setStatus(_ new: PresentLessonStatus) {
         var new = new
         new.handledCommand = handled
+        new.readiness = readiness
         status = new
+    }
+
+    // MARK: Ready to teach (EP189)
+
+    /// Works out whether the Mac is ready to record: the BOYA, macOS's permission and the room for recordings, asking
+    /// Core Audio off the main thread. A Mac that does not list its microphones in time keeps its last answer.
+    func refreshReadiness() async {
+        let microphones = self.microphones
+        guard let candidates = await answer(within: options.microphoneTimeout, { await microphones.candidates() }) else { return }
+        let root = options.root
+        let free = await Task.detached(priority: .utility) { LessonRoom.freeBytes(at: root) }.value
+        let access: PresentLessonReadiness.MicAccess = switch microphones.permission {
+        case .authorized: .allowed
+        case .notDetermined: .notAsked
+        case .denied: .off
+        }
+        let ready = PresentLessonReadiness(
+            preferredMic: candidates.first { LessonMicrophone.isPreferred($0.name) }?.name,
+            hasBuiltInMic: candidates.contains(where: \.isBuiltIn), micAccess: access, freeBytes: free,
+            bytesPerHour: PresentLessonReadiness.bytesPerHour(videoBitRate: options.settings.videoBitRate,
+                                                              audioBitRate: options.settings.audioBitRate))
+        guard ready != readiness else { return }
+        readiness = ready
+        var new = status
+        new.readiness = ready
+        status = new
+    }
+
+    /// While the iPad presents, and no lesson records or starts, `readiness` is refreshed every `readinessInterval`.
+    private func watchReadiness(_ on: Bool) {
+        readinessWatch?.cancel()
+        readinessWatch = nil
+        guard on else { return }
+        readinessWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    guard let model = self else { return }
+                    if model.recording == nil, !model.starting { await model.refreshReadiness() }
+                }
+                try? await Task.sleep(nanoseconds: UInt64(Self.readinessInterval * 1_000_000_000))
+            }
+        }
     }
 
     // MARK: Starting
@@ -871,6 +919,7 @@ final class CompanionLessonModel: ObservableObject {
     /// A microphone was plugged in or out: when the lesson's microphone is back, record from it again. The list is
     /// asked for off the main thread.
     private func microphonesChanged() {
+        if presenting != .off, recording == nil, !starting { Task { await refreshReadiness() } }
         guard let recording, recording.sourceDisconnected, !recording.sleeping else { return }
         let microphones = self.microphones
         Task {
@@ -887,6 +936,7 @@ final class CompanionLessonModel: ObservableObject {
     /// A new scene from the iPad, whether or not the presentation window is shown.
     func present(_ scene: PresentScene, status: PresentHost.Status) {
         self.scene = scene
+        if (presenting == .off) != (status == .off) { watchReadiness(status != .off) }
         presenting = status
         guard let recording else { return }
         recording.dirty = true
@@ -1492,3 +1542,15 @@ final class SyntheticAudioSource: LessonAudioSource, @unchecked Sendable {
     }
 }
 #endif
+
+/// EP189: the room left for recordings.
+enum LessonRoom {
+    /// Free space on the disk that holds `root`, or the nearest folder above it that exists; nil when macOS cannot say.
+    nonisolated static func freeBytes(at root: URL) -> Int64? {
+        var url = root
+        while !FileManager.default.fileExists(atPath: url.path), url.pathComponents.count > 1 { url.deleteLastPathComponent() }
+        guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+              let free = values.volumeAvailableCapacityForImportantUsage else { return nil }
+        return free
+    }
+}
