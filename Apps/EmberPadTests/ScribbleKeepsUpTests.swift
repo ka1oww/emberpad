@@ -63,8 +63,13 @@ final class ScribbleKeepsUpTests: XCTestCase {
                 outlinedAt = index
             }
         }
-        // The last judgement comes back, as it would while the Pencil rests a moment before it lifts.
-        HoldPage.turn(0.2)
+        // The last judgement comes back, as it would while the Pencil rests a moment before it lifts: the outline has
+        // judged every sample drawn. Each judgement is of the whole scribble so far, so one still under way at the last
+        // move is followed by one more; on a busy CI runner the two together outlasted a fixed 0.2 s rest, and the
+        // outline was read before it had reached the strokes under the scribble's last few samples (EP176).
+        let rest = Date().addingTimeInterval(5)
+        while page.controller.scribbleJudgementInFlight, Date() < rest { HoldPage.turn(0.01) }
+        XCTAssertFalse(page.controller.scribbleJudgementInFlight, "the outline caught up with the scribble")
         let preview = try XCTUnwrap(page.controller.scribblePreview, "the stroke is watched as a scribble")
         let ink = try XCTUnwrap(preview.ink, "and was judged while it was drawn")
         XCTAssertEqual(ink.judgedOnMainThread, 0, "no judgement of the scribble ran on the main thread while it was drawn")
