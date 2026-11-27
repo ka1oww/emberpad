@@ -202,6 +202,8 @@ final class PageChromeState: ObservableObject {
     var jumpToPage: ((Int) -> Void)?
     /// The header's Add Page popover is open (EP61).
     @Published var addPageOpen = false
+    /// EP189: the Sharing menus' Ready to Teach screen is up.
+    @Published var readyToTeachOpen = false
     /// Adds a page of this paper at the remembered position, as a tap on a recent paper does; the editor sets it.
     var addPage: ((PaperTemplate) -> Void)?
     /// More › Go to Page's number field is up (EP62).
@@ -440,6 +442,14 @@ struct EditorScreen: View {
     /// EP177: the copy the canvas shows: the Student copy, or the Teacher copy the teacher flipped it to.
     private var shownSession: DocumentSession? { flip.shown == .teacher ? flip.teacherSession ?? session : session }
     private var shownRenderer: (any CopyFlipRenderer)? { flip.shownRenderer ?? renderer }
+
+    /// EP189: the open worksheet's folder, for Ready to teach's Teacher copies check.
+    private var readyToTeachCopies: ReadyToTeach.TeacherCopies {
+        guard let record = session?.record ?? library.documents.first(where: { $0.id == documentID }) else {
+            return ReadyToTeach.TeacherCopies(folder: "", total: 0, missing: [])
+        }
+        return ReadyToTeach.teacherCopies(beside: record, in: library.documents)
+    }
 
     /// Thumbnails show page content, so they follow the same main-screen policy as the pages themselves.
     private var pagesAvailable: Bool {
@@ -990,6 +1000,7 @@ extension EditorScreen {
         Menu {
             WorksheetSharingRows(framing: $presentation.studentFraming)
             PresentOnMacRows(present: presentation.present)
+            ReadyToTeachRow(isOpen: $chrome.readyToTeachOpen)
             ClassViewFreezeRows(presentation: presentation, present: presentation.present, freeze: presentation.student.freeze)
         } label: {
             HStack(spacing: 2) {
@@ -1004,10 +1015,14 @@ extension EditorScreen {
             }
         }
         .accessibilityLabel("Sharing: \(pillState.accessibilityText)")
+        .sheet(isPresented: $chrome.readyToTeachOpen) {
+            ReadyToTeachSheet(present: presentation.present, teacherCopies: readyToTeachCopies)
+        }
         Menu {
             pageRows
             WorksheetSharingRows(framing: $presentation.studentFraming)
             PresentOnMacRows(present: presentation.present)
+            ReadyToTeachRow(isOpen: $chrome.readyToTeachOpen)
             ClassViewFreezeRows(presentation: presentation, present: presentation.present, freeze: presentation.student.freeze)
             exportRows
         } label: {

@@ -50,6 +50,36 @@ final class LessonRecorderTests: XCTestCase {
         return (model, LessonIPad(host: model.host), window)
     }
 
+    // MARK: Ready to teach (EP189)
+
+    /// Before class the presenting iPad is told the Mac's readiness: the BOYA by name, macOS's permission and the room
+    /// for recordings. Unplugging the BOYA reaches the iPad without waiting for the next refresh.
+    func testThePresentingIPadIsToldWhetherTheMacIsReadyToRecord() async throws {
+        let microphones = FakeMicrophones(available: [FakeMicrophones.boya, FakeMicrophones.builtIn])
+        let (model, iPad, _) = presenting(microphones)
+        let lesson = model.lesson
+
+        iPad.present(.student)
+        try await waitUntil { iPad.statuses.last?.readiness != nil }
+        let ready = try XCTUnwrap(iPad.statuses.last?.readiness)
+        XCTAssertEqual(ready.preferredMic, FakeMicrophones.boya.name)
+        XCTAssertTrue(ready.hasBuiltInMic)
+        XCTAssertEqual(ready.micAccess, .allowed)
+        XCTAssertEqual(ready.bytesPerHour, PresentLessonReadiness.bytesPerHour(videoBitRate: options().settings.videoBitRate,
+                                                                               audioBitRate: options().settings.audioBitRate))
+        XCTAssertGreaterThan(try XCTUnwrap(ready.freeBytes), 0, "the temporary folder's disk has room")
+        XCTAssertEqual(iPad.statuses.last?.state, .idle, "nothing records until the teacher starts")
+
+        microphones.available = [FakeMicrophones.builtIn]
+        microphones.onChange?()
+        try await waitUntil { iPad.statuses.last?.readiness?.preferredMic == nil }
+        XCTAssertEqual(lesson.readiness?.hasBuiltInMic, true)
+
+        microphones.available = []
+        microphones.onChange?()
+        try await waitUntil { iPad.statuses.last?.readiness?.hasBuiltInMic == false }
+    }
+
     // MARK: Picture, files and record
 
     /// The whole lesson: started from the iPad, a Student copy shown, the Mac's window left (the recording goes on),

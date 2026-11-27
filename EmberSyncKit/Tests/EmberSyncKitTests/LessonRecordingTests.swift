@@ -34,6 +34,30 @@ struct LessonRecordingTests {
         #expect(WireProtocol.supportedVersions.upperBound == WireProtocol.importsVersion)
     }
 
+    /// EP189: the Mac's readiness rides on the lesson status. A status without it (an older Companion) decodes as nil,
+    /// and an older iPad ignores the field.
+    @Test func readinessRoundTripsAndAnOlderStatusHasNone() throws {
+        let hour = PresentLessonReadiness.bytesPerHour(videoBitRate: 4_000_000, audioBitRate: 192_000)
+        #expect(hour == 1_886_400_000)
+        let readiness = PresentLessonReadiness(preferredMic: "BOYA BY-M1", hasBuiltInMic: true, micAccess: .allowed,
+                                               freeBytes: hour * 5 / 2, bytesPerHour: hour)
+        #expect(readiness.hoursOfRoom == 2.5)
+        let status = PresentLessonStatus(state: .idle, readiness: readiness)
+        #expect(try PresentCodec.decodeReply(PresentCodec.encode(.lesson(status))) == .lesson(status))
+
+        let older = PresentLessonStatus(state: .idle)
+        guard case .lesson(let decoded) = try PresentCodec.decodeReply(PresentCodec.encode(.lesson(older))) else {
+            Issue.record("not a lesson reply")
+            return
+        }
+        #expect(decoded.readiness == nil)
+
+        #expect(PresentLessonReadiness(preferredMic: nil, hasBuiltInMic: false, micAccess: .off, freeBytes: nil,
+                                       bytesPerHour: hour).hoursOfRoom == nil)
+        #expect(PresentLessonReadiness(preferredMic: nil, hasBuiltInMic: false, micAccess: .off, freeBytes: -5,
+                                       bytesPerHour: 0).hoursOfRoom == 0)
+    }
+
     @Test func theDocumentTravelsWithItsFrameAndACommandOncePerLink() throws {
         var encoder = PresentEncoder()
         _ = encoder.open(now: 0)
