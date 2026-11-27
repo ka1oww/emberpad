@@ -266,6 +266,34 @@ final class InkKeepsEveryStrokeTests: XCTestCase {
         Self.assertOneUndoStepPerStroke(canvas, undo, count: 3, "steps made after the watch's wait")
     }
 
+    /// EP180: on a starved run loop PencilKit can make the empty steps for strokes a landing put back only after the
+    /// next landing, which no longer counts them (EP146), and past the watch's wait: two stayed on top and two taps of
+    /// undo did nothing (122 steps for 120 strokes on CI, each turn 2 ms slower on a 1500-stroke page). The watch goes
+    /// on for them too, and drops each as it comes.
+    func testStepsPencilKitMakesForStrokesPutBackAfterTheNextLandingAreDropped() async throws {
+        let (controller, session) = try await PenFeelTests.makeController()
+        let canvas = try PenFeelTests.canvas(controller, session)
+        controller.focus(canvas)
+        let undo = Self.pencilKitUndo(for: controller)
+        let first = Self.liveStroke(y: 100, at: 0)
+        Self.pencilKitStep(undo, on: canvas, removing: [first])
+        Self.commit(first, on: canvas, controller)
+        for n in 0..<2 { try Self.throwAway(n, on: canvas, controller) }
+        await InkSettle.settle()
+        XCTAssertEqual(controller.emptyInkStepsOwed, 2, "PencilKit has not made its steps yet")
+        let next = Self.liveStroke(y: 160, at: 1)
+        Self.pencilKitStep(undo, on: canvas, removing: [next])
+        Self.commit(next, on: canvas, controller)
+        await InkSettle.settle()
+        XCTAssertEqual(controller.emptyInkStepsOwed, 0, "the next landing no longer counts them")
+        try await Self.waitPastTheLateStepWait()
+        for _ in 0..<2 { Self.pencilKitStep(undo, on: canvas, removing: []) }
+        await InkSettle.settle()
+        XCTAssertFalse(undo.canRedo, "the dropped steps leave no redo behind")
+        XCTAssertEqual(session.drawing(on: 0).strokes.count, 4, "every stroke is saved")
+        Self.assertOneUndoStepPerStroke(canvas, undo, count: 4, "steps made after the next landing")
+    }
+
     /// EP168: past its wait the watch never tries (undoes and redoes) a step for new ink, nor takes one that is not
     /// ink: a highlight written on the page ends it, and so does a step that changes no page, as a search field's
     /// typing does, sharing the window's undo stack.
