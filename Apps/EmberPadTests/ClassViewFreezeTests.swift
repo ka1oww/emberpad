@@ -196,7 +196,7 @@ final class ClassViewFreezeTests: XCTestCase {
 
         state.setFrozen(false)
         try await waitUntil { mac.host.current.presented == PresentedView(screen: .teacherCopyPrivate) }
-        XCTAssertEqual(LessonPicture.choice(for: mac.host.current), .hold, "a Teacher copy is never recorded (EP129)")
+        XCTAssertEqual(LessonPicture.choice(for: mac.host.current), .hold, "a Teacher copy not flipped to is never recorded (EP129)")
         XCTAssertEqual(picture.next(mac.host.current)?.presented, frozen, "the last Student frame is held")
         XCTAssertEqual(mac.host.current.document, PresentLessonDocument(teacher.record))
     }

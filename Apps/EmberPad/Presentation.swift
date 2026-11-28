@@ -35,7 +35,7 @@ struct StudentPageSnapshot {
     private(set) var slices: [StudentPageSlice]
     var documentID: UUID { document.id }
     /// EP177: whose pages these are. A Teacher copy's reach the class only through the teacher's flip, and are marked
-    /// as the teacher's, so a lesson recording holds them back.
+    /// as the teacher's, so a lesson recording knows it was flipped to on purpose (EP181).
     var role: DocumentRole { document.role }
 
     /// `flip` is the teacher's flip of the worksheet to its Teacher copy, if on (EP177): without it, a Teacher copy's

@@ -60,7 +60,7 @@ struct PresentTests {
 
     // MARK: The Teacher copy shown to the class (EP130)
 
-    /// A page says whose it is on the wire, every time, so a recorder on the Mac can hold back the Teacher copy; a
+    /// A page says whose it is on the wire, every time, so a recorder on the Mac knows a Teacher copy was shown on purpose; a
     /// page from an iPad before EP130 has no role and reads as the Student copy, which is all it could show.
     @Test func everyPageCarriesItsRoleAndAnOlderPageReadsAsStudent() throws {
         let worksheet = FakeWorksheet()

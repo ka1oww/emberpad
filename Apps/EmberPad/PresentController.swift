@@ -652,7 +652,7 @@ struct PresentLessonRows: View {
                 }
             } footer: {
                 if present.macRecords {
-                    Text("Your Mac records the presentation and the BOYA microphone. Teacher copies are never recorded.")
+                    Text("Your Mac records the presentation and the BOYA microphone. A Teacher copy is recorded only when you flip to it.")
                 }
             }
         }

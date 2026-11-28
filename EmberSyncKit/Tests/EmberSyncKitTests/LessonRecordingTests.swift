@@ -161,7 +161,8 @@ struct LessonRecordingTests {
 
     // MARK: Picture
 
-    @Test func theRecordingNeverShowsATeacherCopyAndHoldsTheLastStudentFrame() throws {
+    /// EP181: a Teacher copy the teacher flipped the class onto is recorded; any other Teacher copy page is not.
+    @Test func theRecordingShowsAFlippedToTeacherCopyAndHoldsOverAnyOther() throws {
         let host = PresentHost()
         let iPad = ReplyLog(version: WireProtocol.lessonVersion)
         var seq: UInt64 = 0
@@ -193,7 +194,7 @@ struct LessonRecordingTests {
         #expect(picture.next(host.current)?.frame?.view == host.current.frame?.view)
         let studentFrame = host.current.frame
 
-        // A Teacher copy's page on the projector (a later iPad may show one): the recording holds the Student frame.
+        // A Teacher copy's page not flipped to (unmarked): the recording holds the Student frame.
         let teacher = FakeWorksheet()
         var swap = PresentUpdate(seq: 0)
         swap.frame = PresentFrame(view: teacher.view(page: 0), session: teacher.session, pages: snapshot.frame!.pages)
@@ -224,17 +225,32 @@ struct LessonRecordingTests {
         try send(library)
         #expect(picture.next(host.current) == nil)
 
-        // The class swapped onto the Teacher copy (EP130): a page marked `role == .teacher` is held even when its
-        // document is one the iPad named as a Student copy.
-        var marked = student.view(page: 0)
+        // The teacher flips the class onto the Teacher copy (EP177): its pages come marked `role == .teacher`, and the
+        // worksheet is named with the role `teacher`. The class sees it on purpose, so the recording shows it too.
+        var marked = teacher.view(page: 0)
         if case .page(var page) = marked.screen { page.role = .teacher; marked.screen = .page(page) }
+        var flip = PresentUpdate(seq: 0)
+        flip.frame = PresentFrame(view: marked, session: teacher.session, pages: snapshot.frame!.pages)
+        var flippedDocument = try #require(snapshot.document?.document)
+        flippedDocument.role = .teacher
+        flip.document = PresentDocumentChange(document: flippedDocument)
+        try send(flip)
+        #expect(LessonPicture.choice(for: host.current) == .live)
+        let teacherFrame = host.current.frame
+        #expect(picture.next(host.current)?.frame == teacherFrame)
+        #expect(teacherFrame != studentFrame)
+
+        // The private placeholder after it holds the Teacher copy page the class last saw, as the projector would.
+        try send(placeholder)
+        #expect(picture.next(host.current)?.frame == teacherFrame)
+
+        // EP130's swap: a marked page while the iPad still names the Student copy is recorded too.
         var reveal = PresentUpdate(seq: 0)
         reveal.frame = PresentFrame(view: marked, session: UUID(), pages: snapshot.frame!.pages)
         reveal.document = snapshot.document
         try send(reveal)
         #expect(host.current.document?.role == .student)
-        #expect(LessonPicture.choice(for: host.current) == .hold)
-        #expect(picture.next(host.current)?.frame == studentFrame)
+        #expect(LessonPicture.choice(for: host.current) == .live)
 
         // Back on the Student copy: live again.
         var back = PresentUpdate(seq: 0)
@@ -244,9 +260,9 @@ struct LessonRecordingTests {
         #expect(LessonPicture.choice(for: host.current) == .live)
     }
 
-    /// An iPad on a version-4 link names no documents, so its pages are trusted, except one marked as the Teacher
-    /// copy's: an EP130 iPad that swaps the class onto the Teacher copy marks those pages, whatever the link.
-    @Test func aTeacherCopyPageIsHeldOnAnOlderLinkToo() throws {
+    /// An iPad on a version-4 link names no documents, so its pages are trusted, and one marked as the Teacher copy's
+    /// is one an EP130 iPad swapped the class onto on purpose: it is recorded too (EP181).
+    @Test func aTeacherCopyPageSwappedInIsRecordedOnAnOlderLinkToo() throws {
         let host = PresentHost()
         let iPad = ReplyLog(version: WireProtocol.presentVersion)
         var seq: UInt64 = 0
@@ -274,8 +290,8 @@ struct LessonRecordingTests {
         var reveal = PresentUpdate(seq: 0)
         reveal.frame = PresentFrame(view: marked, session: UUID(), pages: [])
         try send(reveal)
-        #expect(LessonPicture.choice(for: host.current) == .hold)
-        #expect(picture.next(host.current)?.frame == studentFrame)
+        #expect(LessonPicture.choice(for: host.current) == .live)
+        #expect(picture.next(host.current)?.frame != studentFrame)
     }
 
     /// While the class sees a worksheet's Teacher copy, `lesson.json` lists it apart from the Student copy: the same id,
