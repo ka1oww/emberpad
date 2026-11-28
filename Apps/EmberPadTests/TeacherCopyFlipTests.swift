@@ -180,6 +180,27 @@ final class TeacherCopyFlipTests: XCTestCase {
         try await close(library, ids)
     }
 
+    /// EP190: first responder, which keeps undo on the page, ends on the copy shown each way, and never stays with the copy
+    /// under, now that the copy leaving gives it up only after the one taking over has taken it.
+    func testFirstResponderEndsOnTheCopyShown() async throws {
+        let (library, ids) = try await makePairedLibrary()
+        let (flip, chrome, _, _) = try await openEditor(library, ids.student)
+        try await show(page: 1, chrome)
+        let student = try XCTUnwrap(flip.studentRenderer as? PDFOverlayPageController)
+        let teacher = try XCTUnwrap(flip.teacherRenderer as? PDFOverlayPageController)
+        let holds = { (copy: PDFOverlayPageController) in copy.canvases.values.contains { $0.isFirstResponder } }
+        await waitFor { teacher.flipPlace?.page == 2 && holds(student) }
+        XCTAssertTrue(holds(student), "the worksheet's page has first responder")
+        for (leaving, taking) in [(student, teacher), (teacher, student)] {
+            flip.flip()
+            await waitFor { holds(taking) && !holds(leaving) }
+            await pause(0.3)
+            XCTAssertTrue(holds(taking), "the copy shown has first responder")
+            XCTAssertFalse(holds(leaving), "the copy under has none")
+        }
+        try await close(library, ids)
+    }
+
     /// The Teacher copy takes ink like any page. Its ink is its own: the worksheet gets none, each copy undoes only its
     /// own strokes, and the Teacher copy still has its ink when the library is opened again after a relaunch.
     func testTheTeacherCopyTakesInkThatIsItsOwnAndKeptAcrossARelaunch() async throws {
