@@ -7,17 +7,18 @@ import Foundation
 
 // MARK: - Picture
 
-/// What the recording shows. It follows Present on Mac, with one rule the live projector does not have: the recording
-/// never shows a Teacher copy. A page is recorded only when the link has named its document as a Student copy; any
-/// other page (a Teacher copy, or a document the Mac was not told about) holds the last Student frame instead, while
-/// the audio carries on. Without one yet, the neutral card shows: the Ember star on black, as the projector shows the
-/// library. The rule is keyed on each frame's document and its role, never on the projector showing only Student
-/// copies, so it holds when the projector is allowed to show a Teacher copy.
+/// What the recording shows. It follows Present on Mac: what the class screen showed is what the recording shows.
+/// A Teacher copy is recorded only when the teacher flipped the worksheet to it on purpose (EP181), which the iPad marks
+/// on each of its pages (`PresentedView.Page.role == .teacher`). Any other page is recorded only when the link has
+/// named its document as a Student copy. Anything else (a Teacher copy that was not flipped to, a document the Mac was
+/// not told about, Paused, or the private placeholder) holds the last frame recorded instead, while the audio carries
+/// on. Without one yet, the neutral card shows: the Ember star on black, as the projector shows the library. The rule
+/// is keyed on each frame, never on what the projector may show.
 public struct LessonPicture: Sendable {
     public enum Choice: Equatable, Sendable {
         /// Record this frame.
         case live
-        /// Keep recording the last Student frame (or the card when there is none).
+        /// Keep recording the last frame recorded (or the card when there is none).
         case hold
         /// The neutral card.
         case card
@@ -34,9 +35,9 @@ public struct LessonPicture: Sendable {
         case .idle: return .card
         case .paused, .teacherCopyPrivate: return .hold
         case .page(let page):
-            // A page marked as the Teacher copy's (EP130: the teacher swapped the class onto it) is never recorded,
-            // whatever the link version or the document the iPad named.
-            if page.role == .teacher { return .hold }
+            // A page marked as the Teacher copy's is one the teacher flipped the class onto (EP177, or EP130's swap):
+            // the class saw it on purpose, so it is recorded (EP181), whatever the link version or the document named.
+            if page.role == .teacher { return .live }
             // An older iPad (version 4) names no documents; before EP130 it put only Student copies on a page, and
             // from EP130 it marks a Teacher copy page as one (above).
             guard scene.namesDocuments else { return .live }

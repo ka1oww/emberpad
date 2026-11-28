@@ -62,7 +62,7 @@ extension StudentPicture {
                     .init(pageIndex: $0.place, from: $0.from, to: $0.to, opacity: $0.opacity)
                 },
                 // EP177: a Teacher copy the teacher flipped the worksheet to is marked as the teacher's, so a lesson
-                // recording holds it back.
+                // recording knows it was shown on purpose and keeps it (EP181).
                 role: snapshot.role == .teacher ? .teacher : .student))), strokes.filter { shown.contains($0.pageIndex) })
         }
     }

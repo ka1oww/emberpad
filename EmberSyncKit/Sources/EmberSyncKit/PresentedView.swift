@@ -12,8 +12,8 @@ import Foundation
 /// (EP177; EP130 swapped only the class's view), when a page arrives marked `role == .teacher`.
 public struct PresentedView: Equatable, Codable, Sendable {
     /// Whose pages a `.page` shows (EP130). The class sees the Student copy unless the teacher flips the worksheet to
-    /// its Teacher copy (EP177). Anything that keeps or passes frames on (a lesson recording) must hold back `.teacher` pages:
-    /// `showsTeacherCopy` says whether this view is one.
+    /// its Teacher copy (EP177). Only a `.teacher` page is a Teacher copy the teacher showed on purpose, which a lesson
+    /// recording keeps (EP181): `showsTeacherCopy` says whether this view is one.
     public enum Role: String, Equatable, Codable, Sendable {
         case student, teacher
     }
@@ -152,7 +152,7 @@ public struct PresentedView: Equatable, Codable, Sendable {
 
     public init(screen: Screen) { self.screen = screen }
 
-    /// True when this view shows the Teacher copy's pages to the class (EP130). A lesson recording holds these back.
+    /// True when this view shows the Teacher copy's pages to the class (EP130), which the teacher flipped to on purpose.
     public var showsTeacherCopy: Bool {
         if case .page(let page) = screen { page.role == .teacher } else { false }
     }

@@ -83,9 +83,10 @@ final class LessonRecorderTests: XCTestCase {
     // MARK: Picture, files and record
 
     /// The whole lesson: started from the iPad, a Student copy shown, the Mac's window left (the recording goes on),
-    /// a Teacher copy put on a page (it is never recorded: the last Student frame holds), the Student copy again,
-    /// ended from the iPad. Every frame of the video is checked for the Teacher copy's red paper.
-    func testRecordsTheStudentCopyAndNeverTheTeacherCopy() async throws {
+    /// a Teacher copy put on a page without a flip (not recorded: the last Student frame holds), the Student copy, the
+    /// class flipped onto the Teacher copy (recorded, EP181), the Student copy again, ended from the iPad. Every frame
+    /// of the video is checked for the Teacher copy's red paper.
+    func testRecordsTheStudentCopyAndATeacherCopyOnlyWhenFlippedTo() async throws {
         let microphones = FakeMicrophones(available: [FakeMicrophones.boya, FakeMicrophones.builtIn])
         let (model, iPad, window) = presenting(microphones)
         let lesson = model.lesson
@@ -109,14 +110,15 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertTrue(lesson.isRecording)
         try await pause(0.8)
 
-        // A Teacher copy on a page, as the projector may show it (EP130): the recording holds the Student frame.
+        // A Teacher copy on a page without a flip: the recording holds the Student frame.
         iPad.show(.teacher)
         try await pause(1.5)
         iPad.show(.student)
         try await pause(1.2)
 
         // The teacher swaps the class onto the Teacher copy (EP130): its pages come marked as the teacher's, under a
-        // reveal of their own, while the iPad still names the Student copy. The recording holds the Student frame.
+        // reveal of their own, while the iPad still names the Student copy. The class sees it on purpose, so the
+        // recording shows it too (EP181).
         iPad.revealTeacherCopy()
         try await pause(1.5)
         iPad.show(.student)
@@ -148,7 +150,7 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertTrue(record.audioWarnings.isEmpty)
         XCTAssertTrue(record.documents.allSatisfy { $0.ranges.allSatisfy { $0.to != nil } })
 
-        // lesson.mp4: both tracks, 48 kHz audio, the length of the lesson; no frame shows the Teacher copy.
+        // lesson.mp4: both tracks, 48 kHz audio, the length of the lesson; the Teacher copy shows only while flipped to.
         let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
         let duration = try await asset.load(.duration).seconds
         XCTAssertGreaterThan(duration, 6.9)
@@ -161,8 +163,13 @@ final class LessonRecorderTests: XCTestCase {
         XCTAssertGreaterThan(audioLength, duration - 1)
         let frames = try await sampleFrames(asset, every: 0.1, duration: duration)
         XCTAssertGreaterThan(frames.count, 30)
-        let red = frames.filter { $0.redShare > 0.05 }
-        XCTAssertTrue(red.isEmpty, "Teacher copy recorded at \(red.map(\.time))")
+        let red = frames.filter { $0.redShare > 0.05 }.map(\.time)
+        // The flip came 3.5 s into the lesson after an unflipped Teacher copy and lasted 1.5 s. Red frames in one run, no
+        // earlier than the flip and no longer than it, show the unflipped Teacher copy was never recorded.
+        XCTAssertGreaterThanOrEqual(red.count, 5, "the flipped-to Teacher copy was recorded")
+        XCTAssertLessThanOrEqual(red.count, 22, "only the flipped-to Teacher copy was recorded: \(red)")
+        XCTAssertGreaterThan(red.first ?? 0, 3.0, "a Teacher copy before the flip was recorded: \(red)")
+        XCTAssertTrue(zip(red, red.dropFirst()).allSatisfy { $1 - $0 < 0.15 }, "the Teacher copy was recorded twice: \(red)")
         XCTAssertGreaterThan(frames.filter { $0.whiteShare > 0.3 }.count, frames.count / 2, "the Student copy was recorded")
     }
 
@@ -422,7 +429,7 @@ final class LessonRecorderTests: XCTestCase {
         try await waitUntil { model.lesson.status.state == .recording }
         let folder = try XCTUnwrap(model.lesson.folder)
         try await pause(1)
-        // An EP130 iPad on a version-4 link marks a swapped-in Teacher copy page: it is held, never recorded.
+        // An EP130 iPad on a version-4 link marks a swapped-in Teacher copy page: the class sees it, so it is recorded.
         iPad.revealTeacherCopy()
         try await pause(1.2)
         await model.lesson.finish()
@@ -432,7 +439,7 @@ final class LessonRecorderTests: XCTestCase {
         let asset = AVURLAsset(url: folder.appendingPathComponent("lesson.mp4"))
         let frames = try await sampleFrames(asset, every: 0.2, duration: try await asset.load(.duration).seconds)
         XCTAssertTrue(frames.contains { $0.whiteShare > 0.3 }, "a version-4 page is a Student copy and is recorded")
-        XCTAssertTrue(frames.allSatisfy { $0.redShare <= 0.05 }, "a page marked as the Teacher copy's is never recorded")
+        XCTAssertTrue(frames.contains { $0.redShare > 0.05 }, "a Teacher copy page swapped in on purpose is recorded")
     }
 
     // MARK: Reliability (EP134)

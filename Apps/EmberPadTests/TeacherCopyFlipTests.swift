@@ -208,7 +208,7 @@ final class TeacherCopyFlipTests: XCTestCase {
         XCTAssertTrue((0..<worksheet.pdf.pageCount).allSatisfy { worksheet.drawing(on: $0).strokes.isEmpty },
                       "the worksheet gets none of it")
 
-        // The class sees the Teacher copy with its ink, marked as the teacher's so a lesson recording holds it back.
+        // The class sees the Teacher copy with its ink, marked as the teacher's, so a lesson recording keeps it (EP181).
         await waitFor {
             guard case .page(let page) = presentation.student.presented.screen else { return false }
             return page.role == .teacher && page.pages.contains { $0.inkRevision > 0 }

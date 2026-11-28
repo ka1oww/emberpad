@@ -15,7 +15,7 @@ import SwiftUI
 //
 // The picture is drawn by a second, offscreen `PresentCanvasView` from the same PRESENT frames as the projector, never
 // captured from the screen, so it holds only worksheet pages and ink. It follows `LessonPicture`: a Teacher copy is
-// never recorded (the last Student frame is held instead), even if the projector shows one. Leaving the presentation
+// recorded only when the teacher flipped to it (EP181); otherwise the last frame recorded is held. Leaving the presentation
 // on the Mac, the iPad turning Present off or the link dropping never stops a recording; only End lesson does, or
 // quitting the Companion, which finishes the file first.
 //
@@ -969,7 +969,7 @@ final class CompanionLessonModel: ObservableObject {
 
     /// The document the class sees, for `lesson.json`: the one the iPad named, or, while the teacher has swapped the
     /// class onto that worksheet's Teacher copy (EP130), its Teacher copy, listed under the worksheet's id with the
-    /// role `teacher`. Its pages are never recorded (`LessonPicture`).
+    /// role `teacher`. Its pages are recorded, as the class saw them (`LessonPicture`, EP181).
     static func shownDocument(_ scene: PresentScene) -> PresentLessonDocument? {
         guard var document = scene.document else { return nil }
         if scene.presented?.showsTeacherCopy == true, document.role == .student { document.role = .teacher }
@@ -1373,7 +1373,7 @@ struct CompanionLessonSection: View {
                 }
             case .idle, .failed:
                 // Why it failed is in the warning row at the top of the window (EP139).
-                Text("Records the presentation and the \(LessonMicrophone.preferredName) microphone. Teacher copies are never recorded.")
+                Text("Records the presentation and the \(LessonMicrophone.preferredName) microphone. A Teacher copy is recorded only when you flip to it.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Button("Start lesson") { model.start() }
             }

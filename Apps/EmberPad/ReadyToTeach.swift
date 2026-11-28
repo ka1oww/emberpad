@@ -287,7 +287,7 @@ struct ReadyToTeachSheet: View {
                 Button { present.startLesson() } label: { Label("Start Lesson", systemImage: "record.circle") }
                     .disabled(present.pendingLesson != nil)
             } footer: {
-                Text("Your Mac records the presentation and the BOYA microphone. Teacher copies are never recorded.")
+                Text("Your Mac records the presentation and the BOYA microphone. A Teacher copy is recorded only when you flip to it.")
             }
         }
     }
