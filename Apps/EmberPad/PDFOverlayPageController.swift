@@ -3059,10 +3059,16 @@ extension PDFOverlayPageController {
             hideEraserCircle()
             holdGuide.removeFromSuperlayer()
             pencilInteraction.isEnabled = false
+            // EP190: one turn later than the copy taking over, whose page takes first responder a turn after its
+            // `setActive(true)`. That moves first responder straight across, and this finds nothing left to give up.
+            // Giving it up first made UIKit hand it to the screen and walk every view for focus twice, the flip's
+            // longest piece of main-thread work.
             if let canvas = activeCanvas, canvas.isFirstResponder {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, !self.isActive, canvas.isFirstResponder else { return }
-                    canvas.resignFirstResponder()
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, !self.isActive, canvas.isFirstResponder else { return }
+                        canvas.resignFirstResponder()
+                    }
                 }
             }
             saveReadingPosition()
